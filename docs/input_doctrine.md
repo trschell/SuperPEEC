@@ -154,7 +154,12 @@ written today still means the same thing after the next refactor.
     when the cell size justifies it: the engine's own
     `recommend_subdivision` at the sweep's highest frequency returns
     k = 1 when the mesh already resolves the skin depth, so the
-    default costs nothing where it buys nothing. Auto degrades
+    default costs nothing where it buys nothing. When it does engage
+    with the conduction basis, the default is k = 7: conduction's k
+    is pure quadrature (the mode count is fixed), and k = 7 measured
+    19 points of skin-correction gap better than the generic cap of
+    3 -- at zero additional unknowns, though the stiffer mode system
+    does cost Krylov iterations at the highest frequencies. Auto degrades
     gracefully (to off, with a verbose note) on models where
     subdivision is undefined — anisotropic cells, superconductors,
     mixed conductivities — while `mode = "on"` or an explicit `k`

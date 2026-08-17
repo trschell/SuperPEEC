@@ -145,7 +145,8 @@ The tables:
   overrides, including `skin = { ... }`: the sub-cell skin-effect
   engine on equipotential ports. Its default (`mode = "auto"`,
   `basis = "conduction"`) engages frequency-tracked conduction
-  modes — the measured-best cross-section basis — but only when
+  modes at k = 7 quadrature — the measured-best cross-section
+  basis — but only when
   the cell size fails to resolve the skin depth at the sweep's
   highest frequency, so it costs nothing where it buys nothing;
   `mode = "off"` disables it, and `k`, `f_ref`, `rc_uu`/`rc_cross`

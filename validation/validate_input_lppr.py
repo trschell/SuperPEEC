@@ -301,11 +301,11 @@ def main():
              zhi.imag/(2*np.pi*1e9)))
     # -- the sub-cell skin engine, TOML-exposed (2026-08-17) ----------
     # auto default: conduction basis, engaged only when the cell size
-    # justifies it -- equibar at f_max = 1e9 has dx/delta = 4.8, so
-    # recommend_subdivision picks k = 3 (never 2, the measured-blind
-    # split)
-    check("skin auto engages on equibar (k = 3, conduction)",
-          swe.S.skin_k == 3
+    # justifies it (the engine's recommend_subdivision), at k = 7 --
+    # conduction's k is pure quadrature and k = 3 measured 19 points
+    # of gap worse (57.6% vs 76.2% on this bar at dx/delta = 4.8)
+    check("skin auto engages on equibar (k = 7, conduction)",
+          swe.S.skin_k == 7
           and swe.skin_kwargs['mode_basis'] == 'conduction'
           and abs(swe.S.skin_freq - 1e9) < 1,
           'k=%d f_ref %.3g' % (swe.S.skin_k, swe.S.skin_freq))

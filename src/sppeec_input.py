@@ -751,6 +751,23 @@ class _EquiSweep:
                     if verbose:
                         print('  skin: off (%s)' % why, flush=True)
                     sub = False
+            elif sub == 'auto' and sk['basis'] == 'conduction':
+                # conduction's k is pure quadrature (mode count is
+                # fixed), and the engine's own guidance is k ~ 6-8 to
+                # resolve the exponentials -- the generic
+                # recommend_subdivision cap of 3 exists for bases
+                # whose DOF grow with k and undersells conduction by
+                # ~19 points of gap (measured on equibar at
+                # dx/delta = 4.8: k=3 57.6%, k=7 76.2%). Engagement
+                # is still the engine's own justification rule.
+                from equiterminal import recommend_subdivision
+                fref = (float(sk['f_ref']) if sk['f_ref'] is not None
+                        else max(prob.freqs) if prob.freqs else 0.0)
+                if recommend_subdivision(m.dx, m.uniform_sigma(),
+                                         fref) > 1:
+                    sub = 7
+                else:
+                    sub = False
             self.skin_kwargs = dict(
                 subdivide=sub, mode_basis=sk['basis'],
                 rc_uu=sk['rc_uu'], rc_cross=sk['rc_cross'],
