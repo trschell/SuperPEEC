@@ -12,6 +12,16 @@ occupies the niche of the classic FastHenry/VoxHenry family of
 extractors, unifying their capabilities in one maintained code with a
 declarative input format.
 
+![Top-surface current density of a DBC half-bridge power module at
+1 MHz, with bond wires coloured by their solved chain
+currents](docs/dbc_r4_plan.png)
+
+*A 51-million-cell DBC half-bridge power module at 1 MHz: skin- and
+proximity-driven current crowding on the top copper, with the bond
+wires coloured by their solved chain currents. Solved on a 64 GB
+desktop; figure produced by `studies/dbc_r4_plot.py` from the
+solver's `.vti`/`.vtp` exports.*
+
 ## Features
 
 * **Scalability is the defining feature.** SuperPEEC couples a
