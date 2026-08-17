@@ -640,8 +640,8 @@ class Redistribution:
         #                quadrature: it resolves the exponentials without
         #                adding unknowns, so use k ~ 6-8 with this basis.
         #                Needs ``skin_freq`` -- the shapes depend on the
-        #                skin depth. Until set_frequency exists (planned),
-        #                W is frozen at that one frequency.
+        #                skin depth. ``set_frequency`` retunes W per solve
+        #                point, so skin_freq only seeds the initial state.
         self.skin_freq = None if skin_freq is None else float(skin_freq)
         if self.mode_basis == 'conduction':
             if self.skin_freq is None or self.skin_freq <= 0:

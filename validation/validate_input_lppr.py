@@ -299,25 +299,61 @@ def main():
           'R %.3g->%.3g, L %.4g->%.4g'
           % (zlo.real, zhi.real, zlo.imag/(2*np.pi*1e5),
              zhi.imag/(2*np.pi*1e9)))
-    # equivalence: the TOML route is EXACTLY the direct solver
+    # -- the sub-cell skin engine, TOML-exposed (2026-08-17) ----------
+    # auto default: conduction basis, engaged only when the cell size
+    # justifies it -- equibar at f_max = 1e9 has dx/delta = 4.8, so
+    # recommend_subdivision picks k = 3 (never 2, the measured-blind
+    # split)
+    check("skin auto engages on equibar (k = 3, conduction)",
+          swe.S.skin_k == 3
+          and swe.skin_kwargs['mode_basis'] == 'conduction'
+          and abs(swe.S.skin_freq - 1e9) < 1,
+          'k=%d f_ref %.3g' % (swe.S.skin_k, swe.S.skin_freq))
+    # skin resolves the sub-cell crowding: R(1e9) well above the
+    # unsubdivided value (recommend_subdivision's measured +90%-class
+    # correction at this dx/delta), which mode = "off" reproduces
+    poff = sppeec_input.loads(
+        eqtxt + '\nskin = { mode = "off" }')
+    moff = poff.model()
+    zoff, _ = poff.sweeper(moff, poff.tree(moff)).solve(1e9)
+    check("mode 'off' reproduces the unsubdivided solve",
+          abs(zoff.real - 0.00591384)/0.00591384 < 1e-3,
+          'R %.6g' % zoff.real)
+    check("auto skin raises R(1e9) well above unsubdivided",
+          zhi.real > 1.5*zoff.real,
+          '%.6g vs %.6g (%+.0f%%)'
+          % (zhi.real, zoff.real, 100*(zhi.real/zoff.real - 1)))
+    expect_error("skin.k = 2 rejected (measured-blind split)",
+                 eqtxt + '\nskin = { k = 2 }', 'BLIND')
+    expect_error("skin table without equipotential rejected",
+                 doc(extra='skin = { mode = "on" }'),
+                 'equipotential-terminal path')
+    # equivalence: the TOML route is EXACTLY the direct solver given
+    # the same resolved skin kwargs
     from equiterminal import EquiTerminalSolver
     m2 = pe.model()
     M2 = pe.tree(m2)
     m2.prepare(M2, 1e7)
-    zd, _, _ = EquiTerminalSolver(m2, M2, 0).solve(
+    zd, _, _ = EquiTerminalSolver(m2, M2, 0,
+                                  **swe.skin_kwargs).solve(
         1e7, rtol=pe.rtol, method=pe.method)
     zt, _ = swe.solve(1e7)
     check("TOML equipotential == direct EquiTerminalSolver",
           abs(zt - zd)/abs(zd) < 1e-9,
           'rel %.1e' % (abs(zt - zd)/abs(zd)))
-    # lambda_l + equipotential is the VALIDATED superconductor combo
+    # lambda_l + equipotential is the VALIDATED superconductor combo;
+    # auto skin must degrade GRACEFULLY there (the engine's loud
+    # guard fires only on explicit mode = "on"/k)
     psc2 = sppeec_input.loads(
         bar_doc('lambda_l = 90e-9').replace(
             '[port]', '[port]\nequipotential = true'))
     check("lambda_l + equipotential resolves to LpR",
           psc2.formulation == 'LpR' and psc2.equipotential)
     msc = psc2.model()
-    zsc2, _ = psc2.sweeper(msc, psc2.tree(msc)).solve(1e9)
+    swsc = psc2.sweeper(msc, psc2.tree(msc))
+    check("auto skin degrades gracefully on the superconductor",
+          swsc.S.skin_k == 1)
+    zsc2, _ = swsc.solve(1e9)
     check("equipotential London bar: lossless inductor",
           zsc2.imag > 0 and abs(zsc2.real) < 1e-6*zsc2.imag,
           'Z %.3g%+.3gj' % (zsc2.real, zsc2.imag))

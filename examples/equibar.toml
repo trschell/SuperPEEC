@@ -6,6 +6,10 @@
 # across the 16 terminal faces is an unknown, not a prescribed
 # profile, so terminal crowding at high frequency is solved rather
 # than guessed. The sweep table expands to logspace(1e5, 1e9, 5).
+# The sub-cell skin engine engages automatically at this bar's top
+# frequency (dx/delta = 4.8 at 1 GHz -> k = 3x3 conduction modes,
+# raising R(1e9) ~77% over the unsubdivided solve; add
+# skin = { mode = "off" } under [solve] to compare).
 # Expect R to rise and L to fall through the skin transition
 # (copper delta = 0.21 mm at 1e5 Hz >> the bar, 2.1 um at 1e9 << it).
 

@@ -73,7 +73,8 @@ _SCHEMA = {
     'port': {'p_cells', 'n_cells', 'p_box', 'n_box',
              'p_faces', 'n_faces', 'name', 'equipotential'},
     'solve': {'freq', 'rtol', 'current', 'foot_model', 'basis',
-              'amg_cycles', 'method', 'gram_solver', 'formulation'},
+              'amg_cycles', 'method', 'gram_solver', 'formulation',
+              'skin'},
 }
 
 _FACE = {'+x': (0, 1), '-x': (0, -1), '+y': (1, 1), '-y': (1, -1),
@@ -316,6 +317,64 @@ class Problem:
         if self.gram_solver not in ('geo', 'amg'):
             raise ValueError("solve.gram_solver must be 'geo' or "
                              "'amg', got %r" % (self.gram_solver,))
+
+        # -- sub-cell skin engine (equipotential path only) ----------
+        # Default policy: engage AUTOMATICALLY with the conduction
+        # basis, but only when the cell size justifies it -- the
+        # engine's own recommend_subdivision returns k = 1 (off) when
+        # the mesh already resolves the skin depth at the sweep's
+        # highest frequency, so it costs nothing where it buys
+        # nothing. Deliberately NOT exposed: use_fft, csr_max_gb,
+        # chol_*, split_axis (solver internals).
+        skin = solve.get('skin', {})
+        if not isinstance(skin, dict):
+            raise ValueError("solve.skin is a table, e.g. "
+                             "skin = { mode = \"off\" }")
+        bad = set(skin) - {'mode', 'basis', 'k', 'f_ref', 'rc_uu',
+                           'rc_cross', 'boundary_only'}
+        if bad:
+            raise ValueError("solve.skin: unknown key(s) %s -- "
+                             "allowed: mode, basis, k, f_ref, rc_uu, "
+                             "rc_cross, boundary_only" % sorted(bad))
+        if skin and not self.equipotential:
+            raise ValueError(
+                "solve.skin configures the sub-cell skin engine, "
+                "which lives on the equipotential-terminal path -- "
+                "add equipotential = true to the port (the wire and "
+                "LpPR paths carry their own skin models)")
+        self.skin = dict(
+            mode=str(skin.get('mode', 'auto')),
+            basis=str(skin.get('basis', 'conduction')),
+            k=skin.get('k'),
+            f_ref=skin.get('f_ref'),
+            rc_uu=int(skin.get('rc_uu', 3)),
+            rc_cross=int(skin.get('rc_cross', 4)),
+            boundary_only=bool(skin.get('boundary_only', False)))
+        if self.skin['mode'] not in ('auto', 'on', 'off'):
+            raise ValueError("skin.mode must be 'auto' (engage when "
+                             "the cell size justifies it), 'on' or "
+                             "'off', got %r" % self.skin['mode'])
+        if self.skin['basis'] not in ('conduction', 'linear', 'diff'):
+            raise ValueError("skin.basis must be 'conduction' (the "
+                             "measured best), 'linear' or 'diff', "
+                             "got %r" % self.skin['basis'])
+        if self.skin['k'] is not None:
+            kv = int(self.skin['k'])
+            if kv == 2:
+                raise ValueError(
+                    "skin.k = 2 is BLIND to axially symmetric "
+                    "neighbourhoods (all four quadrants equivalent, "
+                    "cross-couplings cancel exactly -- measured at "
+                    "machine zero); use 3 or higher, odd preferred")
+            if kv < 3:
+                raise ValueError("skin.k must be >= 3 (or omit it "
+                                 "for the automatic choice)")
+            self.skin['k'] = kv
+        if self.skin['f_ref'] is not None \
+                and float(self.skin['f_ref']) <= 0:
+            raise ValueError("skin.f_ref must be > 0")
+        if self.skin['rc_uu'] < 1 or self.skin['rc_cross'] < 1:
+            raise ValueError("skin.rc_uu/rc_cross must be >= 1")
 
     def model(self):
         """Build the VoxelModel (inline grid or .vhr reference)."""
@@ -648,6 +707,24 @@ class _EquiSweep:
     prepare/set_frequency per point, so setup is reused)."""
     formulation = 'LpR'
 
+    @staticmethod
+    def _skin_unsupported(m):
+        """Why auto skin subdivision cannot engage on this model, or
+        None. Mirrors the engine's own loud guards -- auto degrades
+        gracefully where mode = "on" would raise."""
+        import numpy as np
+        d = np.asarray(m.d, dtype=float)
+        if not np.allclose(d, d[0]):
+            return 'anisotropic cells'
+        if getattr(m, 'superconductor', False):
+            return ('superconductor -- the two-fluid z(w) already '
+                    'carries the current profile')
+        try:
+            m.uniform_sigma()
+        except ValueError:
+            return 'mixed conductivities'
+        return None
+
     def __init__(self, prob, m, M, verbose=False):
         from equiterminal import EquiTerminalSolver
         m.prepare(M, prob.freqs[0] if prob.freqs else 1e6)
@@ -657,8 +734,38 @@ class _EquiSweep:
             # equiterminal has no size-evaluated 'auto'; leave its
             # own default ('selected') unless the file names one
             kw['basis'] = prob.solver_basis
+        # sub-cell skin engine: conduction by default, engaged only
+        # when the cell size justifies it (the engine's
+        # recommend_subdivision at the sweep's highest frequency)
+        sk = prob.skin
+        if sk['mode'] == 'off':
+            self.skin_kwargs = dict(subdivide=False)
+        else:
+            sub = sk['k'] if sk['k'] else 'auto'
+            why = self._skin_unsupported(m)
+            if why is not None:
+                if sk['mode'] == 'on' or sk['k']:
+                    # explicit request: let the engine's guards speak
+                    pass
+                else:
+                    if verbose:
+                        print('  skin: off (%s)' % why, flush=True)
+                    sub = False
+            self.skin_kwargs = dict(
+                subdivide=sub, mode_basis=sk['basis'],
+                rc_uu=sk['rc_uu'], rc_cross=sk['rc_cross'],
+                boundary_only=sk['boundary_only'])
+            if sk['f_ref'] is not None:
+                self.skin_kwargs['skin_freq'] = float(sk['f_ref'])
+        kw.update(self.skin_kwargs)
         self.prob = prob
         self.S = EquiTerminalSolver(m, M, 0, verbose=verbose, **kw)
+        if verbose and self.skin_kwargs.get('subdivide') is not False:
+            print('  skin: %s' % (
+                'k=%d, basis=%s, f_ref %.3g Hz'
+                % (self.S.skin_k, sk['basis'], self.S.skin_freq)
+                if self.S.skin_k > 1 else
+                'off (mesh resolves the skin depth)'), flush=True)
         self.sol = None          # no wire solver on this path
         self.efg = self.S.efg
 
