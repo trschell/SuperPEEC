@@ -145,6 +145,31 @@ written today still means the same thing after the next refactor.
     superconductor route) but not with dielectrics (charge needs
     LpPR, whose port is a prescribed injection) or wires.
 
+13. **The sub-cell skin engine is on by default, where it counts**
+    (added 2026-08-17; equipotential path only). `[solve]
+    skin = { ... }` controls the cross-section redistribution modes:
+    `mode = "auto"` (default) engages the engine with the
+    `conduction` basis — the measured-best basis, 93% of the
+    skin-depth correction delivered, geometry-independent — but ONLY
+    when the cell size justifies it: the engine's own
+    `recommend_subdivision` at the sweep's highest frequency returns
+    k = 1 when the mesh already resolves the skin depth, so the
+    default costs nothing where it buys nothing. Auto degrades
+    gracefully (to off, with a verbose note) on models where
+    subdivision is undefined — anisotropic cells, superconductors,
+    mixed conductivities — while `mode = "on"` or an explicit `k`
+    lets the solver's loud guards fire instead. Exposed knobs:
+    `basis` (`conduction`/`linear`/`diff`), `k` (>= 3; k = 2 is
+    rejected — a 2x2 split is provably blind to axially symmetric
+    neighbourhoods), `f_ref` (skin-shape reference frequency;
+    defaults to the sweep maximum, and the shapes retune per solve
+    point regardless), `rc_uu`/`rc_cross` (mode-coupling truncation
+    radii; be generous on round wires), `boundary_only`. Solver
+    internals (FFT toggles, memory guards, factorization modes) are
+    deliberately not exposed. HONEST LIMIT: the engine delivers ~93%
+    of the correction; the residual is staircase voxelization of
+    curved cross-sections, not the mode basis.
+
 ## What v1 deliberately leaves out
 
 * Wire capacitance — wires are chargeless inductors by decision
