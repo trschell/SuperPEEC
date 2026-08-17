@@ -341,6 +341,43 @@ def main():
     check("TOML equipotential == direct EquiTerminalSolver",
           abs(zt - zd)/abs(zd) < 1e-9,
           'rel %.1e' % (abs(zt - zd)/abs(zd)))
+    # boundary_only default: modes only where the physics is. The
+    # referee measurement (2026-08-17): on a WIDE cross-section,
+    # modes-everywhere overshoots the physical skin limit
+    # rho*L/(P*delta) ~2.8x (spurious interior excitation, the 2-D
+    # study's warning confirmed in 3-D); boundary-only lands within
+    # the physical band. Gate both facts.
+    check("default resolves boundary_only = true",
+          swe.skin_kwargs.get('boundary_only') is True)
+    wide = '\n'.join([
+        '[grid]', 'dims = [24, 20, 20]', 'pitch = 10e-6',
+        '[[block]]', 'from = [0, 0, 0]', 'to = [24, 20, 20]',
+        'sigma = 5.8e7',
+        '[port]', 'equipotential = true',
+        'p_faces = [%s]' % ', '.join(
+            '[0, %d, %d, "-x"]' % (y, z)
+            for y in range(20) for z in range(20)),
+        'n_faces = [%s]' % ', '.join(
+            '[23, %d, %d, "+x"]' % (y, z)
+            for y in range(20) for z in range(20)),
+        '[solve]', 'freq = [1e9]'])
+    import equiterminal as eqt
+    delta = eqt.skin_depth(5.8e7, 1e9)
+    r_skin = (24*10e-6)/(5.8e7*(4*20*10e-6)*delta)
+    pw = sppeec_input.loads(wide)
+    mw = pw.model()
+    zw, _ = pw.sweeper(mw, pw.tree(mw)).solve(1e9)
+    check("wide bar: default skin R within the physical band",
+          0.6*r_skin < zw.real < 1.4*r_skin,
+          'R %.4g vs rho*L/(P*delta) %.4g' % (zw.real, r_skin))
+    pv = sppeec_input.loads(
+        wide + '\nskin = { boundary_only = false }')
+    mv = pv.model()
+    zv, _ = pv.sweeper(mv, pv.tree(mv)).solve(1e9)
+    check("volume placement still overshoots (the recorded "
+          "pathology -- if this ever passes the band, re-examine)",
+          zv.real > 2*r_skin, 'R %.4g' % zv.real)
+
     # lambda_l + equipotential is the VALIDATED superconductor combo;
     # auto skin must degrade GRACEFULLY there (the engine's loud
     # guard fires only on explicit mode = "on"/k)

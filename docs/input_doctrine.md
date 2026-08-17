@@ -169,7 +169,15 @@ written today still means the same thing after the next refactor.
     neighbourhoods), `f_ref` (skin-shape reference frequency;
     defaults to the sweep maximum, and the shapes retune per solve
     point regardless), `rc_uu`/`rc_cross` (mode-coupling truncation
-    radii; be generous on round wires), `boundary_only`. Solver
+    radii; be generous on round wires), `boundary_only` (default
+    TRUE: modes live only on filaments with an exposed face in the
+    split plane, which is where the physics is — measured on a
+    20x20-cell bar at dx/delta = 4.8, modes-everywhere overshoots
+    the physical skin limit rho*L/(P*delta) by ~2.8x through
+    spurious interior-mode excitation, while boundary-only lands
+    within ~15%; on few-cell cross-sections the two agree and
+    boundary-only is simply cheaper. Set false only to reproduce
+    the historical volume placement). Solver
     internals (FFT toggles, memory guards, factorization modes) are
     deliberately not exposed. HONEST LIMIT: the engine delivers ~93%
     of the correction; the residual is staircase voxelization of

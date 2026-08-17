@@ -349,7 +349,7 @@ class Problem:
             f_ref=skin.get('f_ref'),
             rc_uu=int(skin.get('rc_uu', 3)),
             rc_cross=int(skin.get('rc_cross', 4)),
-            boundary_only=bool(skin.get('boundary_only', False)))
+            boundary_only=bool(skin.get('boundary_only', True)))
         if self.skin['mode'] not in ('auto', 'on', 'off'):
             raise ValueError("skin.mode must be 'auto' (engage when "
                              "the cell size justifies it), 'on' or "
