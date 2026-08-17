@@ -1,0 +1,12 @@
+Reference copy of the PowerSynth sample design 2D_Case_3.
+
+Source: https://github.com/e3da/PowerSynth2-pkg
+        work/Sample_Designs/2D_Case_3 (+ Part_Lib, Wire_Lib entries)
+Retrieved: 2026-08-11
+License: GPL-3.0 (per the PowerSynth2-pkg repository)
+Authors: E3DA/MSCAD Labs, University of Arkansas (see README.txt for
+the paper this design appears in).
+
+These files are the unmodified source for examples/dbc_halfbridge.toml
+(the SuperPEEC flagship geometry); the conversion notes live in that
+file's header.

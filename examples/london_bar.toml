@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: MIT
+# Superconducting (London) bar -- the smallest lambda_l example. A
+# 12x2x2-cell niobium bar at 200 nm pitch, driven end to end through
+# face ports. sigma is omitted: a pure London block is a lossless
+# kinetic inductor (two-fluid with no normal channel), so expect
+# Re(Z) ~ 0 and Im(Z) = w*(L_geometric + L_kinetic), the kinetic term
+# MU0*lambda^2*l/A. Give sigma alongside lambda_l for a lossy
+# two-fluid superconductor; lambda_l on a block resolves the
+# formulation to LpPR (face port required). NOTE the superfluid
+# shorts DC -- every solve frequency must be > 0.
+
+[grid]
+dims  = [12, 2, 2]
+pitch = 200e-9
+
+[[block]]
+name = "bar"
+from = [0, 0, 0]
+to   = [12, 2, 2]
+lambda_l = 90e-9
+
+[port]
+p_faces = [[0, 0, 0, "-x"], [0, 0, 1, "-x"],
+           [0, 1, 0, "-x"], [0, 1, 1, "-x"]]
+n_faces = [[11, 0, 0, "+x"], [11, 0, 1, "+x"],
+           [11, 1, 0, "+x"], [11, 1, 1, "+x"]]
+
+[solve]
+freq = [1e9]

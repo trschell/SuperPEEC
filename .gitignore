@@ -1,0 +1,31 @@
+# build artifacts (rebuild with: make -f Makefile_multipole)
+*.so
+*.o
+*.mod
+*.pyc
+__pycache__/
+multipole_preprocessed.f
+*module.c
+*-f2pywrappers.f
+
+# solver outputs and test-generated inputs (setups_vhr/*.vhr are
+# curated sources and stay tracked)
+results/
+*.vti
+*.pvd
+*.vtp
+studies/*.vhr
+
+# external references (place checkouts here to enable the
+# corpus-dependent validators; they SKIP cleanly without them)
+VoxHenry/
+FastHenry2/
+pypeec/
+
+# local-only measurement scripts (not part of the distribution)
+profile/
+
+# editor/OS debris
+*.un~
+*.swp
+.DS_Store

@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: MIT
+# Copper bar with an EQUIPOTENTIAL port, swept by a frequency
+# EXPRESSION -- the two features this file exists to exercise
+# together. equipotential = true routes the face-style port to the
+# solved-split terminal (EquiTerminalSolver): the current division
+# across the 16 terminal faces is an unknown, not a prescribed
+# profile, so terminal crowding at high frequency is solved rather
+# than guessed. The sweep table expands to logspace(1e5, 1e9, 5).
+# Expect R to rise and L to fall through the skin transition
+# (copper delta = 0.21 mm at 1e5 Hz >> the bar, 2.1 um at 1e9 << it).
+
+[grid]
+dims  = [24, 4, 4]
+pitch = 10e-6
+
+[[block]]
+name = "bar"
+from = [0, 0, 0]
+to   = [24, 4, 4]
+sigma = 5.8e7
+
+[port]
+equipotential = true
+p_faces = [[0, 0, 0, "-x"], [0, 0, 1, "-x"], [0, 0, 2, "-x"],
+           [0, 0, 3, "-x"], [0, 1, 0, "-x"], [0, 1, 1, "-x"],
+           [0, 1, 2, "-x"], [0, 1, 3, "-x"], [0, 2, 0, "-x"],
+           [0, 2, 1, "-x"], [0, 2, 2, "-x"], [0, 2, 3, "-x"],
+           [0, 3, 0, "-x"], [0, 3, 1, "-x"], [0, 3, 2, "-x"],
+           [0, 3, 3, "-x"]]
+n_faces = [[23, 0, 0, "+x"], [23, 0, 1, "+x"], [23, 0, 2, "+x"],
+           [23, 0, 3, "+x"], [23, 1, 0, "+x"], [23, 1, 1, "+x"],
+           [23, 1, 2, "+x"], [23, 1, 3, "+x"], [23, 2, 0, "+x"],
+           [23, 2, 1, "+x"], [23, 2, 2, "+x"], [23, 2, 3, "+x"],
+           [23, 3, 0, "+x"], [23, 3, 1, "+x"], [23, 3, 2, "+x"],
+           [23, 3, 3, "+x"]]
+
+[solve]
+freq = { from = 1e5, to = 1e9, points = 5 }

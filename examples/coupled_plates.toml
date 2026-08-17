@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: MIT
+# Two plate capacitors on a shared ground plane -- the smallest
+# MULTI-PORT dielectric example. A common bottom plate, a full FR4
+# layer, and two separate top plates; one [[port]] table per port
+# (Z-matrix order = declaration order). Expect a symmetric 2x2 Z:
+# Z11 == Z22 by the mirror geometry, Z12 == Z21 by reciprocity (a
+# SOLVED property here, not an imposed one), and |Z12| well below
+# |Z11| -- the plates couple only through the shared return and
+# fringing.
+
+[grid]
+dims  = [26, 12, 6]
+pitch = 100e-6
+
+[[block]]                       # shared ground plane
+from  = [0, 0, 0]
+to    = [26, 12, 2]
+sigma = 5.8e7
+
+[[block]]                       # FR4 layer
+from  = [0, 0, 2]
+to    = [26, 12, 4]
+epsilon = 4.2
+
+[[block]]                       # top plate 1
+from  = [2, 2, 4]
+to    = [12, 10, 6]
+sigma = 5.8e7
+
+[[block]]                       # top plate 2
+from  = [14, 2, 4]
+to    = [24, 10, 6]
+sigma = 5.8e7
+
+[[port]]
+name = "left"
+p_faces = [[6, 5, 5, "+z"], [6, 6, 5, "+z"],
+           [7, 5, 5, "+z"], [7, 6, 5, "+z"]]
+n_faces = [[6, 5, 0, "-z"], [6, 6, 0, "-z"],
+           [7, 5, 0, "-z"], [7, 6, 0, "-z"]]
+
+[[port]]
+name = "right"
+p_faces = [[18, 5, 5, "+z"], [18, 6, 5, "+z"],
+           [19, 5, 5, "+z"], [19, 6, 5, "+z"]]
+n_faces = [[18, 5, 0, "-z"], [18, 6, 0, "-z"],
+           [19, 5, 0, "-z"], [19, 6, 0, "-z"]]
+
+[solve]
+freq = [1e8]

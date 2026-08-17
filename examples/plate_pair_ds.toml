@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: MIT
+# The plate-pair capacitor with DISPERSIVE FR4: Djordjevic-Sarkar
+# wideband Debye, the causal replacement for a constant loss tangent.
+# epsilon/loss_tangent are the values AT f_ref (the datasheet point);
+# the model supplies eps_r(f) everywhere else -- eps' falls
+# logarithmically with frequency while tan-delta stays near-flat
+# inside (f1, f2), so C(f) declines gently across the sweep and the
+# effective loss tangent read from Re(Z)/|Im(Z)| holds steady.
+# Kramers-Kronig consistency is what a constant loss tangent lacks
+# over a band this wide.
+
+[grid]
+dims  = [12, 12, 6]
+pitch = 100e-6
+
+[[block]]                       # bottom plate
+from  = [0, 0, 0]
+to    = [12, 12, 2]
+sigma = 5.8e7
+
+[[block]]                       # dispersive FR4 gap
+from  = [0, 0, 2]
+to    = [12, 12, 4]
+epsilon = 4.2
+loss_tangent = 0.02
+dispersion = "djordjevic"
+f_ref = 1e8                     # where epsilon/loss_tangent hold
+# f1, f2 default to 1e3 / 1e12 Hz (the fitted band)
+
+[[block]]                       # top plate
+from  = [0, 0, 4]
+to    = [12, 12, 6]
+sigma = 5.8e7
+
+[port]
+p_faces = [[5, 5, 5, "+z"], [5, 6, 5, "+z"],
+           [6, 5, 5, "+z"], [6, 6, 5, "+z"]]
+n_faces = [[5, 5, 0, "-z"], [5, 6, 0, "-z"],
+           [6, 5, 0, "-z"], [6, 6, 0, "-z"]]
+
+[solve]
+freq = { from = 1e6, to = 1e10, points = 5 }

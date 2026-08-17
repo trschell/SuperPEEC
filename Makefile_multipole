@@ -1,0 +1,36 @@
+# Builds the Fortran extension modules. FLAGS MATTER: a plain
+# `f2py -c` build measured 2.5x SLOWER end-to-end than this recipe
+# (-O3 -march=native -funroll-loops); -march=native also means the
+# machine-local byte anchors in validation/run_baseline.sh re-base per
+# machine, which is expected. Requires numpy (meson-backend f2py),
+# gfortran and FFTW3 development headers.
+PY ?= python3
+F77FLAGS = -cpp -O3 -march=native -funroll-loops
+
+all: mp_fortran fmmtop f_setup meshgraph_aux hodlrnat
+
+# optional: the H-LU native solve (hodlr.py falls back to python
+# without it, but validate_hodlr_native requires it)
+hodlrnat:
+	cd src && (gcc -O2 -shared -fPIC hodlr_native.c -o libhodlrnat.so -lopenblas || \
+	  gcc -O2 -shared -fPIC hodlr_native.c -o libhodlrnat.so -l:libopenblas.so.0 || \
+	  gcc -O2 -shared -fPIC hodlr_native.c -o libhodlrnat.so -lblas)
+
+mp_fortran:
+	cd src && FC=gfortran $(PY) -m numpy.f2py -c -m mp_fortran multipole_aux.f \
+	  --f77flags="$(F77FLAGS)" --opt="-O3" -lfftw3
+
+fmmtop:
+	cd src && FC=gfortran $(PY) -m numpy.f2py -c -m FMMtop fmmtop.f \
+	  --f77flags="$(F77FLAGS)" --opt="-O3"
+
+f_setup:
+	cd src && FC=gfortran $(PY) -m numpy.f2py -c -m f_setup f_setup.f \
+	  --f77flags="$(F77FLAGS)" --opt="-O3"
+
+meshgraph_aux:
+	cd src && FC=gfortran $(PY) -m numpy.f2py -c -m meshgraph_aux meshgraph_aux.f \
+	  --f77flags="$(F77FLAGS)" --opt="-O3"
+
+clean:
+	rm -f src/*.so

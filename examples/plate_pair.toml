@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: MIT
+# Parallel-plate capacitor with an FR4 gap -- the smallest dielectric
+# capstone. Two 12x12x2-cell copper plates, a 2-cell FR4 gap, driven
+# top-face to bottom-face at the plate centres.
+#
+# The [[block]] epsilon key marks dielectric cells (applied where the
+# block has no conductor); with any epsilon present the formulation
+# resolves to LpPR automatically and the port must be FACE-style
+# (p_faces/n_faces): the LpPR port is a nodal current injection on
+# conductor faces, not the LpR terminal port.
+#
+# Expected: below resonance the port is a capacitor; the parallel-plate
+# formula eps0*eps_r*A/d gives 0.268 pF, and the solved C sits above it
+# by the fringing field of the 6:1 plate/gap aspect.
+
+[grid]
+dims  = [12, 12, 6]
+pitch = 100e-6
+
+[[block]]                       # bottom plate
+from  = [0, 0, 0]
+to    = [12, 12, 2]
+sigma = 5.8e7
+
+[[block]]                       # FR4 gap
+from  = [0, 0, 2]
+to    = [12, 12, 4]
+epsilon = 4.2
+
+[[block]]                       # top plate
+from  = [0, 0, 4]
+to    = [12, 12, 6]
+sigma = 5.8e7
+
+[port]
+p_faces = [[5, 5, 5, "+z"], [5, 6, 5, "+z"],
+           [6, 5, 5, "+z"], [6, 6, 5, "+z"]]
+n_faces = [[5, 5, 0, "-z"], [5, 6, 0, "-z"],
+           [6, 5, 0, "-z"], [6, 6, 0, "-z"]]
+
+[solve]
+freq = [1e7, 1e8]
