@@ -243,6 +243,54 @@ def main():
               abs(rs - ra)/ra < band,
               '%.4f vs %.4f (rel %.1e)' % (rs, ra, abs(rs - ra)/ra))
 
+    # -- C.2 phase 1: the equipotential path on subpixel models ------
+    def equi_doc(freqs):
+        fp, fn = [], []
+        for i in range(8):
+            for j in range(8):
+                corners = [((i+a)*DX-4e-6)**2 + ((j+b)*DX-4e-6)**2
+                           < R*R for a in (0, 1) for b in (0, 1)]
+                if all(corners):
+                    fp.append('[0, %d, %d, "-x"]' % (i, j))
+                    fn.append('[%d, %d, %d, "+x"]' % (NX-1, i, j))
+        return '\n'.join([
+            '[grid]', 'dims = [%d, 8, 8]' % NX, 'pitch = 1e-6',
+            '[[cylinder]]', 'axis = "x"', 'center = [4e-6, 4e-6]',
+            'radius = 3e-6', 'sigma = 5.8e7',
+            '[port]', 'equipotential = true',
+            'p_faces = [%s]' % ', '.join(fp),
+            'n_faces = [%s]' % ', '.join(fn),
+            '[solve]', 'freq = [%s]' % ', '.join('%g' % f
+                                                 for f in freqs)])
+
+    pe2 = sppeec_input.loads(equi_doc([1e7]))
+    me2 = pe2.model()
+    swe2 = pe2.sweeper(me2, pe2.tree(me2))
+    ze0, _ = swe2.solve(1e7)
+    check('equipotential runs on the subpixel wire, R near analytic',
+          abs(ze0.real - r_true)/r_true < 0.02,
+          '%+.2f%% (solid-core port constriction)'
+          % (100*(ze0.real/r_true - 1)))
+    zeh, _ = swe2.solve(1.747e10)
+    rs = zeh.real/ze0.real
+    ra = z_int(1.747e10).real/z_int(1e7).real
+    check('equipotential Kelvin ratio at dx/delta 2 (band 4%)',
+          abs(rs - ra)/ra < 0.04, '%.4f vs %.4f' % (rs, ra))
+    # faces on the partial rim must be rejected with the friendly
+    # message
+    rim = equi_doc([1e7]).replace(
+        'p_faces = [', 'p_faces = [[0, 1, 1, "-x"], ', 1)
+    assert rim != equi_doc([1e7])
+    pr = sppeec_input.loads(rim)
+    mr = pr.model()
+    try:
+        pr.sweeper(mr, pr.tree(mr))
+        check('rim port face rejected (full-cell rule)', False,
+              'no exception')
+    except ValueError as exc:
+        check('rim port face rejected (full-cell rule)',
+              'FULL cells' in str(exc), str(exc)[:60])
+
     print('\n%d checks failed' % len(FAIL))
     raise SystemExit(1 if FAIL else 0)
 

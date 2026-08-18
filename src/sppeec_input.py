@@ -826,6 +826,22 @@ class _EquiSweep:
 
     def __init__(self, prob, m, M, verbose=False):
         from equiterminal import EquiTerminalSolver
+        if getattr(m, 'fill_frac', None) is not None:
+            # equipotential terminals on subpixel models need every
+            # port face on a FULL cell: partial rim cells carry
+            # distinct sigma_eff values, and the terminal machinery
+            # wants one port conductivity (and full terminal
+            # cross-sections)
+            bad = []
+            for pname, pf, nf in prob.ports_faces:
+                for (ix, iy, iz, ax, sg) in pf + nf:
+                    if m.fill_frac[ix, iy, iz] < 1.0:
+                        bad.append((ix, iy, iz))
+            if bad:
+                raise ValueError(
+                    "equipotential port faces must sit on FULL cells "
+                    "of a subpixel model (fill == 1) -- move these "
+                    "off the partial rim: %s" % bad[:6])
         m.prepare(M, prob.freqs[0] if prob.freqs else 1e6)
         kw = dict(amg_cycles=prob.amg_cycles,
                   gram_solver=prob.gram_solver)

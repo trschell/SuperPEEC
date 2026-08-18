@@ -226,8 +226,13 @@ written today still means the same thing after the next refactor.
     and is deliberately not wired -- solved-amplitude modes are
     stage C.2's charter, along with transverse-filament and
     cross-orientation corrections. The sub-cell skin engine auto-disables on fill models
-    (mixed effective conductivity), equipotential ports are
-    unsupported there, [[cylinder]] does not combine with [[wire]],
+    (mixed effective conductivity); equipotential ports ARE
+    supported on subpixel models with one rule — every port face on
+    a FULL cell (fill == 1), since partial rim cells carry distinct
+    effective conductivities (measured on the round wire: R within
+    ~1.5% of analytic with a solid-core port, Kelvin skin ratios
+    equivalent to the LpPR path); [[cylinder]] does not combine
+    with [[wire]],
     primitives must not overlap other conductors, slivers below
     fill 1e-3 are dropped, and port faces belong on solid-ish
     cells.

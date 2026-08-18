@@ -1462,6 +1462,12 @@ class EquiTerminalSolver:
         self.C = None
         self.coupler = None
         self.fmm_reason = None
+        # subpixel stage B: attach the sparse partial-cell dL (the
+        # C.2 mode machinery will ride the same tables)
+        self.dL_near = None
+        if getattr(model, 'subpixel', None):
+            from subpixel import build_dL
+            self.dL_near = build_dL(model, M)
         if fmm:
             try:
                 if M.numlevels < 2:
@@ -2006,6 +2012,11 @@ class EquiTerminalSolver:
             self.M.traverseRL(extra=c)
             out_f = np.array(self.whole[:efg])
             out_t = self.term.R*i_t + jw*(self.Ltt @ i_t) + jw*c.out_t
+        if getattr(self, 'dL_near', None) is not None:
+            # subpixel stage B on the equipotential path: sparse
+            # partial-cell inductance correction (real dL, scaled jw
+            # here); far field stays pure Toeplitz
+            out_f += jw*(self.dL_near @ np.asarray(i_f))
         if not self.nu:
             return np.concatenate([out_f, out_t])
         # Redistribution modes. The AGGREGATE current already went
