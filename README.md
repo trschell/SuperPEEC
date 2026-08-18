@@ -43,6 +43,10 @@ solver's `.vti`/`.vtp` exports.*
   the causal Djordjevic–Sarkar wideband-Debye dispersion model;
   two-fluid London superconductors (kinetic inductance, VoxHenry's
   material law).
+* Subpixel geometry: round conductors (`[[cylinder]]`) voxelized
+  with per-cell fill fractions — partial-cell resistance is exact,
+  collapsing the staircase DC error (measured 11.6% -> ~1% on a
+  3-cell-radius wire).
 * Bond wires as polylines: validated round-wire cross-section model,
   wire–wire and wire–plane proximity, and a lattice-Green's-function
   calibrated foot (contact) resistance.

@@ -159,6 +159,12 @@ class VoxelModel:
         self.d = 1e-6
         self.dims = None
         self.sigma = None
+        # per-cell fill fraction (subpixel program): None = all-full;
+        # else 1.0 on full cells, the covered fraction on partial
+        # (cylinder-boundary) cells. Resistance carries it via
+        # sigma_eff = sigma*fill; Lp is full-cell until stage B.
+        # (named fill_frac: .fill() is the percent-occupancy METHOD)
+        self.fill_frac = None
         self.lambdaL = None
         self.freq = np.zeros((0,))
         # dispersive dielectric blocks: (lo, hi, eps_inf, deps, f1,

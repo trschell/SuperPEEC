@@ -64,6 +64,8 @@ MU0 = 4e-7*np.pi
 
 _SCHEMA = {
     'grid': {'dims', 'pitch'},
+    'cylinder': {'axis', 'center', 'radius', 'from', 'to',
+                 'from_m', 'to_m', 'sigma', 'name'},
     'block': {'from', 'to', 'from_m', 'to_m', 'sigma', 'name',
               'epsilon', 'loss_tangent', 'lambda_l',
               'dispersion', 'f_ref', 'f1', 'f2'},
@@ -79,7 +81,8 @@ _SCHEMA = {
 
 _FACE = {'+x': (0, 1), '-x': (0, -1), '+y': (1, 1), '-y': (1, -1),
          '+z': (2, 1), '-z': (2, -1)}
-_TOP = {'grid', 'block', 'model', 'wire', 'port', 'solve'}
+_TOP = {'grid', 'block', 'model', 'wire', 'port',
+        'cylinder', 'solve'}
 
 
 def _reject_unknown(doc):
@@ -113,6 +116,28 @@ class Problem:
                              "or [model]")
         self._doc = doc
         self.wire_specs = doc.get('wire', [])
+        # [[cylinder]]: the first SUBPIXEL primitive (2026-08-18) --
+        # a round conductor voxelized WITH per-cell fill fractions,
+        # folded to sigma_eff = sigma*fill so the per-cell-
+        # conductivity machinery carries the partial-cell resistance
+        # exactly. v1 scope: conductors only; Lp stays full-cell
+        # (stage B of the subpixel program owns the inductance
+        # correction).
+        for k, cy in enumerate(doc.get('cylinder', [])):
+            for req in ('axis', 'center', 'radius', 'sigma'):
+                if req not in cy:
+                    raise ValueError("cylinder %d is missing %r"
+                                     % (k, req))
+            if str(cy['axis']) not in ('x', 'y', 'z'):
+                raise ValueError("cylinder %d: axis must be 'x', 'y' "
+                                 "or 'z'" % k)
+            if float(cy['radius']) <= 0:
+                raise ValueError("cylinder %d: radius must be > 0" % k)
+            if len(cy['center']) != 2:
+                raise ValueError(
+                    "cylinder %d: center is the TWO transverse "
+                    "coordinates (metres), in axis order with the "
+                    "cylinder axis removed" % k)
         for k, w in enumerate(self.wire_specs):
             for req in ('points', 'radius', 'sigma'):
                 if req not in w:
@@ -502,6 +527,54 @@ class Problem:
                                fl, fh))
                     disp_blocks.append((lo, hi, float(eps_inf),
                                         float(deps), fl, fh))
+        for k, cy in enumerate(self._doc.get('cylinder', [])):
+            axis = 'xyz'.index(str(cy['axis']))
+            t1, t2 = [ax for ax in range(3) if ax != axis]
+            if ('from' in cy) or ('to' in cy):
+                a0 = int(cy.get('from', 0))
+                a1 = int(cy.get('to', m.dims[axis]))
+            elif ('from_m' in cy) or ('to_m' in cy):
+                a0 = int(round(float(cy.get('from_m', 0.0))
+                               / m.d[axis]))
+                a1 = int(round(float(cy.get('to_m',
+                                            m.dims[axis]*m.d[axis]))
+                               / m.d[axis]))
+            else:
+                a0, a1 = 0, m.dims[axis]
+            if not (0 <= a0 < a1 <= m.dims[axis]):
+                raise ValueError("cylinder %d: axial span [%d, %d) "
+                                 "does not fit the grid" % (k, a0, a1))
+            c1, c2 = float(cy['center'][0]), float(cy['center'][1])
+            R = float(cy['radius'])
+            sig = float(cy['sigma'])
+            # per-cell fill fraction by sub-sampling (s^2 points per
+            # transverse cell; error ~ chord/s of a cell, well under
+            # the 1e-3 sliver threshold below)
+            s = 64
+            o = (np.arange(s) + 0.5)/s
+            p1, p2 = float(m.d[t1]), float(m.d[t2])
+            x = (np.arange(m.dims[t1])[:, None] + o[None, :])*p1 - c1
+            y = (np.arange(m.dims[t2])[:, None] + o[None, :])*p2 - c2
+            inside = (x[:, None, :, None]**2
+                      + y[None, :, None, :]**2) < R*R
+            fill = inside.mean(axis=(2, 3))
+            if m.fill_frac is None:
+                m.fill_frac = (m.sigma != 0).astype(np.float32)
+            span = [slice(None)]*3
+            span[axis] = slice(a0, a1)
+            for i1, i2 in zip(*np.nonzero(fill >= 1e-3)):
+                pos = [None]*3
+                pos[axis] = slice(a0, a1)
+                pos[t1], pos[t2] = int(i1), int(i2)
+                pos = tuple(pos)
+                if np.any(m.sigma[pos] != 0.0):
+                    raise ValueError(
+                        "cylinder %d overlaps existing conductor "
+                        "cells -- subpixel v1 keeps primitives "
+                        "disjoint (transverse cell %d,%d)"
+                        % (k, i1, i2))
+                m.sigma[pos] = np.float32(sig*fill[i1, i2])
+                m.fill_frac[pos] = np.float32(fill[i1, i2])
         if eps_blocks:
             cplx = any(np.iscomplexobj(ec) for _, _, ec in eps_blocks)
             eps = np.ones(m.dims,

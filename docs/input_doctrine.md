@@ -194,6 +194,24 @@ written today still means the same thing after the next refactor.
     of the correction; the residual is staircase voxelization of
     curved cross-sections, not the mode basis.
 
+14. **Subpixel geometry starts with `[[cylinder]]`** (added
+    2026-08-18; stage A of the subpixel program). A round conductor
+    is declared by `axis`, `center` (the two transverse coordinates,
+    metres), `radius`, `sigma` and an optional axial span
+    (`from`/`to` cells or `from_m`/`to_m`). Boundary cells get a
+    computed FILL FRACTION and carry `sigma_eff = sigma*fill`, so
+    the partial-cell resistance is exact through the per-cell-
+    conductivity machinery with no solver changes — measured on the
+    round-wire example: the center-in staircase reads DC resistance
+    11.6% low, the fill-corrected model lands within ~1% of
+    L/(sigma*pi*R^2). Honest scope: RESISTANCE only for now — the
+    partial-cell inductance correction is stage B of the program,
+    the sub-cell skin engine auto-disables on fill models (mixed
+    effective conductivity), and equipotential ports are
+    unsupported there for the same reason. Primitives must not
+    overlap other conductors; slivers below fill 1e-3 are dropped;
+    keep port faces on solid-ish cells.
+
 ## What v1 deliberately leaves out
 
 * Wire capacitance — wires are chargeless inductors by decision
