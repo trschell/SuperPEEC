@@ -213,13 +213,19 @@ written today still means the same thing after the next refactor.
     example against a 2x-refined reference, the inductance error
     improves strictly through the stages: staircase 2.4% -> fill
     1.2% -> fill+dL 0.9%. Skin effect on subpixel wires comes from the cell
-    lattice itself and is MEASURED GOOD: at 8 cells across the
-    section, R_AC/R_DC tracks the exact Kelvin solution to 1.1% at
-    dx/delta = 1 and 2.4% at dx/delta = 2 (gated). An
+    lattice itself, with a MEASURED VALIDITY BOUNDARY: at 8 cells
+    across the section, R_AC/R_DC tracks the exact Kelvin solution
+    to 1.1% at dx/delta = 1 and 2.4% at dx/delta = 2 (gated) —
+    beyond dx/delta ~ 3 the lattice answer is UNRELIABLE and
+    sign-unstable (measured -7% at 3, -12% at 4, then crossing zero
+    near 8 on its way to +58% at 12: an apparent agreement in that
+    range is coincidence, never validity). Past the boundary,
+    either refine the section or wait for stage C.2. An
     imposed-Bessel-profile enrichment was measured WORSE than the
-    lattice alone (phase double-counting) and is deliberately not
-    wired -- solved-amplitude modes are stage C.2's charter, along
-    with transverse-filament and cross-orientation corrections. The sub-cell skin engine auto-disables on fill models
+    lattice alone inside the valid range (phase double-counting)
+    and is deliberately not wired -- solved-amplitude modes are
+    stage C.2's charter, along with transverse-filament and
+    cross-orientation corrections. The sub-cell skin engine auto-disables on fill models
     (mixed effective conductivity), equipotential ports are
     unsupported there, [[cylinder]] does not combine with [[wire]],
     primitives must not overlap other conductors, slivers below
