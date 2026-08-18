@@ -1091,6 +1091,12 @@ class SystemMat:
         self.M.e.data += AVne
         self.M.f.data += AVnf
         self.M.g.data += AVng
+        if getattr(self, 'dL_near', None) is not None:
+            # subpixel stage B: sparse partial-cell inductance
+            # correction on the branch rows (jw*dL @ i); the far
+            # field stays pure Toeplitz
+            self.wholedata[:self.efgsize] += self.jomega * (
+                self.dL_near @ np.asarray(v[:self.efgsize]))
         self.M.lv[0].data[:] = node
         self.numiters += 1
         return self.wholedata

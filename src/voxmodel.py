@@ -165,6 +165,9 @@ class VoxelModel:
         # sigma_eff = sigma*fill; Lp is full-cell until stage B.
         # (named fill_frac: .fill() is the percent-occupancy METHOD)
         self.fill_frac = None
+        # subpixel stage-B data: dict(axis=, k=, cells={(t1,t2): (k,k)
+        # sub-fill array}) for cylinder-boundary cells
+        self.subpixel = None
         self.lambdaL = None
         self.freq = np.zeros((0,))
         # dispersive dielectric blocks: (lo, hi, eps_inf, deps, f1,

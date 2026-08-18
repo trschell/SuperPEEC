@@ -114,6 +114,106 @@ def main():
           info['true_residual'] < 1e-8,
           '%.1e' % info['true_residual'])
 
+    # -- stage B: sparse partial-cell inductance ----------------------
+    import subpixel
+    from terminal import box_mutual_matrix
+    M = prob.tree(m)          # the fill wire from the R gate above
+    dL = subpixel.build_dL(m, M)
+    check('dL is exactly symmetric', abs(dL - dL.T).max() == 0.0)
+    mf = sppeec_input.loads(
+        '\n'.join(['[grid]', 'dims = [8, 4, 4]', 'pitch = 1e-6',
+                   '[[block]]', 'from = [0, 0, 0]', 'to = [8, 4, 4]',
+                   'sigma = 5.8e7', '[port]',
+                   'p_faces = [[0, 1, 1, "-x"]]',
+                   'n_faces = [[7, 1, 1, "+x"]]',
+                   '[solve]', 'freq = [1e5]'])).model()
+    check('full-cell model -> no dL',
+          subpixel.build_dL(mf, None) is None)
+    # oracle: one near pair from first principles
+    spx = m.subpixel
+    k, axis = spx['k'], spx['axis']
+    t1, t2 = [c for c in range(3) if c != axis]
+    from equiterminal import filament_cells
+    fa, fc = filament_cells(M)
+    slx = np.nonzero(fa == axis)[0]
+    cl = fc[slx]
+    tgt = next(n for n, c in enumerate(cl)
+               if (int(c[t1]), int(c[t2])) in spx['cells']
+               and 0.05 < spx['cells'][(int(c[t1]),
+                                        int(c[t2]))].mean() < 0.95)
+    c = cl[tgt]
+    w = spx['cells'][(int(c[t1]), int(c[t2]))].ravel().astype(float)
+    w = w/w.sum()
+    u = np.full(k*k, 1.0/(k*k))
+    dv = np.asarray(m.d, float)
+    g1, g2 = np.meshgrid(range(k), range(k), indexing='ij')
+    lo = np.zeros((2*k*k, 3))
+    lo[:k*k, t1] = g1.ravel()*dv[t1]/k
+    lo[:k*k, t2] = g2.ravel()*dv[t2]/k
+    lo[k*k:] = lo[:k*k]
+    lo[k*k:, axis] += dv[axis]
+    ext = np.zeros(3)
+    ext[axis], ext[t1], ext[t2] = dv[axis], dv[t1]/k, dv[t2]/k
+    B = box_mutual_matrix(lo, lo + ext, axis)[:k*k, k*k:]
+    oracle = float(w @ B @ w) - float(u @ B @ u)
+    cc = c.copy()
+    cc[axis] += 1
+    j = next(int(slx[n2]) for n2, c2 in enumerate(cl)
+             if tuple(c2) == tuple(cc))
+    check('dL near-pair matches first principles',
+          abs(dL[int(slx[tgt]), j] - oracle) <= 1e-18,
+          '%.4g vs %.4g' % (dL[int(slx[tgt]), j], oracle))
+
+    # L referee: staircase -> A -> A+B strictly approach the 2x ref
+    def wire2(nx, dt, dx, stair=False):
+        c0 = dt*dx/2.0
+        fp, fn, blocks = [], [], []
+        for i in range(dt):
+            row = [j2 for j2 in range(dt)
+                   if ((i+0.5)*dx - c0)**2
+                   + ((j2+0.5)*dx - c0)**2 < R*R]
+            if row and stair:
+                blocks += ['[[block]]',
+                           'from = [0, %d, %d]' % (i, row[0]),
+                           'to = [%d, %d, %d]' % (nx, i+1, row[-1]+1),
+                           'sigma = 5.8e7']
+            for j2 in row:
+                fp.append('[0, %d, %d, "-x"]' % (i, j2))
+                fn.append('[%d, %d, %d, "+x"]' % (nx-1, i, j2))
+        geo = blocks if stair else [
+            '[[cylinder]]', 'axis = "x"',
+            'center = [%g, %g]' % (c0, c0), 'radius = %g' % R,
+            'sigma = 5.8e7']
+        return '\n'.join(
+            ['[grid]', 'dims = [%d, %d, %d]' % (nx, dt, dt),
+             'pitch = %g' % dx] + geo +
+            ['[port]', 'p_faces = [%s]' % ', '.join(fp),
+             'n_faces = [%s]' % ', '.join(fn),
+             '[solve]', 'freq = [1e5]'])
+
+    def runL(doc, strip_b=False):
+        pr = sppeec_input.loads(doc)
+        mm = pr.model()
+        if strip_b:
+            mm.subpixel = None
+        sw2 = pr.sweeper(mm, pr.tree(mm))
+        Z2, _ = sw2.solve(1e5)
+        return Z2.real, Z2.imag/(2*math.pi*1e5)
+
+    r_st, l_st = runL(wire2(96, 8, 1e-6, stair=True))
+    r_a, l_a = runL(wire2(96, 8, 1e-6), strip_b=True)
+    r_ab, l_ab = runL(wire2(96, 8, 1e-6))
+    _, l_ref = runL(wire2(192, 16, 0.5e-6))
+    e = [abs(x - l_ref)/l_ref for x in (l_st, l_a, l_ab)]
+    check('L errors strictly improve: staircase > A > A+B',
+          e[0] > e[1] > e[2],
+          'st %.2f%%, A %.2f%%, A+B %.2f%% vs 2x ref'
+          % (100*e[0], 100*e[1], 100*e[2]))
+    check('A+B within 1.2%% of the 2x reference', e[2] < 0.012,
+          '%.2f%%' % (100*e[2]))
+    check('dL leaves R untouched', abs(r_ab - r_a)/r_a < 1e-9,
+          '%.3g vs %.3g' % (r_ab, r_a))
+
     print('\n%d checks failed' % len(FAIL))
     raise SystemExit(1 if FAIL else 0)
 

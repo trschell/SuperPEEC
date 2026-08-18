@@ -1843,6 +1843,10 @@ class LpPRSolver:
         self.model = model
         self.M = M
         self.S = _SystemMat(M, M.jomega)
+        if getattr(model, 'subpixel', None):
+            # subpixel stage B: attach the sparse partial-cell dL
+            from subpixel import build_dL
+            self.S.dL_near = build_dL(model, M)
         # W rescale route: 'exact' needs the near-field P_ext Cholesky,
         # which the truncated multilevel near field often cannot supply
         # -- and DIELECTRICS make it strictly worse (measured on the

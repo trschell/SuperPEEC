@@ -123,6 +123,10 @@ class Problem:
         # exactly. v1 scope: conductors only; Lp stays full-cell
         # (stage B of the subpixel program owns the inductance
         # correction).
+        if doc.get('cylinder') and self.wire_specs:
+            raise ValueError(
+                "[[cylinder]] and [[wire]] do not combine in subpixel "
+                "v1 -- the wire path has no partial-cell corrections")
         for k, cy in enumerate(doc.get('cylinder', [])):
             for req in ('axis', 'center', 'radius', 'sigma'):
                 if req not in cy:
@@ -558,8 +562,20 @@ class Problem:
             inside = (x[:, None, :, None]**2
                       + y[None, :, None, :]**2) < R*R
             fill = inside.mean(axis=(2, 3))
+            # k=4 sub-fill bins per cell (stage B consumes these as
+            # sub-prism current weights; 64 samples/bin)
+            ks = 4
+            sub = inside.reshape(inside.shape[0], inside.shape[1],
+                                 ks, 64//ks, ks, 64//ks
+                                 ).mean(axis=(3, 5))
             if m.fill_frac is None:
                 m.fill_frac = (m.sigma != 0).astype(np.float32)
+            if not hasattr(m, 'subpixel') or m.subpixel is None:
+                m.subpixel = dict(axis=axis, k=ks, cells={})
+            elif m.subpixel['axis'] != axis:
+                raise ValueError(
+                    "cylinder %d: mixed cylinder axes in one model "
+                    "are not supported in subpixel v1" % k)
             span = [slice(None)]*3
             span[axis] = slice(a0, a1)
             for i1, i2 in zip(*np.nonzero(fill >= 1e-3)):
@@ -575,6 +591,8 @@ class Problem:
                         % (k, i1, i2))
                 m.sigma[pos] = np.float32(sig*fill[i1, i2])
                 m.fill_frac[pos] = np.float32(fill[i1, i2])
+                m.subpixel['cells'][(int(i1), int(i2))] = \
+                    sub[i1, i2].astype(np.float64)
         if eps_blocks:
             cplx = any(np.iscomplexobj(ec) for _, _, ec in eps_blocks)
             eps = np.ones(m.dims,

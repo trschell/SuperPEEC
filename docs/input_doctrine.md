@@ -204,13 +204,23 @@ written today still means the same thing after the next refactor.
     conductivity machinery with no solver changes — measured on the
     round-wire example: the center-in staircase reads DC resistance
     11.6% low, the fill-corrected model lands within ~1% of
-    L/(sigma*pi*R^2). Honest scope: RESISTANCE only for now — the
-    partial-cell inductance correction is stage B of the program,
-    the sub-cell skin engine auto-disables on fill models (mixed
-    effective conductivity), and equipotential ports are
-    unsupported there for the same reason. Primitives must not
-    overlap other conductors; slivers below fill 1e-3 are dropped;
-    keep port faces on solid-ish cells.
+    L/(sigma*pi*R^2). Stage B (same date) adds the matching
+    partial-cell INDUCTANCE: a sparse near-field correction
+    dL = w^T T w - u^T T u over exact sub-prism mutual tables
+    (4x4 sub-cells, 2-cell window; entries verified against first
+    principles to machine zero), applied on the branch rows with the
+    Toeplitz far field untouched. Measured on the round-wire
+    example against a 2x-refined reference, the inductance error
+    improves strictly through the stages: staircase 2.4% -> fill
+    1.2% -> fill+dL 0.9%. Honest scope: corrections cover filaments
+    ALONG the cylinder axis (the dominant current direction);
+    transverse-filament and cross-orientation corrections belong to
+    stage C. The sub-cell skin engine auto-disables on fill models
+    (mixed effective conductivity), equipotential ports are
+    unsupported there, [[cylinder]] does not combine with [[wire]],
+    primitives must not overlap other conductors, slivers below
+    fill 1e-3 are dropped, and port faces belong on solid-ish
+    cells.
 
 ## What v1 deliberately leaves out
 

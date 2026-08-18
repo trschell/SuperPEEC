@@ -44,9 +44,11 @@ solver's `.vti`/`.vtp` exports.*
   two-fluid London superconductors (kinetic inductance, VoxHenry's
   material law).
 * Subpixel geometry: round conductors (`[[cylinder]]`) voxelized
-  with per-cell fill fractions — partial-cell resistance is exact,
-  collapsing the staircase DC error (measured 11.6% -> ~1% on a
-  3-cell-radius wire).
+  with per-cell fill fractions — partial-cell resistance is exact
+  (staircase DC error collapses 11.6% -> ~1% on a 3-cell-radius
+  wire) and a sparse exact-integral correction does the same for
+  the near-field inductance, leaving the FFT/FMM structure
+  untouched.
 * Bond wires as polylines: validated round-wire cross-section model,
   wire–wire and wire–plane proximity, and a lattice-Green's-function
   calibrated foot (contact) resistance.
