@@ -1,0 +1,261 @@
+# DBC SiC half-bridge power module -- THE FLAGSHIP GEOMETRY.
+#
+# ATTRIBUTION AND LICENSE
+# -----------------------
+# This layout is derived from the PowerSynth sample design "2D_Case_3"
+# (a wire-bonded SiC half-bridge module with Kelvin source), from:
+#
+#   PowerSynth 2 release package, E3DA/MSCAD Labs, University of
+#   Arkansas: https://github.com/e3da/PowerSynth2-pkg
+#   (work/Sample_Designs/2D_Case_3, retrieved 2026-08-11; reference
+#   copy in examples/powersynth_2d_case_3/)
+#
+#   Published in: Imam Al Razi, Quang Le, Tristan Evans, Shilpi
+#   Mukherjee, H. Alan Mantooth, and Yarui Peng, "PowerSynth Design
+#   Automation Flow for Hierarchical and Heterogeneous 2.5D
+#   Multi-Chip Power Modules", IEEE Trans. Power Electronics,
+#   vol. 36, no. 8, pp. 8919-8933, 2021.
+#
+# The PowerSynth2-pkg repository is licensed GPL-3.0; as a derived
+# work, THIS FILE is likewise distributed under GPL-3.0
+# (SPDX-License-Identifier: GPL-3.0-only). This licensing applies to
+# this geometry description file only, not to the SuperPEEC solver.
+#
+# CONVERSION NOTES (what differs from the source design and why)
+# --------------------------------------------------------------
+# * Units: source coordinates are mm on a 40 x 50 mm AlN substrate;
+#   converted to metres (doctrine rule 1).
+# * Layer stack regularized to be pitch-commensurate for refinement
+#   ladders: bottom Cu 0.2, ceramic 0.6 (true 0.64), top Cu 0.2,
+#   die 0.2 (true 0.18) mm. The ceramic is NOT modeled (dielectrics
+#   are invisible to LpR; its capacitive role is out of band -- see
+#   the flagship memory) -- it appears only as the empty gap between
+#   the metal layers.
+# * The 5 mm Cu baseplate is OMITTED at demo pitch (it would dominate
+#   the cell count; the 0.2 mm bottom metal supplies the eddy/image
+#   plane). Add it back as a block for runs that want it.
+# * Dies (Wolfspeed CPM2-1200-0025B, 4 x 6 x 0.18 mm) are modeled as
+#   COPPER-conductivity blocks: the extraction is the PACKAGE
+#   parasitics with devices as on-state shorts; the 25 mOhm device
+#   R_on belongs to the circuit model, not the field solve.
+# * The DC-link capacitor C1 and the lead bodies are omitted (C1 is
+#   a component, not interconnect -- as a conductor block it would
+#   short the port); the port strips sit at the L1/L2 power-lead
+#   footprints. Gate/Kelvin signal WIRES are omitted (irrelevant to
+#   the power loop); the signal TRACES are kept as floating metal.
+# * Bond wires: the four doubled power connections (BW1, BW3, BW5,
+#   BW7 -- 2 wires each per the source connection table) as
+#   rise-span-descend polylines, radius 0.13 mm per the source wire
+#   library, apex 3 mm, vertical landings (the overlap rule).
+#   Contact points carry a +0.01 mm nudge so they never sit exactly
+#   on a cell boundary at any power-of-two ladder pitch (the foot
+#   tie-break trap).
+# * Wire material set to Al (3.77e7 S/m), the usual heavy-wire metal;
+#   the source library's ambiguous "Resistivity 0.000001" is ignored.
+#
+# CIRCUIT (for orientation): T1 = DC- rail (port N at lead L1);
+# T2+T3 island = DC+ with high-side dies D1, D2 (port P at lead L2);
+# T6+T7+T8 island = switch node with low-side dies D3, D4. Power
+# loop: L2 -> T2/T3 -> D1,D2 -> BW1/BW3 pairs -> T7 (switch node) ->
+# T8 -> D3,D4 -> BW5/BW7 pairs -> T1 -> L1. Both device positions
+# conduct (shorts), giving the classic commutation-loop extraction.
+#
+# THE REFINEMENT LADDER: this file is resolution-independent -- all
+# geometry is physical (from_m/to_m, p_box/n_box, wire polylines in
+# metres). A ladder rung = change [grid] dims+pitch only. Demo pitch
+# here is anisotropic (0.5 x 0.5 x 0.2 mm, aspect 2.5) which is why
+# foot_model = "point"; cubic rungs (e.g. 0.2 or 0.1 mm uniform)
+# should switch to the calibrated "patch" feet.
+
+# THIS FILE IS THE R4 RUNG of the refinement ladder: the same
+# physical module as examples/dbc_halfbridge.toml (which carries the
+# demo pitch and the full conversion notes -- read that header first;
+# edits to the geometry belong THERE and should be mirrored here),
+# with [grid] set to the stretch resolution from studies/
+# dbc_ladder.py: 1/16 mm in-plane (divides every 1 mm feature),
+# 0.04 mm vertical (divides the 0.2 mm layers) over the fixed
+# 40 x 50 x 4 mm envelope. 51.2 million cells; measured peak RSS at
+# this rung is ~29 GB (2026-08-14 re-baseline) on the study driver.
+# The pitch is still anisotropic (aspect 1.56), so foot_model stays
+# "point" per the ladder policy.
+
+[grid]
+dims  = [640, 800, 100]
+pitch = [0.0625e-3, 0.0625e-3, 0.04e-3]
+
+# -- bottom metal (eddy/image plane; Electrical 'G' in the source) --
+[[block]]
+name   = "bottom_metal"
+from_m = [0.0, 0.0, 0.0]
+to_m   = [40e-3, 50e-3, 0.2e-3]
+sigma  = 5.8e7
+
+# -- top copper traces (layer I1, z 0.8-1.0 mm) ---------------------
+[[block]]
+name   = "T1_dc_minus"
+from_m = [1e-3, 1e-3, 0.8e-3]
+to_m   = [39e-3, 9e-3, 1.0e-3]
+sigma  = 5.8e7
+
+[[block]]
+name   = "T2_dc_plus"
+from_m = [9e-3, 11e-3, 0.8e-3]
+to_m   = [18e-3, 33e-3, 1.0e-3]
+sigma  = 5.8e7
+
+[[block]]
+name   = "T3_dc_plus"
+from_m = [1e-3, 33e-3, 0.8e-3]
+to_m   = [18e-3, 49e-3, 1.0e-3]
+sigma  = 5.8e7
+
+[[block]]
+name   = "T4_signal"
+from_m = [1e-3, 11e-3, 0.8e-3]
+to_m   = [4e-3, 31e-3, 1.0e-3]
+sigma  = 5.8e7
+
+[[block]]
+name   = "T5_signal"
+from_m = [5e-3, 11e-3, 0.8e-3]
+to_m   = [8e-3, 31e-3, 1.0e-3]
+sigma  = 5.8e7
+
+[[block]]
+name   = "T6_switch"
+from_m = [22e-3, 11e-3, 0.8e-3]
+to_m   = [39e-3, 20e-3, 1.0e-3]
+sigma  = 5.8e7
+
+[[block]]
+name   = "T7_switch"
+from_m = [19e-3, 11e-3, 0.8e-3]
+to_m   = [22e-3, 49e-3, 1.0e-3]
+sigma  = 5.8e7
+
+[[block]]
+name   = "T8_switch"
+from_m = [22e-3, 33e-3, 0.8e-3]
+to_m   = [39e-3, 49e-3, 1.0e-3]
+sigma  = 5.8e7
+
+[[block]]
+name   = "T9_signal"
+from_m = [25e-3, 27e-3, 0.8e-3]
+to_m   = [38e-3, 30e-3, 1.0e-3]
+sigma  = 5.8e7
+
+[[block]]
+name   = "T10_signal"
+from_m = [25e-3, 23e-3, 0.8e-3]
+to_m   = [38e-3, 26e-3, 1.0e-3]
+sigma  = 5.8e7
+
+# -- dies (R270 for D1/D2 per the source: 4x6 -> 6x4 footprint) -----
+[[block]]
+name   = "D1_hs"
+from_m = [11e-3, 15e-3, 1.0e-3]
+to_m   = [17e-3, 19e-3, 1.2e-3]
+sigma  = 5.8e7
+
+[[block]]
+name   = "D2_hs"
+from_m = [11e-3, 25e-3, 1.0e-3]
+to_m   = [17e-3, 29e-3, 1.2e-3]
+sigma  = 5.8e7
+
+[[block]]
+name   = "D3_ls"
+from_m = [25e-3, 12e-3, 1.0e-3]
+to_m   = [29e-3, 18e-3, 1.2e-3]
+sigma  = 5.8e7
+
+[[block]]
+name   = "D4_ls"
+from_m = [32e-3, 12e-3, 1.0e-3]
+to_m   = [36e-3, 18e-3, 1.2e-3]
+sigma  = 5.8e7
+
+# -- bond wires: high side, D1/D2 source -> T7 (BW1, BW3: 2 each) ---
+[[wire]]
+name   = "BW1a_D1_T7"
+points = [[15.76e-3, 16.26e-3, 1.26e-3], [15.76e-3, 16.26e-3, 3.0e-3],
+          [20.26e-3, 16.26e-3, 3.0e-3], [20.26e-3, 16.26e-3, 1.06e-3]]
+radius = 0.13e-3
+sigma  = 3.77e7
+max_seglen = 1.0e-3
+
+[[wire]]
+name   = "BW1b_D1_T7"
+points = [[15.76e-3, 17.76e-3, 1.26e-3], [15.76e-3, 17.76e-3, 3.0e-3],
+          [20.26e-3, 17.76e-3, 3.0e-3], [20.26e-3, 17.76e-3, 1.06e-3]]
+radius = 0.13e-3
+sigma  = 3.77e7
+max_seglen = 1.0e-3
+
+[[wire]]
+name   = "BW3a_D2_T7"
+points = [[15.76e-3, 26.26e-3, 1.26e-3], [15.76e-3, 26.26e-3, 3.0e-3],
+          [20.26e-3, 26.26e-3, 3.0e-3], [20.26e-3, 26.26e-3, 1.06e-3]]
+radius = 0.13e-3
+sigma  = 3.77e7
+max_seglen = 1.0e-3
+
+[[wire]]
+name   = "BW3b_D2_T7"
+points = [[15.76e-3, 27.76e-3, 1.26e-3], [15.76e-3, 27.76e-3, 3.0e-3],
+          [20.26e-3, 27.76e-3, 3.0e-3], [20.26e-3, 27.76e-3, 1.06e-3]]
+radius = 0.13e-3
+sigma  = 3.77e7
+max_seglen = 1.0e-3
+
+# -- bond wires: low side, D3/D4 source -> T1 (BW5, BW7: 2 each) ----
+[[wire]]
+name   = "BW5a_D3_T1"
+points = [[26.26e-3, 13.26e-3, 1.26e-3], [26.26e-3, 13.26e-3, 3.0e-3],
+          [26.26e-3, 6.76e-3, 3.0e-3], [26.26e-3, 6.76e-3, 1.06e-3]]
+radius = 0.13e-3
+sigma  = 3.77e7
+max_seglen = 1.0e-3
+
+[[wire]]
+name   = "BW5b_D3_T1"
+points = [[27.76e-3, 13.26e-3, 1.26e-3], [27.76e-3, 13.26e-3, 3.0e-3],
+          [27.76e-3, 6.76e-3, 3.0e-3], [27.76e-3, 6.76e-3, 1.06e-3]]
+radius = 0.13e-3
+sigma  = 3.77e7
+max_seglen = 1.0e-3
+
+[[wire]]
+name   = "BW7a_D4_T1"
+points = [[33.26e-3, 13.26e-3, 1.26e-3], [33.26e-3, 13.26e-3, 3.0e-3],
+          [33.26e-3, 6.76e-3, 3.0e-3], [33.26e-3, 6.76e-3, 1.06e-3]]
+radius = 0.13e-3
+sigma  = 3.77e7
+max_seglen = 1.0e-3
+
+[[wire]]
+name   = "BW7b_D4_T1"
+points = [[34.76e-3, 13.26e-3, 1.26e-3], [34.76e-3, 13.26e-3, 3.0e-3],
+          [34.76e-3, 6.76e-3, 3.0e-3], [34.76e-3, 6.76e-3, 1.06e-3]]
+radius = 0.13e-3
+sigma  = 3.77e7
+max_seglen = 1.0e-3
+
+# -- port: the DC link, physically fixed under refinement -----------
+# P at power lead L2 (on T3), N at power lead L1 (on T1); both are
+# the 3x3 mm lead footprints from the source layout.
+[port]
+p_box = [[2e-3, 39e-3, 0.8e-3], [5e-3, 42e-3, 1.0e-3]]
+n_box = [[2e-3, 3e-3, 0.8e-3], [5e-3, 6e-3, 1.0e-3]]
+
+[solve]
+freq = [1e6]
+rtol = 1e-4               # the engineering target: the residual tail
+                          # below this moves extracted L by < 1e-3 %
+                          # (the measured 81%-waste law) -- ladder and
+                          # extraction runs use this, oracles tighten
+foot_model = "point"      # demo pitch is anisotropic; cubic ladder
+                          # rungs should use "patch"
+basis = "overcomplete"    # the memory-flat scaling path (BlockAMG +
+                          # exact Schur on the sharing chords)
