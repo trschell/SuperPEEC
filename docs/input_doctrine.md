@@ -169,7 +169,18 @@ written today still means the same thing after the next refactor.
     neighbourhoods), `f_ref` (skin-shape reference frequency;
     defaults to the sweep maximum, and the shapes retune per solve
     point regardless), `rc_uu`/`rc_cross` (mode-coupling truncation
-    radii; be generous on round wires), `boundary_only` (default
+    radii — READ THIS before touching them or trusting wire skin
+    numbers: the defaults (3, 4) are measured-correct for
+    RECTANGULAR cross-sections, but on round/staircase sections
+    they deliver only 5–36% of the skin correction; full delivery
+    there needs rc ≈ 2x the section diameter, at close to
+    untruncated cost, because a net-zero mode's distant couplings
+    nearly cancel and axial coupling matters out to ~2 diameters.
+    Do NOT split the difference: intermediate rc on wide sections
+    is NON-MONOTONICALLY WRONG — measured worse than the small
+    default, stable under solve tolerance — a hard cutoff mid-shell
+    leaves an unbalanced residue rather than dropping negligible
+    terms), `boundary_only` (default
     TRUE: modes live only on filaments with an exposed face in the
     split plane, which is where the physics is — measured on a
     20x20-cell bar at dx/delta = 4.8, modes-everywhere overshoots
