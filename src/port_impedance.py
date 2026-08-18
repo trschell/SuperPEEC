@@ -1843,10 +1843,7 @@ class LpPRSolver:
         self.model = model
         self.M = M
         self.S = _SystemMat(M, M.jomega)
-        if getattr(model, 'subpixel', None):
-            # subpixel stage B: attach the sparse partial-cell dL
-            from subpixel import build_dL
-            self.S.dL_near = build_dL(model, M)
+        self._dz_static = None
         # W rescale route: 'exact' needs the near-field P_ext Cholesky,
         # which the truncated multilevel near field often cannot supply
         # -- and DIELECTRICS make it strictly worse (measured on the
@@ -1983,6 +1980,16 @@ class LpPRSolver:
         jw = 1j*2*np.pi*freq
         S.jomega = jw
         M.jomega = jw
+        if getattr(m, 'subpixel', None):
+            # subpixel stage B: the pure-geometry dL, scaled jw per
+            # point. The imposed-profile variant (build_dZ) measured
+            # WORSE -- see subpixel.py's docstring; enrichment
+            # amplitudes must be SOLVED (stage C.2), not imposed.
+            if self._dz_static is None:
+                from subpixel import build_dL
+                self._dz_static = build_dL(m, M)
+            S.dZ_near = None if self._dz_static is None \
+                else jw*self._dz_static
         if self._precond == 'diagschur':
             # dielectric branch impedances are FREQUENCY DEPENDENT
             # (sigma_eff = jw eps0 (eps_r - 1)); refresh the diagonal

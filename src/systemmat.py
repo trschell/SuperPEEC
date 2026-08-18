@@ -1091,12 +1091,13 @@ class SystemMat:
         self.M.e.data += AVne
         self.M.f.data += AVnf
         self.M.g.data += AVng
-        if getattr(self, 'dL_near', None) is not None:
-            # subpixel stage B: sparse partial-cell inductance
-            # correction on the branch rows (jw*dL @ i); the far
-            # field stays pure Toeplitz
-            self.wholedata[:self.efgsize] += self.jomega * (
-                self.dL_near @ np.asarray(v[:self.efgsize]))
+        if getattr(self, 'dZ_near', None) is not None:
+            # subpixel stages B/C: sparse partial-cell branch-
+            # impedance correction (complex, frequency-tracked --
+            # geometry dL plus the imposed-profile internal
+            # impedance); the far field stays pure Toeplitz
+            self.wholedata[:self.efgsize] += (
+                self.dZ_near @ np.asarray(v[:self.efgsize]))
         self.M.lv[0].data[:] = node
         self.numiters += 1
         return self.wholedata

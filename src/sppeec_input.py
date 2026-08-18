@@ -564,6 +564,10 @@ class Problem:
             fill = inside.mean(axis=(2, 3))
             # k=4 sub-fill bins per cell (stage B consumes these as
             # sub-prism current weights; 64 samples/bin)
+            # k = 4 sub-cells: measured NOT the accuracy limiter --
+            # k = 8 left the Kelvin-gate errors unchanged-to-worse;
+            # the high-dx/delta residual is cell-level discretization
+            # of the crowding envelope (stage C.2's charter)
             ks = 4
             sub = inside.reshape(inside.shape[0], inside.shape[1],
                                  ks, 64//ks, ks, 64//ks
@@ -571,7 +575,7 @@ class Problem:
             if m.fill_frac is None:
                 m.fill_frac = (m.sigma != 0).astype(np.float32)
             if not hasattr(m, 'subpixel') or m.subpixel is None:
-                m.subpixel = dict(axis=axis, k=ks, cells={})
+                m.subpixel = dict(axis=axis, k=ks, cells={}, geom={})
             elif m.subpixel['axis'] != axis:
                 raise ValueError(
                     "cylinder %d: mixed cylinder axes in one model "
@@ -593,6 +597,10 @@ class Problem:
                 m.fill_frac[pos] = np.float32(fill[i1, i2])
                 m.subpixel['cells'][(int(i1), int(i2))] = \
                     sub[i1, i2].astype(np.float64)
+                # stage C needs the resolved surface: each cell
+                # remembers its cylinder's (center, R, sigma)
+                m.subpixel['geom'][(int(i1), int(i2))] = \
+                    (c1, c2, R, sig)
         if eps_blocks:
             cplx = any(np.iscomplexobj(ec) for _, _, ec in eps_blocks)
             eps = np.ones(m.dims,

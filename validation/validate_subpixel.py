@@ -214,6 +214,35 @@ def main():
     check('dL leaves R untouched', abs(r_ab - r_a)/r_a < 1e-9,
           '%.3g vs %.3g' % (r_ab, r_a))
 
+    # -- skin effect on the subpixel wire (the Kelvin razor) ----------
+    # The A+B stack at 8 cells across the section delivers the exact
+    # round-wire R_AC/R_DC to a few percent through dx/delta = 2 --
+    # measured 2026-08-18, and the imposed-profile alternative
+    # (subpixel.build_dZ) measured WORSE (see its docstring), which
+    # is the recorded justification for solved-amplitude C.2 modes.
+    from scipy.special import jv
+    MU0 = 4e-7*math.pi
+    SIG = 5.8e7
+
+    def z_int(freq):
+        delta = math.sqrt(2.0/(2*math.pi*freq*MU0*SIG))
+        kb = (1.0 - 1.0j)/delta
+        return (kb/(SIG*2*math.pi*R))*jv(0, kb*R)/jv(1, kb*R)
+
+    pw = sppeec_input.loads(wire2(96, 8, 1e-6))
+    mw = pw.model()
+    sww = pw.sweeper(mw, pw.tree(mw))
+    zlo2, _ = sww.solve(1e7)
+    for f, band in ((4.37e9, 0.03), (1.747e10, 0.04)):
+        zf, _ = sww.solve(f)
+        rs = zf.real/zlo2.real
+        ra = z_int(f).real/z_int(1e7).real
+        check('skin R-ratio vs Kelvin at dx/delta %.0f (band %d%%)'
+              % (round(1e-6/math.sqrt(2.0/(2*math.pi*f*MU0*SIG))),
+                 100*band),
+              abs(rs - ra)/ra < band,
+              '%.4f vs %.4f (rel %.1e)' % (rs, ra, abs(rs - ra)/ra))
+
     print('\n%d checks failed' % len(FAIL))
     raise SystemExit(1 if FAIL else 0)
 

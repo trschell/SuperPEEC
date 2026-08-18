@@ -212,10 +212,14 @@ written today still means the same thing after the next refactor.
     Toeplitz far field untouched. Measured on the round-wire
     example against a 2x-refined reference, the inductance error
     improves strictly through the stages: staircase 2.4% -> fill
-    1.2% -> fill+dL 0.9%. Honest scope: corrections cover filaments
-    ALONG the cylinder axis (the dominant current direction);
-    transverse-filament and cross-orientation corrections belong to
-    stage C. The sub-cell skin engine auto-disables on fill models
+    1.2% -> fill+dL 0.9%. Skin effect on subpixel wires comes from the cell
+    lattice itself and is MEASURED GOOD: at 8 cells across the
+    section, R_AC/R_DC tracks the exact Kelvin solution to 1.1% at
+    dx/delta = 1 and 2.4% at dx/delta = 2 (gated). An
+    imposed-Bessel-profile enrichment was measured WORSE than the
+    lattice alone (phase double-counting) and is deliberately not
+    wired -- solved-amplitude modes are stage C.2's charter, along
+    with transverse-filament and cross-orientation corrections. The sub-cell skin engine auto-disables on fill models
     (mixed effective conductivity), equipotential ports are
     unsupported there, [[cylinder]] does not combine with [[wire]],
     primitives must not overlap other conductors, slivers below
