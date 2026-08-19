@@ -97,12 +97,17 @@ def build_straight(nper):
     return path, dx, int(struc.sum())
 
 
+CORNER = os.environ.get('CORNER_MODES', '0') == '1'
+
+
 def run(path):
     """Solve both frequencies; return {freq: (Z, matvecs, flag, resid)}."""
     m = vhr.read_vhr(path)
     M = m.build_tree()
     m.prepare(M, FREQS[0])
-    S = eq.EquiTerminalSolver(m, M, 0)
+    # CORNER_MODES=1: corner modes on the Z-trace (the straight control
+    # has no corners, so the flag is harmless there)
+    S = eq.EquiTerminalSolver(m, M, 0, corner_modes=CORNER)
     out = {}
     for f in FREQS:
         Z, _, info = S.solve(f, rtol=RTOL)

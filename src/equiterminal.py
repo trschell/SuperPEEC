@@ -1790,7 +1790,8 @@ class EquiTerminalSolver:
                  chol_ordering='metis', mode_basis='diff',
                  boundary_only=False, basis='selected', amg_cycles=4,
                  amg_cycle_type='V', amg_smoother=None,
-                 amg_strength=None, gram_solver='amg'):
+                 amg_strength=None, gram_solver='amg',
+                 corner_modes=False):
         self.M = M
         self.model = model
         self.verbose = verbose
@@ -1921,6 +1922,20 @@ class EquiTerminalSolver:
                                          mode_basis=mode_basis,
                                          skin_freq=fref,
                                          boundary_only=boundary_only)
+        if corner_modes:
+            if self.redist is not None:
+                raise ValueError(
+                    "corner_modes with the skin engine (subdivide > 1) "
+                    "is phase 2 -- not composed yet; run one or the "
+                    "other")
+            from cornermode import CornerModes
+            cm = CornerModes(model, M, self.fil_axis, self.fil_cell,
+                             rc_cross=rc_cross, verbose=verbose)
+            if cm.nmode:
+                self.redist = cm
+            elif verbose:
+                print("    corner modes: requested but no eligible "
+                      "corners found")
         self.nu = 0 if self.redist is None else self.redist.nmode
         self._build_augmented()
         self.t_setup = time.perf_counter() - t0
