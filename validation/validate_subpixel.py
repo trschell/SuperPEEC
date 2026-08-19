@@ -291,6 +291,87 @@ def main():
         check('rim port face rejected (full-cell rule)',
               'FULL cells' in str(exc), str(exc)[:60])
 
+    # -- C.2 phase 2: surface-anchored solved modes ------------------
+    # the same equi_doc solves above now run through SubpixelModes
+    # (auto skin on a subpixel model); assert that explicitly, plus
+    # convergence under the mode block-Jacobi preconditioner
+    import equiterminal
+    pe3 = sppeec_input.loads(equi_doc([1e7, 1.747e10]))
+    me3 = pe3.model()
+    swe3 = pe3.sweeper(me3, pe3.tree(me3))
+    check('subpixel model engages SubpixelModes under auto skin',
+          type(swe3.S.redist).__name__ == 'SubpixelModes',
+          type(swe3.S.redist).__name__)
+    zl, _, il = swe3.S.solve(1e7)
+    zh3, _, ih3 = swe3.S.solve(1.747e10)
+    # TRUE residual is the ground truth (the solver computes it
+    # post-hoc); lgmres's flag can read nonzero at the fp32
+    # preconditioner floor even when the solve is at 1e-13
+    check('mode block-Jacobi converges the deep solve',
+          ih3['residual'] < 1e-10 and ih3['matvecs'] < 600,
+          'flag %s resid %.1e mv %d' % (ih3['flag'], ih3['residual'],
+                                        ih3['matvecs']))
+    rs3 = zh3.real/zl.real
+    ra3 = z_int(1.747e10).real/z_int(1e7).real
+    check('modes-path Kelvin ratio at dx/delta 2 (band 2.5%)',
+          abs(rs3 - ra3)/ra3 < 0.025, '%.4f vs %.4f' % (rs3, ra3))
+
+    # machinery oracle: folded blocks vs dense box mutuals on a tiny
+    # cylinder (k=3 keeps the dense side to ~seconds)
+    import terminal as tmod
+    doc_t = '\n'.join([
+        '[grid]', 'dims = [6, 4, 4]', 'pitch = 1e-6',
+        '[[cylinder]]', 'axis = "x"', 'center = [2e-6, 2e-6]',
+        'radius = 1.6e-6', 'sigma = 5.8e7',
+        '[port]', 'equipotential = true',
+        'p_faces = [[0, 1, 1, "-x"], [0, 2, 2, "-x"]]',
+        'n_faces = [[5, 1, 1, "+x"], [5, 2, 2, "+x"]]',
+        '[solve]', 'freq = [1e10]', '[solve.skin]', 'k = 3'])
+    pt = sppeec_input.loads(doc_t)
+    mt = pt.model()
+    st = pt.sweeper(mt, pt.tree(mt)).S
+    rt = st.redist
+    rt.set_frequency(1e10)
+    nf, kq, kmq = rt.nfil, rt.k, rt.km
+    Zs = tmod.box_mutual_matrix(rt.lo, rt.hi, rt.axis)
+    Wb = np.zeros((nf*kq, nf*kmq))
+    Gb = np.zeros((nf*kq, nf))
+    for f in range(nf):
+        Wb[f*kq:(f+1)*kq, f*kmq:(f+1)*kmq] = rt.Wf[f]
+        Gb[f*kq:(f+1)*kq, f] = rt.G[f]
+    from scipy.spatial import cKDTree
+    tr = cKDTree(rt.cells.astype(float))
+    def masked(dense, radius, cper):
+        keep = np.zeros_like(dense, dtype=bool)
+        pr = tr.query_pairs(r=radius, p=np.inf, output_type='ndarray')
+        fa = np.concatenate([pr[:, 0], pr[:, 1], np.arange(nf)])
+        fb = np.concatenate([pr[:, 1], pr[:, 0], np.arange(nf)])
+        for a, b in zip(fa, fb):
+            keep[a*kmq:(a+1)*kmq, b*cper:(b+1)*cper] = True
+        return np.where(keep, dense, 0.0)
+    mk = rt.mode_mask
+    Zuu_o = masked(Wb.T @ Zs @ Wb, rt._rc_uu, kmq)[mk][:, mk]
+    Zc_o = masked(Wb.T @ Zs @ Gb, rt._rc_cross, 1)[mk]
+    e1 = abs(rt.Zuu.toarray() - Zuu_o).max()/abs(Zuu_o).max()
+    e2 = abs(rt.Zcross.toarray() - Zc_o).max()/abs(Zc_o).max()
+    check('mode-mode block matches dense oracle', e1 < 1e-9,
+          'rel %.2e' % e1)
+    check('mode-aggregate block matches dense oracle', e2 < 1e-9,
+          'rel %.2e' % e2)
+    check('mode weights net-zero', abs(rt.Wf.sum(axis=1)).max() < 1e-9,
+          '%.2e' % abs(rt.Wf.sum(axis=1)).max())
+    okr = True
+    for f, key in enumerate(rt._tkey):
+        pc = rt._percell[key]
+        if pc is None:
+            continue
+        sup = pc['fill'] > 1e-3
+        rr = (rt.k/(rt.sigma*rt.dx))/pc['fill'][sup]
+        if abs(1.0/np.sum(1.0/rr)
+               - 1.0/(rt.sigma*pc['fill'].mean()*rt.dx))                 > 1e-12/(rt.sigma*rt.dx):
+            okr = False
+    check('fill-weighted sub-bar R reproduces sigma_eff exactly', okr)
+
     print('\n%d checks failed' % len(FAIL))
     raise SystemExit(1 if FAIL else 0)
 

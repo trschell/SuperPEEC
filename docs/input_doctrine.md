@@ -212,27 +212,40 @@ written today still means the same thing after the next refactor.
     Toeplitz far field untouched. Measured on the round-wire
     example against a 2x-refined reference, the inductance error
     improves strictly through the stages: staircase 2.4% -> fill
-    1.2% -> fill+dL 0.9%. Skin effect on subpixel wires comes from the cell
-    lattice itself, with a MEASURED VALIDITY BOUNDARY: at 8 cells
-    across the section, R_AC/R_DC tracks the exact Kelvin solution
-    to 1.1% at dx/delta = 1 and 2.4% at dx/delta = 2 (gated) —
-    beyond dx/delta ~ 3 the lattice answer is UNRELIABLE and
-    sign-unstable (measured -7% at 3, -12% at 4, then crossing zero
-    near 8 on its way to +58% at 12: an apparent agreement in that
-    range is coincidence, never validity). Past the boundary,
-    either refine the section or wait for stage C.2. An
+    1.2% -> fill+dL 0.9%. Skin effect on subpixel wires:
+    on the equipotential path the auto skin engine now engages
+    SURFACE-ANCHORED SOLVED MODES (stage C.2, 2026-08-18) — per-cell
+    net-zero conduction shapes anchored to the resolved circle over
+    the sub-prism geometry, amplitudes solved by the system, with a
+    per-cell block-Jacobi mode preconditioner (without which deep-
+    skin solves silently never converge; the engine applies it
+    automatically). MEASURED VALIDITY, 8 cells across the section:
+    R_AC/R_DC within ~1% of the exact Kelvin solution at
+    dx/delta = 1-2 (gated) and monotone (the bare lattice's
+    sign-instability is gone); usable to dx/delta ~ 3-4. DEEPER
+    SKIN CARRIES TWO SEPARATE EFFECTS, both measured: (a) a finite
+    core-fed wire is genuinely NOT the infinite Kelvin wire — a
+    4x-refined same-protocol reference reads +7% above Kelvin at
+    dx/delta = 6, so gate against same-protocol references there,
+    never the analytic formula; (b) the coarse model's TRANSVERSE
+    redistribution paths (staircase, no enrichment) are too
+    resistive, freezing an under-crowded profile (~20% high vs the
+    same-protocol reference at dx/delta = 6, growing deeper) —
+    transverse/cross-orientation enrichment is the documented
+    future work. Past dx/delta ~ 4, refine the section. An
     imposed-Bessel-profile enrichment was measured WORSE than the
-    lattice alone inside the valid range (phase double-counting)
-    and is deliberately not wired -- solved-amplitude modes are
-    stage C.2's charter, along with transverse-filament and
-    cross-orientation corrections. The sub-cell skin engine auto-disables on fill models
-    (mixed effective conductivity); equipotential ports ARE
+    lattice alone (phase double-counting) and is deliberately not
+    wired; the offline zero-truncation referee shows the SOLVED
+    mode subspace tracks the fine sub-bar truth to ~2% through
+    dx/delta = 8, so the axial mode basis itself is not the
+    limiter. Equipotential ports ARE
     supported on subpixel models with one rule — every port face on
     a FULL cell (fill == 1), since partial rim cells carry distinct
     effective conductivities (measured on the round wire: R within
     ~1.5% of analytic with a solid-core port, Kelvin skin ratios
     equivalent to the LpPR path); [[cylinder]] does not combine
-    with [[wire]],
+    with [[wire]], the LpPR path stays stage-B-only (modes are
+    equiterminal-only in v1),
     primitives must not overlap other conductors, slivers below
     fill 1e-3 are dropped, and port faces belong on solid-ish
     cells.

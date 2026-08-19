@@ -818,6 +818,11 @@ class _EquiSweep:
         if getattr(m, 'superconductor', False):
             return ('superconductor -- the two-fluid z(w) already '
                     'carries the current profile')
+        if getattr(m, 'subpixel', None) is not None:
+            # fill models have mixed sigma_eff by construction, but the
+            # surface-anchored SubpixelModes engine handles exactly
+            # that -- supported, not degraded
+            return None
         try:
             m.uniform_sigma()
         except ValueError:
@@ -878,8 +883,10 @@ class _EquiSweep:
                 from equiterminal import recommend_subdivision
                 fref = (float(sk['f_ref']) if sk['f_ref'] is not None
                         else max(prob.freqs) if prob.freqs else 0.0)
-                if recommend_subdivision(m.dx, m.uniform_sigma(),
-                                         fref) > 1:
+                spx = getattr(m, 'subpixel', None)
+                sig0 = (next(iter(spx['geom'].values()))[3] if spx
+                        else m.uniform_sigma())
+                if recommend_subdivision(m.dx, sig0, fref) > 1:
                     sub = 7
                 else:
                     sub = False

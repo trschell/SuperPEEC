@@ -912,6 +912,18 @@ class Redistribution:
         (set_frequency) then costs two einsums instead of ``len(D)*k**2``
         kernel evaluations.
         """
+        M, Mc = self._raw_tables(D)
+        W = self.W
+        Bu = np.einsum('pm,dpq,qr->dmr', W, M, W)
+        Bc = np.einsum('pm,dp->dm', W, Mc)
+        return Bu, Bc
+
+    def _raw_tables(self, D):
+        """Raw (unfolded) sub-bar coupling tables, cached by separation
+        set: ``M[d, p, q]`` sub-bar p of the origin cell against sub-bar
+        q of the cell at separation ``D[d]``, and ``Mc[d, p]`` against
+        that cell's FULL bar. Geometry only -- weight folding happens in
+        the caller, so per-cell-weight subclasses can reuse the cache."""
         D = np.asarray(D, dtype=np.int64)
         key = D.tobytes()
         cached = self._geom.get(key)
@@ -948,11 +960,7 @@ class Redistribution:
                            np.repeat(fhiD, k, axis=0))
                 Mc[a:a + step] = (Sc/(self.asub*self.afull)).reshape(n, k)
             cached = self._geom[key] = (M, Mc)
-        M, Mc = cached
-        W = self.W
-        Bu = np.einsum('pm,dpq,qr->dmr', W, M, W)
-        Bc = np.einsum('pm,dp->dm', W, Mc)
-        return Bu, Bc
+        return cached
 
     def build_fft(self, rc_uu, rc_cross):
         """Spectra for applying the mode blocks as CONVOLUTIONS.
@@ -1131,7 +1139,13 @@ class Redistribution:
         Geometry cached per (separations, t_l), same reason as
         ``_mode_tables``.
         """
-        k, W = self.k, self.W
+        Mct = self._raw_terminal_table(D, t_l)
+        return np.einsum('pm,dps->dms', self.W, Mct)
+
+    def _raw_terminal_table(self, D, t_l):
+        """Raw sub-bar <-> terminal-bar table ``(nD, k, 2 signs)``,
+        cached by (separations, t_l). Geometry only, as _raw_tables."""
+        k = self.k
         nD = D.shape[0]
         key = (D.tobytes(), float(t_l))
         cached = self._geom_t.get(key)
@@ -1147,8 +1161,7 @@ class Redistribution:
                           np.repeat(tlo, k, axis=0), np.repeat(thi, k, axis=0))
                 Mct[:, :, si] = (S/(self.asub*self.afull)).reshape(nD, k)
             cached = self._geom_t[key] = Mct
-        Bt = np.einsum('pm,dps->dms', W, cached)
-        return Bt
+        return cached
 
     def _term_boxes(self, cells, signs, t_l):
         """Terminal bars at the given cells and face signs."""
@@ -1205,6 +1218,356 @@ class Redistribution:
             raise RuntimeError("aggregate block does not reproduce the full "
                                "filament operator (rel %.3e)" % err)
         self.aggregate_err = float(err)
+
+
+class SubpixelModes(Redistribution):
+    """Solved net-zero SURFACE-ANCHORED modes on subpixel (fill) models.
+
+    The coarse :class:`Redistribution` engine requires identical mode
+    weights on every filament -- that is what makes its tables Toeplitz
+    and its apply an FFT -- and a uniform conductivity. A subpixel model
+    breaks both: partial cells carry sigma_eff = sigma*fill, and the
+    physically right mode shapes are exponentials in the distance to the
+    TRUE conductor surface (the resolved circle), which differs cell by
+    cell. This subclass keeps the parent's augmentation contract (same
+    Ru/Zuu/Zcross/Zt blocks, net-zero columns, zero incidence) and swaps
+    the construction:
+
+      * per-cell weights ``Wf[f]`` from the surface exponential
+        ``exp(-(1+j) d/delta)`` at the sub-prism centroids (d = signed
+        distance to the cylinder surface, from the resolved geometry the
+        voxelizer stored), plus its two azimuthal (proximity) partners
+        -- the circle's analog of the face/corner conduction shapes;
+      * sub-prisms outside the metal (fill ~ 0) carry ZERO weight, and
+        the net-zero constraint holds over the SUPPORT;
+      * sub-bar resistance is fill-weighted, ``r_p = l/(sigma a fill_p)``
+        -- their parallel combination reproduces the aggregate's
+        sigma_eff exactly, and the resistive aggregate<->mode coupling
+        vanishes identically (r_p * fill share is constant over the
+        support, and the mode is net-zero);
+      * the AGGREGATE side of the cross block uses the fill shares
+        (the Galerkin-consistent clipped current), not the full box;
+      * assembly folds the parent's cached RAW separation tables with
+        the per-pair weights -- sparse/truncated only. ``use_fft`` is
+        forced off: per-cell weights are exactly what the FFT fold
+        cannot represent.
+
+    Mode placement is a geometric boundary ring: a cell carries modes
+    only if some supported sub-prism lies within ``bnd_reach`` cells of
+    the surface. Interior modes measured actively harmful in the 2-D
+    Galerkin study and unphysical at scale in 3-D (docket 2026-08-17);
+    the ring rule is the subpixel analog of ``boundary_only``.
+    """
+
+    def __init__(self, model, M, axis, fil_axis, fil_cell, k=7,
+                 term=None, rc_uu=3, rc_cross=4, csr_max_gb=2.0,
+                 skin_freq=None, bnd_reach=1.0):
+        spx = model.subpixel
+        self.axis = int(axis)
+        if int(spx['axis']) != self.axis:
+            raise NotImplementedError(
+                "subpixel modes: the terminal axis (%d) differs from "
+                "the cylinder axis (%d) -- transverse mode families are "
+                "future work" % (self.axis, int(spx['axis'])))
+        sigs = {float(g[3]) for g in spx['geom'].values()}
+        if len(sigs) != 1:
+            raise NotImplementedError(
+                "subpixel modes: cylinders with different sigma in one "
+                "model (%d values)" % len(sigs))
+        others = [c for c in range(3) if c != self.axis]
+        kk = (int(k), int(k)) if np.isscalar(k) else tuple(int(v) for v in k)
+        if min(kk) < 1 or max(kk) < 2:
+            raise ValueError("k must give at least two sub-filaments")
+        self.split = others
+        self.kk = kk
+        self.k = kk[0]*kk[1]
+        self.dx = model.dx
+        self.sigma = sigs.pop()
+        self.sel = np.flatnonzero(fil_axis == self.axis)
+        self.mode_basis = 'conduction'
+        self.boundary_only = True
+        self.nfil = self.sel.size
+        self.cells = fil_cell[self.sel]
+        self.lo, self.hi = self._sub_boxes(self.cells)
+        self.flo, self.fhi = self._full_boxes(self.cells)
+        self.asub = (self.dx/kk[0])*(self.dx/kk[1])
+        self.afull = self.dx*self.dx
+        if skin_freq is None or float(skin_freq) <= 0:
+            raise ValueError("SubpixelModes needs skin_freq > 0: the "
+                             "shapes are exponentials in the skin depth")
+        self.skin_freq = float(skin_freq)
+        self.csr_max_gb = float(csr_max_gb)
+        self.use_fft = False
+        self._term = term
+        self._rc_uu, self._rc_cross = int(rc_uu), int(rc_cross)
+        self._geom = {}
+        self._geom_t = {}
+        self._pairs = {}
+        # -- per-transverse-cell geometry, shared down the extrusion --
+        # sub-prism fills at the ENGINE subdivision (resampled from the
+        # resolved circle, independent of the voxelizer's k), signed
+        # distance to the surface and azimuth at the centroids.
+        t1, t2 = others
+        keys = np.stack([self.cells[:, t1], self.cells[:, t2]], axis=1)
+        self._tkey = [(int(a), int(b)) for a, b in keys]
+        self._percell = {}
+        k0, k1 = kk
+        h0, h1 = self.dx/k0, self.dx/k1
+        ns = 8                                    # samples per sub-prism axis
+        u1 = (np.arange(k0*ns) + 0.5)*(h0/ns)
+        u2 = (np.arange(k1*ns) + 0.5)*(h1/ns)
+        cu = (np.arange(k0) + 0.5)*h0             # centroids
+        cv = (np.arange(k1) + 0.5)*h1
+        for key in set(self._tkey):
+            g = spx['geom'].get(key)
+            if g is None:
+                # a conductor cell that is not part of any cylinder
+                # (mixed model): full box, no surface -> no modes, but
+                # it still couples as an aggregate
+                self._percell[key] = None
+                continue
+            c1, c2, R, _ = g
+            x0 = key[0]*self.dx
+            y0 = key[1]*self.dx
+            ins = ((x0 + u1[:, None] - c1)**2
+                   + (y0 + u2[None, :] - c2)**2) <= R*R
+            fill = ins.reshape(k0, ns, k1, ns).mean(axis=(1, 3)).ravel()
+            XC, YC = np.meshgrid(x0 + cu, y0 + cv, indexing='ij')
+            rho = np.hypot(XC.ravel() - c1, YC.ravel() - c2)
+            self._percell[key] = dict(
+                fill=fill, d=R - rho,             # signed: >0 inside
+                phi=np.arctan2(YC.ravel() - c2, XC.ravel() - c1))
+        # aggregate-side weights: fill shares (clipped current)
+        G = np.full((self.nfil, self.k), 1.0/self.k)
+        for f, key in enumerate(self._tkey):
+            pc = self._percell[key]
+            if pc is not None:
+                tot = pc['fill'].sum()
+                G[f] = pc['fill']/tot if tot > 0 else 0.0
+        self.G = G
+        # boundary ring: modes only where the surface passes nearby
+        self._bnd = np.zeros(self.nfil, dtype=bool)
+        reach = float(bnd_reach)*self.dx
+        for f, key in enumerate(self._tkey):
+            pc = self._percell[key]
+            if pc is not None:
+                sup = pc['fill'] > 1e-3
+                self._bnd[f] = bool(np.any(np.abs(pc['d'][sup]) <= reach))
+        self._set_Wf(*self._make_W(skin_depth(self.sigma, self.skin_freq)))
+        self._assemble()
+
+    # -- weights -------------------------------------------------------
+
+    KM = 6           # 3 complex shapes (skin, 2x proximity) x (re, im)
+
+    def _make_W(self, delta):
+        """Per-cell weight stack ``(nfil, k, KM)`` and its column mask.
+
+        Per unique transverse cell: the surface exponential and its two
+        azimuthal partners, restricted to the supported (fill > 0)
+        sub-prisms, mean-subtracted over the support (net-zero), then
+        normalised and pruned by pivoted QR -- a pruned column is zeroed
+        and MASKED rather than dropped, so ``km`` stays global and the
+        parent's mode_mask machinery does the bookkeeping.
+        """
+        from scipy.linalg import qr
+        Wu, cmask_u = {}, {}
+        for key, pc in self._percell.items():
+            if pc is None:
+                Wu[key] = np.zeros((self.k, self.KM))
+                cmask_u[key] = np.zeros(self.KM, dtype=bool)
+                continue
+            sup = pc['fill'] > 1e-3
+            # weights are sub-bar CURRENTS = density shape x metal
+            # area share. The fill factor is load-bearing twice over:
+            # physically (a sliver carries a sliver's current) and
+            # numerically (without it, an O(1) mode current through a
+            # 1/fill resistance makes Ru's conditioning arbitrarily
+            # bad -- the doctrine's sliver trap, measured here as a
+            # stalled Krylov solve)
+            c = (np.exp(-(1.0 + 1.0j)*np.maximum(pc['d'], 0.0)/delta)
+                 * pc['fill'])
+            shapes = [c, c*np.cos(pc['phi']), c*np.sin(pc['phi'])]
+            W = np.zeros((self.k, self.KM))
+            keep = np.zeros(self.KM, dtype=bool)
+            cols = []
+            for sh in shapes:
+                for part in (sh.real, sh.imag):
+                    w = np.zeros(self.k)
+                    w[sup] = part[sup] - part[sup].mean()
+                    cols.append(w)
+            Wc = np.stack(cols, axis=1)
+            nrm = np.linalg.norm(Wc, axis=0)
+            ok = nrm > 1e-12
+            Wc[:, ok] /= nrm[ok]
+            if ok.any():
+                _, Rq, piv = qr(Wc[:, ok], mode='economic', pivoting=True)
+                dg = np.abs(np.diag(Rq))
+                kept = np.flatnonzero(ok)[np.sort(piv[dg > 1e-7*dg[0]])]
+                keep[kept] = True
+                W[:, kept] = Wc[:, kept]
+                # exact net-zero over the support after pruning
+                col = W[:, kept]
+                col[sup] -= col[sup].mean(axis=0, keepdims=True)
+                W[:, kept] = col
+            Wu[key], cmask_u[key] = W, keep
+        Wf = np.zeros((self.nfil, self.k, self.KM))
+        cmask = np.zeros((self.nfil, self.KM), dtype=bool)
+        for f, key in enumerate(self._tkey):
+            Wf[f] = Wu[key]
+            cmask[f] = cmask_u[key]
+        return Wf, cmask
+
+    def _set_Wf(self, Wf, cmask):
+        net = np.abs(Wf.sum(axis=1)).max()
+        if net > 1e-9:
+            raise RuntimeError("subpixel mode weights are not net-zero "
+                               "(%.3e)" % net)
+        self.Wf = Wf
+        self.km = self.KM
+        self.nmode_full = self.nfil*self.km
+        self.mode_mask = (cmask & self._bnd[:, None]).ravel()
+        self.nmode = int(self.mode_mask.sum())
+
+    # -- assembly ------------------------------------------------------
+
+    def _assemble(self):
+        self.Zuu = self.Zcross = None
+        self.nnz = (0, 0)
+        self._build_truncated(self._rc_uu, self._rc_cross)
+        # per-cell fill-weighted mode resistance, block diagonal
+        r = np.zeros((self.nfil, self.k))
+        base = self.k/(self.sigma*self.dx)        # full-fill sub-bar
+        for f, key in enumerate(self._tkey):
+            pc = self._percell[key]
+            if pc is None:
+                r[f] = base
+            else:
+                sup = pc['fill'] > 1e-3
+                r[f, sup] = base/pc['fill'][sup]
+        blocks = np.einsum('fpm,fp,fpr->fmr', self.Wf, r, self.Wf)
+        self.Ru = sp.block_diag([blocks[f] for f in range(self.nfil)],
+                                format='csr')
+        self.Zt = None
+        if self._term is not None and self._term.axis == self.axis:
+            self._build_terminal(self._term, self._rc_cross)
+        if self.nmode != self.nmode_full:
+            mk = self.mode_mask
+            self.Ru = self.Ru[mk][:, mk]
+            if self.Zuu is not None:
+                self.Zuu = self.Zuu[mk][:, mk]
+            if self.Zcross is not None:
+                self.Zcross = self.Zcross[mk]
+            if self.Zt is not None:
+                self.Zt = self.Zt[mk]
+
+    def _build_truncated(self, rc_uu, rc_cross):
+        km = self.km
+        fa_u, fb_u = self._neighbour_pairs(rc_uu)
+        fa_c, fb_c = self._neighbour_pairs(rc_cross)
+        self._check_csr_size(fa_u.size, fa_c.size, rc_uu, rc_cross)
+        Du = self.cells[fb_u] - self.cells[fa_u]
+        Dc = self.cells[fb_c] - self.cells[fa_c]
+        D, inv = self._uniq_sep(np.concatenate([Du, Dc]))
+        iu, ic = inv[:len(Du)], inv[len(Du):]
+        M, _ = self._raw_tables(D)
+        self.ntable = int(D.shape[0])
+        Wf, G = self.Wf, self.G
+        mr = np.arange(km)
+        # mode <-> mode, folded per pair (chunked: the einsum temporary
+        # is npair*k*k)
+        red = np.empty((fa_u.size, km, km))
+        step = max(1, 20_000_000 // (self.k*self.k))
+        for a in range(0, fa_u.size, step):
+            sl = np.s_[a:a + step]
+            red[sl] = np.einsum('apm,apq,aqr->amr',
+                                Wf[fa_u[sl]], M[iu[sl]], Wf[fb_u[sl]])
+        rows = np.broadcast_to(fa_u[:, None, None]*km + mr[None, :, None],
+                               red.shape).ravel()
+        cols = np.broadcast_to(fb_u[:, None, None]*km + mr[None, None, :],
+                               red.shape).ravel()
+        self.Zuu = sp.csr_matrix((red.ravel(), (rows, cols)),
+                                 shape=(self.nmode_full, self.nmode_full))
+        # mode <-> aggregate, the aggregate carrying its fill shares
+        red = np.empty((fa_c.size, km))
+        for a in range(0, fa_c.size, step):
+            sl = np.s_[a:a + step]
+            red[sl] = np.einsum('apm,apq,aq->am',
+                                Wf[fa_c[sl]], M[ic[sl]], G[fb_c[sl]])
+        rows = (fa_c[:, None]*km + mr[None, :]).ravel()
+        cols = np.broadcast_to(fb_c[:, None], red.shape).ravel()
+        self.Zcross = sp.csr_matrix((red.ravel(), (rows, cols)),
+                                    shape=(self.nmode_full, self.nfil))
+        self.nnz = (int(self.Zuu.nnz), int(self.Zcross.nnz))
+
+    def _build_terminal(self, term, radius):
+        km = self.km
+        tcell = np.array([f[0] for f in term.faces], dtype=np.int64)
+        fa, tb = self._neighbour_pairs(radius, other=tcell.astype(float))
+        if fa.size == 0:
+            self.Zt = sp.csr_matrix((self.nmode_full, term.n))
+            self.ntable_t = 0
+            return
+        D, inv = self._uniq_sep(tcell[tb] - self.cells[fa])
+        Mct = self._raw_terminal_table(D, term.t_l)
+        self.ntable_t = int(D.shape[0])
+        si = (term.sign[tb] > 0).astype(np.int64)
+        red = np.einsum('apm,aps->ams', self.Wf[fa], Mct[inv])
+        red = red[np.arange(fa.size), :, si]
+        rows = (fa[:, None]*km + np.arange(km)[None, :]).ravel()
+        cols = np.broadcast_to(tb[:, None], red.shape).ravel()
+        self.Zt = sp.csr_matrix((red.ravel(), (rows, cols)),
+                                shape=(self.nmode_full, term.n))
+
+    def set_frequency(self, freq):
+        freq = float(freq)
+        if freq <= 0 or freq == self.skin_freq:
+            return False
+        self.skin_freq = freq
+        self._set_Wf(*self._make_W(skin_depth(self.sigma, freq)))
+        self._assemble()
+        return True
+
+    def build_fft(self, rc_uu, rc_cross):
+        raise NotImplementedError(
+            "subpixel modes have per-cell weights -- the mode blocks "
+            "are not translation invariant and cannot be applied as "
+            "convolutions; the sparse truncated path is the only one")
+
+    def mode_precond(self, jw):
+        """Block-Jacobi inverse of ``Ru + jw*Zuu`` per mode-carrying
+        cell, as a sparse block-diagonal matrix in the MASKED mode
+        numbering.
+
+        The mesh preconditioner is the frequency-independent Cholesky
+        of the cycle Gram, whose mode block is the identity -- mode
+        equations are effectively unpreconditioned. That is survivable
+        for the coarse engine's moderate mode scales, but the subpixel
+        blocks span sliver-to-full fill ratios AND deep-skin solves run
+        at omega ~ 1e12, where |jw*Zuu| dwarfs the identity: measured
+        2078 matvecs WITHOUT convergence at dx/delta = 6. The per-cell
+        inverse restores the row scales; rebuild per solve frequency
+        (a few thousand <= km x km inversions, milliseconds)."""
+        if self.Zuu is None or self.nmode == 0:
+            return None
+        A = (self.Ru + jw*self.Zuu).tocsr()
+        counts = self.mode_mask.reshape(self.nfil, self.km).sum(axis=1)
+        data, rows, cols = [], [], []
+        pos = 0
+        for c in counts:
+            if c == 0:
+                continue
+            idx = np.arange(pos, pos + int(c))
+            blk = A[idx][:, idx].toarray()
+            inv = np.linalg.inv(blk)
+            rows.append(np.repeat(idx, len(idx)))
+            cols.append(np.tile(idx, len(idx)))
+            data.append(inv.ravel())
+            pos += int(c)
+        return sp.csr_matrix(
+            (np.concatenate(data),
+             (np.concatenate(rows), np.concatenate(cols))),
+            shape=(self.nmode, self.nmode))
 
 
 class CouplerUnavailable(RuntimeError):
@@ -1524,16 +1887,30 @@ class EquiTerminalSolver:
             fref = float(np.max(model.freq)) if len(model.freq) else 0.0
         self.skin_freq = fref
         self.skin_k = 1
+        spx = getattr(model, 'subpixel', None)
         if subdivide is True or subdivide == 'auto':
-            self.skin_k = recommend_subdivision(model.dx,
-                                                model.uniform_sigma(), fref)
+            # fill models have no uniform sigma, but the base METAL
+            # sigma (what the skin depth is made of) is well defined
+            sig0 = (next(iter(spx['geom'].values()))[3] if spx
+                    else model.uniform_sigma())
+            self.skin_k = recommend_subdivision(model.dx, sig0, fref)
         elif subdivide in (False, None):
             self.skin_k = 1
         else:
             self.skin_k = int(subdivide)
         subdivide = self.skin_k
         self.redist = None
-        if subdivide > 1:
+        if subdivide > 1 and spx is not None:
+            # subpixel models get the surface-anchored per-cell engine;
+            # the coarse engine's identical-weight/uniform-sigma
+            # assumptions do not hold here
+            self.redist = SubpixelModes(model, M, self.term.axis,
+                                        self.fil_axis, self.fil_cell,
+                                        k=subdivide, term=self.term,
+                                        rc_uu=rc_uu, rc_cross=rc_cross,
+                                        csr_max_gb=csr_max_gb,
+                                        skin_freq=fref)
+        elif subdivide > 1:
             self.redist = Redistribution(model, M, self.term.axis,
                                          self.fil_axis, self.fil_cell,
                                          split_axis=split_axis,
@@ -2068,6 +2445,9 @@ class EquiTerminalSolver:
             if self.redist.nmode != self.nu:
                 self.nu = self.redist.nmode
                 self._build_augmented()
+        self._mode_pc = None
+        if self.nu and hasattr(self.redist, 'mode_precond'):
+            self._mode_pc = self.redist.mode_precond(self.M.jomega)
         n = self.efg + self.term.n + self.nu
         s = np.zeros(self.nnode + 2, dtype=np.complex128)
         s[self.pnode[+1]] = current
@@ -2103,7 +2483,13 @@ class EquiTerminalSolver:
     def _precond(self, vec):
         re = self.chol(np.float32(np.real(vec)))
         im = self.chol(np.float32(np.imag(vec)))
-        return np.float64(re) + 1j*np.float64(im)
+        out = np.float64(re) + 1j*np.float64(im)
+        if getattr(self, '_mode_pc', None) is not None:
+            # the mode tail of the cycle basis is an identity block, so
+            # the Gram Cholesky leaves it unpreconditioned -- apply the
+            # per-cell (Ru + jw Zuu)^-1 instead
+            out[-self.nu:] = self._mode_pc @ vec[-self.nu:]
+        return out
 
     def terminal_split(self, i, current=1.0):
         """Solved per-face current entering the conductor, share of I."""
