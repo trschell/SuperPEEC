@@ -880,14 +880,26 @@ class _EquiSweep:
                 # ~19 points of gap (measured on equibar at
                 # dx/delta = 4.8: k=3 57.6%, k=7 76.2%). Engagement
                 # is still the engine's own justification rule.
-                from equiterminal import recommend_subdivision
+                from equiterminal import recommend_subdivision, \
+                    skin_depth
                 fref = (float(sk['f_ref']) if sk['f_ref'] is not None
                         else max(prob.freqs) if prob.freqs else 0.0)
                 spx = getattr(m, 'subpixel', None)
                 sig0 = (next(iter(spx['geom'].values()))[3] if spx
                         else m.uniform_sigma())
                 if recommend_subdivision(m.dx, sig0, fref) > 1:
-                    sub = 7
+                    # RESOLUTION-AWARE k (2026-08-20, palette_ablation
+                    # + xsection_tabulated): once the shape family is
+                    # not the binder, the piecewise-constant sub-bar
+                    # grid is -- pick k so a sub-bar is <= delta/2.
+                    # Measured: dx/delta = 6 needs k = 12 (+4
+                    # delivered points over k = 7 at unchanged
+                    # matvecs; km, not k, drives solve cost) while
+                    # dx/delta = 3 is already resolved at 7. Floor 7
+                    # keeps the previous default; cap 12 is the
+                    # measured point and bounds the k^2 setup growth.
+                    delta = skin_depth(sig0, fref)
+                    sub = int(min(12, max(7, np.ceil(2*m.dx/delta))))
                 else:
                     sub = False
             self.skin_kwargs = dict(

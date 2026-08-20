@@ -301,14 +301,24 @@ def main():
              zhi.imag/(2*np.pi*1e9)))
     # -- the sub-cell skin engine, TOML-exposed (2026-08-17) ----------
     # auto default: conduction basis, engaged only when the cell size
-    # justifies it (the engine's recommend_subdivision), at k = 7 --
-    # conduction's k is pure quadrature and k = 3 measured 19 points
-    # of gap worse (57.6% vs 76.2% on this bar at dx/delta = 4.8)
-    check("skin auto engages on equibar (k = 7, conduction)",
-          swe.S.skin_k == 7
+    # justifies it (the engine's recommend_subdivision). k is
+    # RESOLUTION-AWARE since 2026-08-20 (palette_ablation +
+    # xsection_tabulated studies: once the shape family is not the
+    # binder, the piecewise-constant sub-bar grid is -- a sub-bar
+    # <= delta/2 recovers it, +4 delivered points at dx/delta = 6 at
+    # unchanged matvecs): k = min(12, max(7, ceil(2 dx/delta(fref)))).
+    # Equibar sits at dx/delta = 4.79 -> k = 10. Gate the RULE, not
+    # the constant, so the expected value tracks the geometry.
+    from equiterminal import skin_depth as _sd
+    _kexp = int(min(12, max(7, np.ceil(
+        2*me.dx/_sd(me.uniform_sigma(), swe.S.skin_freq)))))
+    check("skin auto engages on equibar (resolution-aware k, "
+          "conduction)",
+          swe.S.skin_k == _kexp
           and swe.skin_kwargs['mode_basis'] == 'conduction'
           and abs(swe.S.skin_freq - 1e9) < 1,
-          'k=%d f_ref %.3g' % (swe.S.skin_k, swe.S.skin_freq))
+          'k=%d (expect %d) f_ref %.3g'
+          % (swe.S.skin_k, _kexp, swe.S.skin_freq))
     # skin resolves the sub-cell crowding: R(1e9) well above the
     # unsubdivided value (recommend_subdivision's measured +90%-class
     # correction at this dx/delta), which mode = "off" reproduces
