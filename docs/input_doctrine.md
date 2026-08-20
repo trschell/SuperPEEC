@@ -170,8 +170,18 @@ written today still means the same thing after the next refactor.
     defaults to the sweep maximum, and the shapes retune per solve
     point regardless), `rc_uu`/`rc_cross` (mode-coupling truncation
     radii — READ THIS before touching them or trusting wire skin
-    numbers: the defaults (3, 4) are measured-correct for
-    RECTANGULAR cross-sections, but on round/staircase sections
+    numbers. Since 2026-08-20 the default is WIDTH-SCALED: rc =
+    (ceil(1.5 W), ceil(2 W)) with W the median transverse run
+    length of the conductor perpendicular to the port axis,
+    floored at (3, 4), capped at (12, 16), and falling back to
+    (3, 4) whenever the scaled radii would land in the mid-shell
+    damage zone of a wider dimension (measured: fixed (3, 4) was
+    fine at 2 cells across yet silently truncated ~20 delivered
+    points at 4 across, where (6, 8) — 1.5–2x the width —
+    recovers +14 of them at unchanged apply cost). Explicit
+    values are honoured as given. Fixed small radii remain
+    measured-correct for THIN rectangular sections, but on
+    round/staircase sections
     they deliver only 5–36% of the skin correction; full delivery
     there needs rc ≈ 2x the section diameter, at close to
     untruncated cost, because a net-zero mode's distant couplings

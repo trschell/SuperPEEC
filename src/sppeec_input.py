@@ -81,6 +81,56 @@ _SCHEMA = {
 
 _FACE = {'+x': (0, 1), '-x': (0, -1), '+y': (1, 1), '-y': (1, -1),
          '+z': (2, 1), '-z': (2, -1)}
+
+
+def _auto_rc(occ, axis):
+    """Width-scaled mode-coupling truncation radii (2026-08-20).
+
+    The skin engine's mode couplings correlate over the CROSS-SECTION
+    WIDTH (the flat-section sibling of the wire-class rc ~ 2D law,
+    doctrine rule 13): measured on the straight-bar ladder, rc = (3,4)
+    is fine at 2 cells across but silently truncates ~20 delivered
+    points at 4 across, where (6,8) -- 1.5-2x the width -- recovers
+    +14 of them at unchanged apply cost. So: estimate the section
+    width as the per-transverse-axis MEDIAN run length of occupied
+    cells (median so one wide pour does not inflate rc everywhere),
+    and take rc = (ceil(1.5 W), ceil(2 W)) off the THIN dimension.
+
+    TWO GUARDS, both measured:
+    * cost cap (12, 16): table setup grows with rc^3 (clipped to the
+      grid extent);
+    * the DAMAGE ZONE: on wide sections a hard cutoff at 0.5-1.5x the
+      width lands in the rc-ladder's measured non-monotonic region
+      (20x20 bar: rc 12-20 WORSE than (3,4) -- the cutoff breaks the
+      cancellation of the net-zero dipole tails mid-shell). When the
+      scaled rc cannot clear 1.5x the WIDE dimension under the cap,
+      fall back to the small-(3,4) regime (locally-1-D flat-face
+      physics) instead of stopping mid-shell.
+    """
+    occ = np.asarray(occ).astype(bool)
+    meds = []
+    for t in (a for a in range(3) if a != int(axis)):
+        o = np.moveaxis(occ, t, -1)
+        n = o.shape[-1]
+        flat = o.reshape(-1, n)
+        pad = np.zeros((flat.shape[0], n + 2), dtype=np.int8)
+        pad[:, 1:-1] = flat
+        d = np.diff(pad, axis=1)
+        starts = np.argwhere(d == 1)
+        ends = np.argwhere(d == -1)
+        if starts.size == 0:
+            continue
+        meds.append(float(np.median(ends[:, 1] - starts[:, 1])))
+    if not meds:
+        return 3, 4
+    w_thin, w_wide = min(meds), max(meds)
+    ru = max(3, int(np.ceil(1.5*w_thin)))
+    rc = max(4, int(np.ceil(2.0*w_thin)))
+    if ru > 12 or rc > 16:
+        return 3, 4                       # cap: fall back, never mid-shell
+    if rc > 0.5*w_wide and ru < 1.5*w_wide:
+        return 3, 4                       # would cut the wide axis mid-shell
+    return ru, rc
 _TOP = {'grid', 'block', 'model', 'wire', 'port',
         'cylinder', 'solve'}
 
@@ -376,8 +426,8 @@ class Problem:
             basis=str(skin.get('basis', 'conduction')),
             k=skin.get('k'),
             f_ref=skin.get('f_ref'),
-            rc_uu=int(skin.get('rc_uu', 3)),
-            rc_cross=int(skin.get('rc_cross', 4)),
+            rc_uu=skin.get('rc_uu'),
+            rc_cross=skin.get('rc_cross'),
             boundary_only=bool(skin.get('boundary_only', True)))
         if self.skin['mode'] not in ('auto', 'on', 'off'):
             raise ValueError("skin.mode must be 'auto' (engage when "
@@ -402,8 +452,13 @@ class Problem:
         if self.skin['f_ref'] is not None \
                 and float(self.skin['f_ref']) <= 0:
             raise ValueError("skin.f_ref must be > 0")
-        if self.skin['rc_uu'] < 1 or self.skin['rc_cross'] < 1:
-            raise ValueError("skin.rc_uu/rc_cross must be >= 1")
+        for key in ('rc_uu', 'rc_cross'):
+            if self.skin[key] is not None:
+                self.skin[key] = int(self.skin[key])
+                if self.skin[key] < 1:
+                    raise ValueError("skin.%s must be >= 1 (or omit "
+                                     "it for the width-scaled "
+                                     "automatic choice)" % key)
 
     def model(self):
         """Build the VoxelModel (inline grid or .vhr reference)."""
@@ -902,9 +957,26 @@ class _EquiSweep:
                     sub = int(min(12, max(7, np.ceil(2*m.dx/delta))))
                 else:
                     sub = False
+            rcu, rcc = sk['rc_uu'], sk['rc_cross']
+            if rcu is None or rcc is None:
+                # width-scaled automatic radii (see _auto_rc); the
+                # port axis is the mode-carrying axis, the width is
+                # transverse to it. Explicit values pass through.
+                # SCOPE: coarse-engine (FFT-path) models only --
+                # subpixel models run SubpixelModes' SPARSE path,
+                # whose cost grows as (2rc+1)^3 and whose Kelvin
+                # bands are validated at (3,4); they keep the small
+                # radii unless set explicitly.
+                if getattr(m, 'subpixel', None) is None:
+                    pax = int(prob.ports_faces[0][1][0][3])
+                    au, ac = _auto_rc(m.struc(), pax)
+                else:
+                    au, ac = 3, 4
+                rcu = au if rcu is None else int(rcu)
+                rcc = ac if rcc is None else int(rcc)
             self.skin_kwargs = dict(
                 subdivide=sub, mode_basis=sk['basis'],
-                rc_uu=sk['rc_uu'], rc_cross=sk['rc_cross'],
+                rc_uu=rcu, rc_cross=rcc,
                 boundary_only=sk['boundary_only'])
             if sk['f_ref'] is not None:
                 self.skin_kwargs['skin_freq'] = float(sk['f_ref'])

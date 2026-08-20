@@ -319,6 +319,24 @@ def main():
           and abs(swe.S.skin_freq - 1e9) < 1,
           'k=%d (expect %d) f_ref %.3g'
           % (swe.S.skin_k, _kexp, swe.S.skin_freq))
+    # rc is WIDTH-SCALED since 2026-08-20 (rc ~ 1.5-2x the section
+    # width off the median transverse run length; measured: (3,4)
+    # silently truncates ~20 delivered points at 4 cells across where
+    # (6,8) recovers +14 at unchanged apply cost; guards keep wide
+    # sections OUT of the rc-ladder's measured mid-shell damage zone
+    # by falling back to (3,4)). Equibar is 4x4 across -> (6, 8).
+    check("skin auto rc is width-scaled ((6,8) on the 4x4 bar)",
+          swe.skin_kwargs['rc_uu'] == 6
+          and swe.skin_kwargs['rc_cross'] == 8,
+          'rc=(%s,%s)' % (swe.skin_kwargs['rc_uu'],
+                          swe.skin_kwargs['rc_cross']))
+    prc = sppeec_input.loads(
+        eqtxt + '\nskin = { rc_uu = 3, rc_cross = 4 }')
+    mrc = prc.model()
+    swrc = prc.sweeper(mrc, prc.tree(mrc))
+    check("explicit skin rc override respected",
+          swrc.skin_kwargs['rc_uu'] == 3
+          and swrc.skin_kwargs['rc_cross'] == 4)
     # skin resolves the sub-cell crowding: R(1e9) well above the
     # unsubdivided value (recommend_subdivision's measured +90%-class
     # correction at this dx/delta), which mode = "off" reproduces
