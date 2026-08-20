@@ -755,6 +755,31 @@ class Redistribution:
         self._assemble()
         return True
 
+    def mode_precond(self, jw):
+        """Per-filament block-Jacobi inverse of ``Ru + jw*Zuu_self``.
+
+        The mesh preconditioner's mode block is the identity, so the
+        mode equations run unpreconditioned; at high omega with a rich
+        basis |jw Zuu| dwarfs Ru and the Krylov stalls (measured: the
+        engine-only ladder rungs at 1e10 hit the 311-matvec cap; the
+        same failure class as the C.2 subpixel modes before their
+        block-Jacobi shipped). Every filament carries IDENTICAL
+        weights, so the self block is ONE km x km matrix -- Ru's
+        per-filament block plus the folded same-filament sub-bar
+        mutual -- inverted once and Kronecker'd over the mode-carrying
+        filaments."""
+        if self.nmode == 0:
+            return None
+        from terminal import box_mutual_matrix
+        lo, hi = self._sub_boxes(self.cells[:1])
+        Ls = box_mutual_matrix(lo, hi, self.axis)
+        r_sub = self.k/(self.sigma*self.dx)
+        A = r_sub*(self.W.T @ self.W) + jw*(self.W.T @ (Ls @ self.W))
+        Ainv = np.linalg.inv(A)
+        nf = int(self._bnd.sum())
+        return sp.kron(sp.identity(nf, format='csr'),
+                       sp.csr_matrix(Ainv), format='csr')
+
     def _sub_boxes(self, cells):
         """The parallel sub-bars of each filament: the cross-section cut
         ``kk[0] x kk[1]`` over the two transverse axes, full length."""
