@@ -1923,15 +1923,23 @@ class EquiTerminalSolver:
                                          skin_freq=fref,
                                          boundary_only=boundary_only)
         if corner_modes:
-            if self.redist is not None:
+            if isinstance(self.redist, SubpixelModes):
                 raise ValueError(
-                    "corner_modes with the skin engine (subdivide > 1) "
-                    "is phase 2 -- not composed yet; run one or the "
-                    "other")
-            from cornermode import CornerModes
+                    "corner_modes with the subpixel engine is not "
+                    "composed yet (per-cell weights break the "
+                    "cross-block fold) -- run one or the other")
+            from cornermode import CornerModes, ModeStack
+            arm = None
+            if self.redist is not None:
+                # match the tabulation baseline to the engine's
+                # single-axis coverage (axis 2 has no in-plane modes)
+                arm = {0: 'u', 1: 'v'}.get(int(self.redist.axis))
             cm = CornerModes(model, M, self.fil_axis, self.fil_cell,
-                             rc_cross=rc_cross, verbose=verbose)
-            if cm.nmode:
+                             rc_cross=rc_cross, verbose=verbose,
+                             engine_arm=arm)
+            if cm.nmode and self.redist is not None:
+                self.redist = ModeStack(self.redist, cm)
+            elif cm.nmode:
                 self.redist = cm
             elif verbose:
                 print("    corner modes: requested but no eligible "

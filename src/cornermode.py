@@ -73,15 +73,24 @@ _TABLES = {}                # (W_cells, dx, sigma, KF, ratios) -> fields
 
 # --------------------------------------------------------------- tables
 def _tabulate(W_cells, dx, sigma, KF=6, ratios=(1e-3, 2.0, 4.0),
-              nz=None):
+              nz=None, engine_arm=None):
     """Canonical L-patch correction fields (fine minus coarse tents).
 
     Arms 3W, corner vertex at fine (3*WF, WF), WF = W_cells*KF fine
     cells per width; taper (1 - r/2W). Returns list of complex fields
-    on the (nx+1, ny+1) fine-vertex grid, one per ratio, plus WF."""
+    on the (nx+1, ny+1) fine-vertex grid, one per ratio, plus WF.
+
+    ``engine_arm``: None tabulates against the bare coarse basis
+    (engine-off solver). 'u' / 'v' adds an ENGINE ANALOG to the
+    baseline -- per-station transverse modes carrying the exact 1-D
+    strip skin profile -- on the u-arm (world x) or v-arm (world y)
+    respectively, matching the coarse engine's SINGLE-AXIS coverage
+    (Redistribution modes live only on port-axis-parallel filaments).
+    Without this the tables double-count the near-corner crowding the
+    engine already fixes (phase-2 requirement)."""
     nz = W_cells if nz is None else int(nz)
     key = (int(W_cells), float(dx), float(sigma), int(KF),
-           tuple(ratios), nz)
+           tuple(ratios), nz, engine_arm)
     if key in _TABLES:
         return _TABLES[key]
     a = dx/KF
@@ -162,6 +171,36 @@ def _tabulate(W_cells, dx, sigma, KF=6, ratios=(1e-3, 2.0, 4.0),
             off += psi_b[n]*t
     Phi = np.array(tents).T
 
+    def _engine_analog(delta):
+        """Per-station sinh strip-profile modes on ONE arm family."""
+        if engine_arm is None:
+            return []
+        kw = (1 + 1j)/delta
+        Wm = W_cells*dx
+
+        def prof(v_um_frac):
+            vm = v_um_frac*Wm
+            return (np.sinh(kw*(vm - Wm/2))/(2*np.sinh(kw*Wm/2))
+                    + 0.5 - vm/Wm)
+
+        out = []
+        iu = 0 if engine_arm == 'u' else 1
+        stations = (range(K, ARM*F + 1, K) if engine_arm == 'u'
+                    else range(F, (ARM + 1)*F, K))
+        for cs in stations:
+            t = np.maximum(0.0, 1 - np.abs(vs[:, iu] - cs)/float(K))
+            # transverse coordinate across the arm's width, 0..1,
+            # measured from the outer bank (psi = 0 side)
+            if engine_arm == 'u':
+                vfr = vs[:, 1]/float(F)
+            else:
+                vfr = ((ARM + 1)*F - vs[:, 0])/float(F)
+            m = t*prof(np.clip(vfr, 0.0, 1.0))
+            m[PRES] = 0.0
+            if np.abs(m).max() > 1e-9:
+                out.append(m)
+        return out
+
     r = np.hypot(vs[:, 0] - XI, vs[:, 1] - YI)/float(WF)
     taper = np.maximum(0.0, 1 - r/2.0)
     fields = []
@@ -172,10 +211,14 @@ def _tabulate(W_cells, dx, sigma, KF=6, ratios=(1e-3, 2.0, 4.0),
         rhs = -(A[np.ix_(FREE, PRES)] @ psi_b[PRES])
         xf = psi_b.astype(complex).copy()
         xf[FREE] = np.linalg.solve(A[np.ix_(FREE, FREE)], rhs)
-        Mg = Phi.T @ (A @ Phi)
-        rhsg = -(Phi.T @ (A @ off.astype(complex)))
+        eng = _engine_analog(delta)
+        Phi_b = (np.hstack([Phi.astype(complex)]
+                           + [e[:, None] for e in eng])
+                 if eng else Phi.astype(complex))
+        Mg = Phi_b.T @ (A @ Phi_b)
+        rhsg = -(Phi_b.T @ (A @ off.astype(complex)))
         aa, *_ = np.linalg.lstsq(Mg, rhsg, rcond=1e-13)
-        xb = off.astype(complex) + Phi @ aa
+        xb = off.astype(complex) + Phi_b @ aa
         v = (xf - xb)*taper
         v[PRES] = 0.0
         grid = np.zeros((nx + 1, ny + 1), dtype=complex)
@@ -247,9 +290,11 @@ class CornerModes:
     Zt = None
 
     def __init__(self, model, M, fil_axis, fil_cell, rc_cross=4,
-                 ratios=(1e-3, 2.0, 4.0), verbose=False):
+                 ratios=(1e-3, 2.0, 4.0), verbose=False,
+                 engine_arm=None):
         self.dx = model.dx
         self.sigma = model.uniform_sigma()
+        self.engine_arm = engine_arm
         corners = find_corners(model.struc())
         self.corners = corners
         self.ratios = tuple(ratios)
@@ -276,8 +321,12 @@ class CornerModes:
         pf_corner = []
         weights = []                        # per corner: (npf*k_in, nmod)
         for cn, (Ix, Iy, sx, sy, Wc, zs) in enumerate(corners):
+            # engine coverage maps to canonical arms axis-wise (the
+            # handedness maps are axis-aligned): engine axis 0 covers
+            # the u-arm, axis 1 the v-arm, anything else neither
             fields, WF = _tabulate(Wc, self.dx, self.sigma, self.KF,
-                                   self.ratios, nz=len(zs))
+                                   self.ratios, nz=len(zs),
+                                   engine_arm=engine_arm)
             sgn = float((-sx)*sy)           # psi flips under reflection
             R = 2*Wc
             inw = ((np.abs(fil_cell[:, 0] - Ix + 0.5) <= R)
@@ -408,7 +457,11 @@ class CornerModes:
         self.kk = (k_in, 1)
         self._Wall = Wall
         self._pf_idx = pf_idx
+        self._pf_axis = pf_axis
+        self._pf_cell = pf_cell
         self._k_in = k_in
+        self._lo, self._hi = lo, hi
+        self._sub_ax = sub_ax
 
     # -- solver interface ----------------------------------------------
     def set_frequency(self, freq):
@@ -423,3 +476,140 @@ class CornerModes:
         for b in self._blocks:
             out[b, b] = np.linalg.inv(A[b, b])
         return out
+
+
+# ---------------------------------------------------------------- stack
+class ModeStack:
+    """Engine + corner modes as ONE duck-typed ``redist`` object.
+
+    u = [u_engine; u_corner]. The engine keeps its own apply path (FFT
+    or sparse); corner blocks are dense-small; the engine<->corner
+    mode-mode coupling Zec is INCLUDED (the C.2 lesson: dropping
+    mode-mode dipole couplings over-crowds) but truncated to engine
+    filaments INSIDE the corner patches -- beyond the patch the
+    coupling is dipole-dipole 1/r^3, the same class the engine itself
+    truncates at rc_uu. The raw geometry of Zec is cached; an engine
+    retune (conduction shapes track the solve frequency) only refolds
+    the weights.
+
+    The stack always advertises ``use_fft = True`` and routes the
+    engine inside :meth:`apply_fft`, so the solver's FFT branch is the
+    single integration point."""
+
+    use_fft = True
+
+    def __init__(self, engine, corner):
+        import greens
+        self.engine = engine
+        self.corner = corner
+        self._greens = greens
+        # aggregate window: union of the two sel sets
+        self.sel = np.union1d(engine.sel, corner.sel)
+        self._pe = np.searchsorted(self.sel, engine.sel)
+        self._pc = np.searchsorted(self.sel, corner.sel)
+        # engine<->corner cross geometry: corner sub-bars parallel to
+        # the engine axis x engine sub-bars of PATCH filaments
+        a0 = engine.axis
+        cs = np.flatnonzero(corner._sub_ax == a0)
+        self._cs = cs
+        epos = []
+        if cs.size:
+            pcell = corner._pf_cell
+            # engine.sel positions whose cell is a corner-patch cell
+            patch = {tuple(c) for c in pcell}
+            for p, c in enumerate(engine.cells):
+                if tuple(c) in patch:
+                    epos.append(p)
+        self._epos = np.asarray(epos, dtype=int)
+        self._Lec_raw = None
+        if cs.size and self._epos.size:
+            elo, ehi = engine._sub_boxes(engine.cells[self._epos])
+            clo, chi = corner._lo[cs], corner._hi[cs]
+            ncs, nes = cs.size, elo.shape[0]
+            ii = np.repeat(np.arange(ncs), nes)
+            jj = np.tile(np.arange(nes), ncs)
+            S = greens.box_pair_stencil_pairs(clo[ii], chi[ii],
+                                              elo[jj], ehi[jj])
+            oth = [c for c in range(3) if c != a0]
+            ca = ((chi - clo)[:, oth[0]]*(chi - clo)[:, oth[1]])
+            ea = ((ehi - elo)[:, oth[0]]*(ehi - elo)[:, oth[1]])
+            self._Lec_raw = (S/(ca[ii]*ea[jj])).reshape(ncs, nes)
+        self._restack()
+
+    def _restack(self):
+        """(Re)build everything that depends on the engine's W/km."""
+        import scipy.sparse as _sp
+        e, c = self.engine, self.corner
+        self.ne, self.nc = e.nmode, c.nmode
+        self.nmode = self.ne + self.nc
+        self.Ru = _sp.block_diag([e.Ru, c.Ru], format='csr')
+        self.Zt = None
+        if e.Zt is not None:
+            Zt_e = e.Zt.toarray() if _sp.issparse(e.Zt) else \
+                np.asarray(e.Zt)
+            self.Zt = np.vstack([Zt_e,
+                                 np.zeros((self.nc, Zt_e.shape[1]),
+                                          dtype=Zt_e.dtype)])
+        # fold Zec: (engine modes) x (corner modes)
+        self.Zec = None
+        if self._Lec_raw is not None:
+            ke, km = e.k, e.km
+            nes = self._epos.size
+            # per patch filament: W_e^T (km x ke) @ L^T (ke x ncs)
+            fold = np.zeros((nes*km, self._cs.size), dtype=complex)
+            for q in range(nes):
+                blk = self._Lec_raw[:, q*ke:(q + 1)*ke]
+                fold[q*km:(q + 1)*km] = e.W.T @ blk.T
+            Wc = c._Wall[self._cs]
+            Zec_full = np.zeros((e.nmode_full, c.nmode), dtype=complex)
+            rows = (np.repeat(self._epos*km, km)
+                    + np.tile(np.arange(km), nes))
+            Zec_full[rows] = fold @ Wc
+            self.Zec = Zec_full[e.mode_mask]
+        # print compatibility
+        self.kk = e.kk
+        self.nnz = (getattr(e, 'nnz', (0, 0))[0] + c.nnz[0],
+                    getattr(e, 'nnz', (0, 0))[1] + c.nnz[1])
+        self.ntable = getattr(e, 'ntable', 0) + c.ntable
+
+    def apply_fft(self, u, i_f):
+        """(Zuu@u + Zcross@i_f, Zcross.T@u) over the stacked layout;
+        ``i_f`` is the aggregate slice over the UNION sel."""
+        e, c = self.engine, self.corner
+        ue, uc = u[:self.ne], u[self.ne:]
+        if e.use_fft:
+            mue, mfe = e.apply_fft(ue, np.ascontiguousarray(
+                i_f[self._pe]))
+        else:
+            mue = e.Zuu @ ue + e.Zcross @ i_f[self._pe]
+            mfe = e.Zcross.T @ ue
+        muc = c.Zuu @ uc + c.Zcross @ i_f[self._pc]
+        mfc = c.Zcross.T @ uc
+        if self.Zec is not None:
+            mue = mue + self.Zec @ uc
+            muc = muc + self.Zec.T @ ue
+        mf = np.zeros(self.sel.size, dtype=np.complex128)
+        np.add.at(mf, self._pe, mfe)
+        np.add.at(mf, self._pc, mfc)
+        return np.concatenate([mue, muc]), mf
+
+    def set_frequency(self, freq):
+        changed = self.engine.set_frequency(freq)
+        if changed:
+            self._restack()
+        return bool(changed)
+
+    def mode_precond(self, jw):
+        """Block-diagonal: the engine's own preconditioner when it has
+        one (identity otherwise -- the coarse engine's status quo) and
+        the corner blocks' exact inverse."""
+        import scipy.sparse as _sp
+        Pc = self.corner.mode_precond(jw)
+        Pe = None
+        if hasattr(self.engine, 'mode_precond'):
+            Pe = self.engine.mode_precond(jw)
+        if Pe is None:
+            Pe = _sp.identity(self.ne, format='csr',
+                              dtype=np.complex128)
+        return _sp.block_diag([_sp.csr_matrix(Pe),
+                               _sp.csr_matrix(Pc)], format='csr')

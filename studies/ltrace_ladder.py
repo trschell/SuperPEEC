@@ -98,6 +98,7 @@ def build_straight(nper):
 
 
 CORNER = os.environ.get('CORNER_MODES', '0') == '1'
+ENGINE = os.environ.get('ENGINE', '0') == '1'
 
 
 def run(path):
@@ -106,8 +107,15 @@ def run(path):
     M = m.build_tree()
     m.prepare(M, FREQS[0])
     # CORNER_MODES=1: corner modes on the Z-trace (the straight control
-    # has no corners, so the flag is harmless there)
-    S = eq.EquiTerminalSolver(m, M, 0, corner_modes=CORNER)
+    # has no corners, so the flag is harmless there).
+    # ENGINE=1: the shipped conduction engine (k=7, boundary-only) on
+    # BOTH geometries -- with CORNER_MODES too this is the phase-2
+    # composed acceptance, and the dZ differential is meaningful again.
+    kw = dict(corner_modes=CORNER)
+    if ENGINE:
+        kw.update(subdivide=7, mode_basis='conduction',
+                  boundary_only=True, skin_freq=max(FREQS))
+    S = eq.EquiTerminalSolver(m, M, 0, **kw)
     out = {}
     for f in FREQS:
         Z, _, info = S.solve(f, rtol=RTOL)

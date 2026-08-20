@@ -146,5 +146,52 @@ for f in (1e9, 1e10):
     check("dx/W=1/3 improves f=%.0e" % f, better,
           "R %.5g -> %.5g (ref %.5g)" % (Z0.real, Z1.real, REF[f]))
 
+# ------------------------------------------- phase 2: engine composition
+# coarse conduction engine (k=7, boundary-only) + corner modes via
+# ModeStack, with engine-baseline tables (single-axis engine analog in
+# the tabulation). Improvement bands measured 2026-08-19: the corner
+# modes cut the engine's REMAINING error to ~0.53x at both 1e9 and
+# 1e10 (dx/W = 1/2).
+kw = dict(subdivide=7, mode_basis='conduction', boundary_only=True,
+          skin_freq=1e10)
+Se = eq.EquiTerminalSolver(m, M, 0, **kw)
+Sc = eq.EquiTerminalSolver(m, M, 0, corner_modes=True, **kw)
+check("composed stack built", Sc.nu == Se.nu + 6,
+      "nu %d -> %d" % (Se.nu, Sc.nu))
+st = Sc.redist
+check("Zec cross block present", st.Zec is not None
+      and st.Zec.shape == (Se.nu, 6))
+
+m.prepare(M, 1e9)
+n = Sc.efg + Sc.term.n + Sc.nu
+x = rng.standard_normal(n) + 1j*rng.standard_normal(n)
+y = rng.standard_normal(n) + 1j*rng.standard_normal(n)
+lhs, rhs = y @ Sc.apply_Z(x), x @ Sc.apply_Z(y)
+check("composed reciprocity", abs(lhs - rhs) < 1e-9*abs(lhs),
+      "rel %.1e" % (abs(lhs - rhs)/abs(lhs)))
+
+cres = {}
+for f in (1e5, 1e9, 1e10):
+    Z, _, info = Sc.solve(f, rtol=1e-8)
+    check("composed converged f=%.0e" % f,
+          info['flag'] == 0 and info['residual'] <= 1e-7,
+          "flag %s resid %.1e mv %d" % (info['flag'],
+                                        info['residual'],
+                                        info['matvecs']))
+    cres[f] = Z
+check("composed DC decoupling",
+      abs(cres[1e5].real - res[('off', 1e5)].real)
+      < 1e-6*res[('off', 1e5)].real)
+for f, band in ((1e9, (0.40, 0.70)), (1e10, (0.40, 0.70))):
+    Zeng, _, ie = Se.solve(f, rtol=1e-8)
+    ok_e = ie['flag'] == 0 and ie['residual'] <= 1e-7
+    check("engine-only converged f=%.0e" % f, ok_e,
+          "flag %s resid %.1e" % (ie['flag'], ie['residual']))
+    e0, e1 = Zeng.real - REF[f], cres[f].real - REF[f]
+    ratio = e1/e0
+    check("composed improvement f=%.0e in [%.2f, %.2f]" % (f, *band),
+          band[0] <= ratio <= band[1] and e1*e0 > 0,
+          "err %.4g -> %.4g (x%.2f)" % (e0, e1, ratio))
+
 print("\n%s" % ("ALL OK" if nfail == 0 else "%d FAILURES" % nfail))
 sys.exit(1 if nfail else 0)
