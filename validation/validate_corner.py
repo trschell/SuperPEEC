@@ -173,8 +173,13 @@ check("composed reciprocity", abs(lhs - rhs) < 1e-9*abs(lhs),
 cres = {}
 for f in (1e5, 1e9, 1e10):
     Z, _, info = Sc.solve(f, rtol=1e-8)
+    # gate on the TRUE residual, not the lgmres flag (the C.2 v1
+    # lesson, doctrine rule 14): with the 2026-08-20 individual-corner
+    # palette the quasi-DC mode system carries near-degenerate columns
+    # and lgmres can stall at the fp32-precond floor AFTER the answer
+    # converged (measured: flag 10 at resid 5.2e-8, f = 1e5).
     check("composed converged f=%.0e" % f,
-          info['flag'] == 0 and info['residual'] <= 1e-7,
+          info['residual'] <= 1e-7,
           "flag %s resid %.1e mv %d" % (info['flag'],
                                         info['residual'],
                                         info['matvecs']))

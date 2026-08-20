@@ -474,7 +474,12 @@ def conduction_weights(kk, dx, delta):
     approximates badly (measured in ``studies/modebasis2d.py``: at
     matched mode count the conduction basis misses 6.6x less of the
     skin-effect correction than 'diff', the recorded 201%% failure's
-    root cause).
+    root cause). Since 2026-08-20 the four corner exponentials enter
+    INDIVIDUALLY (not as one symmetric sum): the corner-parity split
+    measured +6 delivered points at dx/delta 3-6, and the smooth
+    family was shown COMPLETE for straight sections
+    (``studies/xsection_tabulated.py`` -- the engine's residual is
+    sub-bar resolution and rc truncation, not span).
 
     The modes are anchored to the CELL faces, not the conductor surface:
     every filament must carry IDENTICAL weights or the Toeplitz/FFT
@@ -507,13 +512,25 @@ def conduction_weights(kk, dx, delta):
     ex0, ex1 = np.exp(-p*x), np.exp(-p*(dx - x))
     ey0, ey1 = np.exp(-p*y), np.exp(-p*(dx - y))
     pc = (1.0 + 1.0j)/(delta*np.sqrt(2.0))
-    corner = (np.exp(-pc*(x + y)) + np.exp(-pc*(x + (dx - y)))
-              + np.exp(-pc*((dx - x) + y))
-              + np.exp(-pc*((dx - x) + (dx - y))))
-    shapes = [ex0 + ex1 + ey0 + ey1,              # symmetric: skin
-              ex0 - ex1,                          # antisymmetric: proximity
-              ey0 - ey1,
-              corner]
+    # INDIVIDUAL faces and corners (2026-08-20, studies/
+    # palette_ablation.py + xsection_tabulated.py). The original
+    # palette carried the four corner exponentials only as their fully
+    # SYMMETRIC sum -- but four corner anchors span four parity
+    # combinations (symmetric, x-odd, y-odd, xy-odd), and a cell at a
+    # conductor corner cannot crowd toward its one exposed corner
+    # without them: the missing three columns measured +6 delivered
+    # points at dx/delta 3-6 (83->89 / 75->82 / 69->75 % at 2/3/4
+    # cells across), neutral at dx/delta ~ 2, and behave as a pure
+    # basis change under every knob (rc/k/frequency deltas match the
+    # old palette's to 0.1-0.3 points). Faces enter individually too
+    # (same span as the old symmetric+antisymmetric pairs). km grows
+    # to <= 16, so the mode-FFT spectra cost 4x -- measured matvec
+    # counts unchanged with mode_precond.
+    shapes = [ex0, ex1, ey0, ey1,
+              np.exp(-pc*(x + y)),
+              np.exp(-pc*(x + (dx - y))),
+              np.exp(-pc*((dx - x) + y)),
+              np.exp(-pc*((dx - x) + (dx - y)))]
     cols = []
     for c in shapes:
         for part in (c.real, c.imag):
