@@ -196,11 +196,45 @@ def endtoend():
           '--status' in h.stdout and '--status-file' in h.stdout)
 
 
+# ------------------------------------------- D. phase-2 setup tasks
+def phase2():
+    """Every phase-2 setup task must be observed on a real in-process
+    equipotential solve (equibar: 384 cells, skin engine self-engages
+    at its 1 GHz top frequency)."""
+    import sppeec_status as st
+    import sppeec_input
+    st.disable()
+    seen = set()
+    st.enable(callback=lambda d: seen.update(d['task']['stack']),
+              interval=0.0)
+    pr = sppeec_input.load(os.path.join(ROOT, 'examples',
+                                        'equibar.toml'))
+    m = pr.model()
+    M = pr.tree(m)
+    sw = pr.sweeper(m, M)
+    Z, info = sw.solve(1e9)
+    st.finish('done')
+    st.disable()
+    check('D: tree/prepare/assemble tasks observed',
+          {'build tree', 'prepare', 'assemble + preconditioner'}
+          <= seen, repr(sorted(seen)))
+    check('D: skin engine + mode-table ticker observed',
+          any(s.startswith('skin engine k=') for s in seen)
+          and 'mode tables' in seen, repr(sorted(seen)))
+    check('D: freq task + krylov observed on the library path',
+          any(s.startswith('solve f=') for s in seen)
+          and 'krylov' in seen)
+    check('D: solve still lands', info.get('matvecs', 0) > 0
+          and float(abs(Z)) > 0)
+
+
 def main():
     print('validate_status: A. unit')
     unit()
     print('validate_status: B/C. end-to-end + A/B')
     endtoend()
+    print('validate_status: D. phase-2 setup tasks')
+    phase2()
     if FAIL:
         print('FAIL: %d check(s): %s' % (len(FAIL), FAIL))
         return 1

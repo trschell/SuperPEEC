@@ -28,6 +28,7 @@ except Exception:                    # tuning must never break a solve
     _spthreads = None
 
 import numpy as np
+import sppeec_status as _spstatus
 import stencils as st
 
 MU0 = 4e-7*np.pi
@@ -590,25 +591,29 @@ class VoxelModel:
                     "element lattice, so nleaf must be %s, not %s"
                     % (self.name, list(want), list(nleaf)))
             # single level takes lf = ltop/nt directly; no padding
-            return mp.Tree(fullstruc, nleaf, LT0, 1, lscale, nmax,
-                           capacitive=capacitive, eps_r=self.eps_bg,
-                           **kwargs)
-        probe_struc = np.zeros(self.dims, dtype=np.int8)
-        probe_struc[0, 0, 0] = 1
-        probe = mp.Tree(probe_struc, nleaf, LT0, numlevels, lscale, nmax,
-                        capacitive=False)
-        # PER-AXIS rescale. The padding ntotalfull/ntotal differs from
-        # axis to axis whenever the grid is not cubic (60x20x20 with leaf
-        # 5 pads to 65x25x25: 1.083 on x but 1.25 on y and z), so the
-        # single scalar factor used elsewhere in this repo -- correct for
-        # the cubic test geometries it was written for -- would leave
-        # anisotropic cells here. Anisotropy is not loudly wrong: it
-        # shows up only as the x-directed filament resistance drifting
-        # from the y- and z-directed ones.
-        fac = self.d/np.asarray(probe.e.l, dtype=float)
-        del probe
-        M = mp.Tree(fullstruc, nleaf, LT0*fac, numlevels, lscale, nmax,
-                    capacitive=capacitive, eps_r=self.eps_bg, **kwargs)
+            with _spstatus.task('build tree'):
+                return mp.Tree(fullstruc, nleaf, LT0, 1, lscale, nmax,
+                               capacitive=capacitive, eps_r=self.eps_bg,
+                               **kwargs)
+        with _spstatus.task('build tree'):
+            probe_struc = np.zeros(self.dims, dtype=np.int8)
+            probe_struc[0, 0, 0] = 1
+            probe = mp.Tree(probe_struc, nleaf, LT0, numlevels, lscale,
+                            nmax, capacitive=False)
+            # PER-AXIS rescale. The padding ntotalfull/ntotal differs
+            # from axis to axis whenever the grid is not cubic (60x20x20
+            # with leaf 5 pads to 65x25x25: 1.083 on x but 1.25 on y and
+            # z), so the single scalar factor used elsewhere in this
+            # repo -- correct for the cubic test geometries it was
+            # written for -- would leave anisotropic cells here.
+            # Anisotropy is not loudly wrong: it shows up only as the
+            # x-directed filament resistance drifting from the y- and
+            # z-directed ones.
+            fac = self.d/np.asarray(probe.e.l, dtype=float)
+            del probe
+            M = mp.Tree(fullstruc, nleaf, LT0*fac, numlevels, lscale,
+                        nmax, capacitive=capacitive, eps_r=self.eps_bg,
+                        **kwargs)
         got = np.asarray(M.e.l, dtype=float)
         if np.any(np.abs(got/self.d - 1.0) > 1e-9):
             raise AssertionError(
@@ -646,15 +651,16 @@ class VoxelModel:
         offsets : tuple of int
             ``(esize, efsize, efgsize, wholesize)``.
         """
-        whole, offsets = allocate(M)
-        re, rf, rg = self.resistances(M, freq)
-        M.e.r = re/rscale
-        M.f.r = rf/rscale
-        M.g.r = rg/rscale
-        M.jomega = 1j*2*np.pi*freq
-        M.alpha = alpha
-        M.RDFinit()
-        return whole, offsets
+        with _spstatus.task('prepare'):
+            whole, offsets = allocate(M)
+            re, rf, rg = self.resistances(M, freq)
+            M.e.r = re/rscale
+            M.f.r = rf/rscale
+            M.g.r = rg/rscale
+            M.jomega = 1j*2*np.pi*freq
+            M.alpha = alpha
+            M.RDFinit()
+            return whole, offsets
 
     def resistances(self, M, freq=None):
         """Per-orientation filament resistance for this model's material.

@@ -72,6 +72,7 @@ from scipy.sparse.linalg import LinearOperator, lsqr, lgmres
 import sksparse.cholmod as cholmod
 
 import meshgraph as mg
+import sppeec_status as _spstatus
 import terminal as tm
 import stencils as st
 
@@ -1014,26 +1015,36 @@ class Redistribution:
             # the tens of millions -- unchunked that is GBs of broadcast
             # temporaries for a bounded-size answer.
             step = max(1, 2_000_000 // (k*k))
-            for a in range(0, nD, step):
-                Dc = D[a:a + step]
-                n = Dc.shape[0]
-                loD, hiD = self._sub_boxes(Dc)
-                floD, fhiD = self._full_boxes(Dc)
-                # mode <-> mode: k x k sub-bar pairs per separation
-                A_lo = np.broadcast_to(lo0[None, :, None, :], (n, k, k, 3))
-                A_hi = np.broadcast_to(hi0[None, :, None, :], (n, k, k, 3))
-                B_lo = np.broadcast_to(loD.reshape(n, 1, k, 3), (n, k, k, 3))
-                B_hi = np.broadcast_to(hiD.reshape(n, 1, k, 3), (n, k, k, 3))
-                S = spair(A_lo.reshape(-1, 3), A_hi.reshape(-1, 3),
-                          B_lo.reshape(-1, 3), B_hi.reshape(-1, 3))
-                M[a:a + step] = (S/(self.asub*self.asub)).reshape(n, k, k)
-                # mode <-> aggregate: k sub-bars against the full bar
-                A_lo = np.broadcast_to(lo0[None, :, :], (n, k, 3))
-                A_hi = np.broadcast_to(hi0[None, :, :], (n, k, 3))
-                Sc = spair(A_lo.reshape(-1, 3), A_hi.reshape(-1, 3),
-                           np.repeat(floD, k, axis=0),
-                           np.repeat(fhiD, k, axis=0))
-                Mc[a:a + step] = (Sc/(self.asub*self.afull)).reshape(n, k)
+            with _spstatus.task('mode tables',
+                                ticks=(nD + step - 1)//step) as _t:
+                for a in range(0, nD, step):
+                    Dc = D[a:a + step]
+                    n = Dc.shape[0]
+                    loD, hiD = self._sub_boxes(Dc)
+                    floD, fhiD = self._full_boxes(Dc)
+                    # mode <-> mode: k x k sub-bar pairs per separation
+                    A_lo = np.broadcast_to(lo0[None, :, None, :],
+                                           (n, k, k, 3))
+                    A_hi = np.broadcast_to(hi0[None, :, None, :],
+                                           (n, k, k, 3))
+                    B_lo = np.broadcast_to(loD.reshape(n, 1, k, 3),
+                                           (n, k, k, 3))
+                    B_hi = np.broadcast_to(hiD.reshape(n, 1, k, 3),
+                                           (n, k, k, 3))
+                    S = spair(A_lo.reshape(-1, 3), A_hi.reshape(-1, 3),
+                              B_lo.reshape(-1, 3), B_hi.reshape(-1, 3))
+                    M[a:a + step] = (S/(self.asub*self.asub)
+                                     ).reshape(n, k, k)
+                    # mode <-> aggregate: k sub-bars against the full
+                    # bar
+                    A_lo = np.broadcast_to(lo0[None, :, :], (n, k, 3))
+                    A_hi = np.broadcast_to(hi0[None, :, :], (n, k, 3))
+                    Sc = spair(A_lo.reshape(-1, 3), A_hi.reshape(-1, 3),
+                               np.repeat(floD, k, axis=0),
+                               np.repeat(fhiD, k, axis=0))
+                    Mc[a:a + step] = (Sc/(self.asub*self.afull)
+                                      ).reshape(n, k)
+                    _t.tick()
             cached = self._geom[key] = (M, Mc)
         return cached
 
@@ -1907,23 +1918,32 @@ class EquiTerminalSolver:
         if getattr(model, 'subpixel', None):
             from subpixel import build_dL
             self.dL_near = build_dL(model, M)
-        if fmm:
-            try:
-                if M.numlevels < 2:
-                    raise CouplerUnavailable(
-                        "single-level tree: p2p already covers the whole "
-                        "domain, so the dense block IS the near block")
-                self.coupler = TerminalCoupler(self.term, M, self.fil_axis,
-                                               self.fil_cell, self.csel)
-                # far terminal<->terminal pairs now come from the ladder
-                self.Ltt = np.where(self.coupler.tnear, self.Ltt, 0.0)
-            except CouplerUnavailable as exc:
-                # Fall back to the dense block, which is always correct --
-                # but RECORD why, so a silent 30x slowdown is diagnosable.
-                self.fmm_reason = str(exc)
-        if self.coupler is None:
-            # only now, and only if we must: this is the O(n_t * N) block
-            self.C, _ = self.term.coupling(self.fil_axis, self.fil_cell)
+        with _spstatus.task('terminal coupler'):
+            if fmm:
+                try:
+                    if M.numlevels < 2:
+                        raise CouplerUnavailable(
+                            "single-level tree: p2p already covers the "
+                            "whole domain, so the dense block IS the "
+                            "near block")
+                    self.coupler = TerminalCoupler(self.term, M,
+                                                   self.fil_axis,
+                                                   self.fil_cell,
+                                                   self.csel)
+                    # far terminal<->terminal pairs now come from the
+                    # ladder
+                    self.Ltt = np.where(self.coupler.tnear, self.Ltt,
+                                        0.0)
+                except CouplerUnavailable as exc:
+                    # Fall back to the dense block, which is always
+                    # correct -- but RECORD why, so a silent 30x
+                    # slowdown is diagnosable.
+                    self.fmm_reason = str(exc)
+            if self.coupler is None:
+                # only now, and only if we must: this is the
+                # O(n_t * N) block
+                self.C, _ = self.term.coupling(self.fil_axis,
+                                               self.fil_cell)
         # The skin-effect switch. False/None/1 = off (default, and
         # exactly the behaviour without this feature); True/'auto' picks
         # k from cell size vs skin depth at `skin_freq` (default: the
@@ -1980,23 +2000,28 @@ class EquiTerminalSolver:
             # subpixel models get the surface-anchored per-cell engine;
             # the coarse engine's identical-weight/uniform-sigma
             # assumptions do not hold here
-            self.redist = SubpixelModes(model, M, self.term.axis,
-                                        self.fil_axis, self.fil_cell,
-                                        k=subdivide, term=self.term,
-                                        rc_uu=rc_uu, rc_cross=rc_cross,
-                                        csr_max_gb=csr_max_gb,
-                                        skin_freq=fref)
+            with _spstatus.task('skin engine k=%d' % subdivide):
+                self.redist = SubpixelModes(model, M, self.term.axis,
+                                            self.fil_axis,
+                                            self.fil_cell,
+                                            k=subdivide, term=self.term,
+                                            rc_uu=rc_uu,
+                                            rc_cross=rc_cross,
+                                            csr_max_gb=csr_max_gb,
+                                            skin_freq=fref)
         elif subdivide > 1:
-            self.redist = Redistribution(model, M, self.term.axis,
-                                         self.fil_axis, self.fil_cell,
-                                         split_axis=split_axis,
-                                         k=subdivide, term=self.term,
-                                         rc_uu=rc_uu, rc_cross=rc_cross,
-                                         use_fft=use_fft,
-                                         csr_max_gb=csr_max_gb,
-                                         mode_basis=mode_basis,
-                                         skin_freq=fref,
-                                         boundary_only=boundary_only)
+            with _spstatus.task('skin engine k=%d' % subdivide):
+                self.redist = Redistribution(
+                    model, M, self.term.axis,
+                    self.fil_axis, self.fil_cell,
+                    split_axis=split_axis,
+                    k=subdivide, term=self.term,
+                    rc_uu=rc_uu, rc_cross=rc_cross,
+                    use_fft=use_fft,
+                    csr_max_gb=csr_max_gb,
+                    mode_basis=mode_basis,
+                    skin_freq=fref,
+                    boundary_only=boundary_only)
         if corner_modes:
             if isinstance(self.redist, SubpixelModes):
                 raise ValueError(
@@ -2020,7 +2045,8 @@ class EquiTerminalSolver:
                 print("    corner modes: requested but no eligible "
                       "corners found")
         self.nu = 0 if self.redist is None else self.redist.nmode
-        self._build_augmented()
+        with _spstatus.task('assemble + preconditioner'):
+            self._build_augmented()
         self.t_setup = time.perf_counter() - t0
         self.matvecs = 0
         if verbose:
@@ -2542,7 +2568,8 @@ class EquiTerminalSolver:
         if self.redist is not None and self.redist.set_frequency(freq):
             if self.redist.nmode != self.nu:
                 self.nu = self.redist.nmode
-                self._build_augmented()
+                with _spstatus.task('assemble + preconditioner'):
+                    self._build_augmented()
         self._mode_pc = None
         if self.nu and hasattr(self.redist, 'mode_precond'):
             self._mode_pc = self.redist.mode_precond(self.M.jomega)

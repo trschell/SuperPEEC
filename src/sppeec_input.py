@@ -911,9 +911,13 @@ class _LpRSweep:
 
     def solve(self, freq):
         with _status.freq_task(freq):
-            self.m.prepare(self.M, freq)
-            self.sol = self.prob.solver(self.M, freq, model=self.m,
-                                        verbose=self.verbose)
+            # the wire path rebuilds its solver per point (skin shapes
+            # follow the frequency), so the build is solve-time work
+            # worth showing, not setup
+            with _status.task('build wire solver'):
+                self.m.prepare(self.M, freq)
+                self.sol = self.prob.solver(self.M, freq, model=self.m,
+                                            verbose=self.verbose)
             Z, info = self.sol.solve(freq, current=self.prob.current,
                                      rtol=self.prob.rtol)
         _status_result(freq, Z, info)
