@@ -549,7 +549,15 @@ def conduction_weights(kk, dx, delta):
     # the span of the kept ones, so the span is preserved to that level.
     _, R, piv = qr(W, mode='economic', pivoting=True)
     d = np.abs(np.diag(R))
-    W = W[:, np.sort(piv[d > 1e-7*d[0]])]
+    # `qr(mode='economic')` returns R with min(m, n) ROWS, so diag(R) is
+    # min(m, n) long while piv is n long. Slicing piv to d's length is a
+    # no-op whenever m >= n (the only case reachable in production: the
+    # conduction-auto k rule floors k at 7, i.e. 49 sub-bars against at
+    # most 16 columns) and is what makes the k <= 3 case work at all --
+    # with m rows at most m columns can be independent, and pivoted QR
+    # has already ordered them by decreasing importance, so the
+    # candidates are exactly the first min(m, n) pivots.
+    W = W[:, np.sort(piv[:d.size][d > 1e-7*d[0]])]
     return W - W.mean(axis=0, keepdims=True)      # exact net-zero
 
 
