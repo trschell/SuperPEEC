@@ -595,7 +595,7 @@ class Redistribution:
     def __init__(self, model, M, axis, fil_axis, fil_cell, split_axis=None,
                  k=2, term=None, rc_uu=3, rc_cross=4,
                  use_fft=True, csr_max_gb=2.0, mode_basis='diff',
-                 skin_freq=None, boundary_only=False):
+                 skin_freq=None, boundary_only=True):
         self.axis = int(axis)
         others = [c for c in range(3) if c != self.axis]
         # k may be an int (split BOTH transverse axes k x k) or a pair.
@@ -621,6 +621,31 @@ class Redistribution:
         # neighbours' currents -- a real drive error, not a saving. So
         # keep every parallel filament in the coupling set and mask only
         # the mode DOFs.
+        # DEFAULT TRUE since 2026-08-23. Modes belong where the physics
+        # is: a cell with metal on all sides has no nearby surface for
+        # current to crowd against, so face-anchored exponentials there
+        # are unphysical, and because the modes are NET-ZERO their
+        # leading far field is a DIPOLE. Those spurious interior dipoles
+        # are what the mode-coupling truncation then mishandles -- it
+        # keeps part of a shell whose tails only cancel when enough of
+        # the shell is included, leaving an uncancelled field that
+        # OVER-CONCENTRATES the current and overstates loss.
+        #
+        # MEASURED on the 20-cell-wide numex1 bar, error against a
+        # converged refinement ladder:
+        #     boundary_only   10 GHz   25 GHz   100 GHz    cost
+        #     False            -0.2%    +4.6%    +70.9%    43.5 s
+        #     True             -2.1%    -5.4%     -7.7%    36.9 s
+        # True is CHEAPER and errs LOW -- the safe direction, the same
+        # direction as the plain basis -- where False overstates loss by
+        # 70% with no signal it has left its range.
+        #
+        # THIS ONLY ALIGNS THE DIRECT API WITH WHAT PRODUCTION ALREADY
+        # DID: sppeec_input has defaulted boundary_only to True since the
+        # 2026-08-17 referee measurement (modes-everywhere overshoots the
+        # physical skin limit ~2.8x on a wide section). Callers
+        # constructing EquiTerminalSolver directly -- every study in
+        # studies/ -- silently got the unsafe setting instead.
         self._bnd = np.ones(self.sel.size, dtype=bool)
         if self.boundary_only:
             occ = np.asarray(model.struc()).astype(bool)
@@ -1838,7 +1863,7 @@ class EquiTerminalSolver:
                  rc_cross=4, skin_freq=None, use_fft=True,
                  csr_max_gb=2.0, chol_mode='simplicial',
                  chol_ordering='metis', mode_basis='diff',
-                 boundary_only=False, basis='selected', amg_cycles=4,
+                 boundary_only=True, basis='selected', amg_cycles=4,
                  amg_cycle_type='V', amg_smoother=None,
                  amg_strength=None, gram_solver='amg',
                  corner_modes=False):
