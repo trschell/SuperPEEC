@@ -180,7 +180,8 @@ def getmesh(adjmat, esize, efsize, efgsize, nodesize):
     return csc_matrix((Zdat, Zind, Zindptr), shape=(efgsize, meshsize))
 
 
-def getmesh_fortran(adjmat, esize, efsize, efgsize, nodesize):
+def getmesh_fortran(adjmat, esize, efsize, efgsize, nodesize,
+                    fallback=True):
     """Divergence-free loop (mesh) basis, shape (efgsize, meshsize).
 
     Fast path: the Fortran plaquette enumerator (meshgraph_aux.getmesh),
@@ -233,6 +234,20 @@ def getmesh_fortran(adjmat, esize, efsize, efgsize, nodesize):
         Zindptr = np.r_[:4*(meshsize+1):4]
         return csc_matrix((dats[keep].ravel(), cols[keep].ravel(), Zindptr),
                           shape=(efgsize, meshsize))
+    # DEFICIENT. Note where the cost lives: the Fortran enumeration and
+    # the validation above are both ~0.01 s even at 10^5 cells, while the
+    # MST fundamental-cycle fallback below is a bidirectional BFS PER
+    # COTREE EDGE and goes quadratic. That is the whole of the long-
+    # standing "getmesh_fortran stalls on coil topologies" report:
+    # measured on circular_coil, the enumerator returns in 0.01 s having
+    # produced 126279 valid quads for a cycle dimension of 127913, and
+    # the minutes are spent in the fallback -- not in the enumerator.
+    #
+    # `fallback=False` therefore gives callers a CHEAP probe for "would
+    # the selected basis work here?", which basis='auto' uses to choose
+    # without ever paying for the fallback.
+    if not fallback:
+        return None
     print("getmesh_fortran: plaquette basis deficient (%d valid quads for "
           "cycle dimension %d) -- falling back to the MST fundamental-cycle "
           "basis" % (int(ok.sum()), meshsize))

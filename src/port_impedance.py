@@ -270,6 +270,68 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
 # {4, +-1} -- representable without loss. The tiny dense Schur LU stays
 # float64 (tens-sized; exactness there is free). SPPEEC_PRECOND_FP64=1
 # restores the old double-precision hierarchy for A/B measurement.
+# basis='auto': how many FILAMENTS the exact Cholesky is worth, PER
+# SOLVE the caller expects to do. The two bases differ in shape, not
+# just speed -- measured on a 192000-cell bar (564800 filaments), four
+# frequencies, warm-started, GPU on (studies/basiscross.py):
+#     over-complete  build   1.6 s | solve 214.9 s (258 mv) | 0.57 GB
+#     selected       build 210.8 s | solve 137.7 s ( 78 mv) | 2.47 GB
+# The Cholesky SOLVES faster because it is exact; it just pays a
+# superlinear factorisation first. So the decision is not "how big is
+# the model" but "how many solves will amortise the factor":
+#     n* = (build_sel - build_oc)/(per_solve_oc - per_solve_sel)
+# which is 10.8 there. One solve -> the frame; a long sweep -> the
+# Cholesky. Hence `nsolves`: a sweep driver that knows its plan says so,
+# and gets the right basis. Callers that say nothing get nsolves=1,
+# which is the conservative single-solve answer.
+#
+# CALIBRATION is that one crossover turned into a per-solve allowance,
+# clamped so neither end runs away.
+#
+# TWO KNOWN DEFECTS IN THIS RULE, both measured, neither yet fixed:
+#
+#  (1) IT IS EAGER. Re-measured at three sizes, it selects the Cholesky
+#      1.5-2.8 solves BEFORE it pays:
+#          filaments   n* (measured)   rule switches at
+#             10920        -0.1              0.16        (correct)
+#             69200         2.5              0.99        eager by 1.5
+#            564800        10.8              8.07        eager by 2.8
+#      At 69200 filaments with a single solve it picks `selected` when
+#      the frame is genuinely faster (4.8 s against 3.5 s), because
+#      _AUTO_SEL_FIL_MIN clamps the budget up.
+#
+#  (2) n* IS SUBLINEAR IN FILAMENT COUNT (~fil^0.70 over that range)
+#      while this rule is LINEAR in filaments. A linear rule cannot be
+#      right at both ends; it is calibrated at the top and drifts eager
+#      going down.
+#
+# NOT re-fitted, deliberately: all three points above are solid prisms
+# of one family, and the rule is also GEOMETRY-BLIND, which is the
+# larger error. Fill is driven by CROSS-SECTION, not filament count --
+# square_coil is 1.75e6 filaments but a quasi-2D spiral whose selected
+# setup (113 s) is CHEAPER than this solid bar's at a third the size. A
+# power law fitted to prisms would encode "solid bar" and could be worse
+# elsewhere. A cross-section-aware rule is the real fix; predicting fill
+# cheaply is the blocker (cholmod's symbolic analyze is fast at 2.4 s
+# but scikit-sparse will not expose nnz(L) without the numeric
+# factorisation). Override with SPPEEC_AUTO_SEL_FIL when a specific
+# geometry is known to fall the wrong side.
+_AUTO_SEL_FIL_PER_SOLVE = int(os.environ.get('SPPEEC_AUTO_SEL_PER_SOLVE',
+                                             70000))
+_AUTO_SEL_FIL_MIN = 70000
+_AUTO_SEL_FIL_MAX = 3000000
+_AUTO_SELECTED_MAX_FIL = int(os.environ.get('SPPEEC_AUTO_SEL_FIL', 0)) or None
+
+
+def _auto_selected_fil_budget(nsolves):
+    """Filament count below which the exact Cholesky is worth building."""
+    if _AUTO_SELECTED_MAX_FIL:          # explicit override wins
+        return _AUTO_SELECTED_MAX_FIL
+    n = max(1, int(nsolves))
+    return int(min(max(_AUTO_SEL_FIL_PER_SOLVE * n, _AUTO_SEL_FIL_MIN),
+                   _AUTO_SEL_FIL_MAX))
+
+
 _PRECOND_DT = (np.float64 if os.environ.get('SPPEEC_PRECOND_FP64') == '1'
                else np.float32)
 
@@ -654,10 +716,12 @@ class LpRSolver:
     """
 
     def __init__(self, M, verbose=False, chol_mode='simplicial',
-                 chol_ordering='metis', basis='auto', amg_cycles=4):
+                 chol_ordering='metis', basis='auto', amg_cycles=4,
+                 nsolves=1):
         self.M = M
         self.verbose = verbose
         self.basis = str(basis)
+        self.nsolves = max(1, int(nsolves))
         self.amg_cycles = int(amg_cycles)
         self.chol_mode = chol_mode
         self.chol_ordering = chol_ordering
@@ -673,6 +737,7 @@ class LpRSolver:
                 "tree buffer not allocated -- call VhrModel.prepare(M, f) "
                 "or vhr.allocate(M) before constructing LpRSolver")
         t0 = time.perf_counter()
+        self.basis_fallback = None
         adjmat = M.adjmats()
         if self.basis not in ('auto', 'selected', 'overcomplete'):
             raise ValueError("basis must be 'auto', 'selected' or "
@@ -690,14 +755,50 @@ class LpRSolver:
             # dominate the setup. (This REVERSES the older 590 s vs 630 s
             # ranking: eliminating the two lsqr projections removed a big
             # fixed cost from both totals, which promoted the setup to the
-            # deciding term.) getmesh_fortran also STALLS on coil
-            # topologies -- >135 s and still running on circular_coil,
-            # against 0.5 s for getmesh_full.
+            # deciding term.)
+            #
+            # BUT THAT RANKING IS SIZE-DEPENDENT, and this rule used to
+            # ignore that: it chose the frame UNCONDITIONALLY, which is
+            # wrong at small scale where the exact Cholesky is cheap and
+            # converges in far fewer outer products. Measured on the
+            # 24000-cell straight conductor, 4 frequencies:
+            #     selected      44.5 s,  82 matvecs
+            #     overcomplete  83.2 s, 187 matvecs
+            # for the same answer. (WireBondSolver has applied a
+            # size rule since 2026-08-12; LpRSolver did not.)
+            #
+            # THE STALL THAT MOTIVATED THE UNCONDITIONAL RULE IS NOT THE
+            # ENUMERATOR. "getmesh_fortran stalls on coil topologies" was
+            # recorded for years; measured, the Fortran returns in 0.01 s
+            # on circular_coil and is merely DEFICIENT (126279 valid
+            # quads for a cycle dimension of 127913). The minutes go to
+            # the MST fundamental-cycle FALLBACK it then triggers, which
+            # is a bidirectional BFS per cotree edge. So the deficiency
+            # is detectable for free, and `fallback=False` asks exactly
+            # that question -- letting a small model take the Cholesky
+            # when the selection spans, and the frame when it does not,
+            # without ever paying for the fallback.
             self.basis = 'overcomplete'
             auto = True
+            if self.efgsize < _auto_selected_fil_budget(self.nsolves):
+                probe = mg.getmesh_fortran(adjmat, self.esize,
+                                           self.esize + self.fsize,
+                                           self.efgsize, self.nodesize,
+                                           fallback=False)
+                if probe is not None:
+                    self.basis = 'selected'
+                    self._auto_probe = probe
+                else:
+                    self.basis_fallback = (
+                        'selected basis deficient on this topology '
+                        '(the MST fallback is the historic coil stall); '
+                        'using the over-complete frame')
         else:
             auto = False
-        self.basis_fallback = None
+        # NB: do NOT clear basis_fallback here -- the auto probe above
+        # may already have recorded why it declined the selected basis.
+        if not hasattr(self, 'basis_fallback'):
+            self.basis_fallback = None
         if self.basis == 'overcomplete':
             self.Y = mg.getmesh_full(adjmat, self.esize,
                                      self.esize + self.fsize,
@@ -746,9 +847,12 @@ class LpRSolver:
                     % self.basis_fallback, RuntimeWarning, stacklevel=2)
                 self.basis = 'selected'
         if self.basis == 'selected':
-            self.Y = mg.getmesh_fortran(adjmat, self.esize,
-                                        self.esize + self.fsize,
-                                        self.efgsize, self.nodesize)
+            self.Y = getattr(self, '_auto_probe', None)
+            if self.Y is None:
+                self.Y = mg.getmesh_fortran(adjmat, self.esize,
+                                            self.esize + self.fsize,
+                                            self.efgsize, self.nodesize)
+            self._auto_probe = None
         self.Y.data = np.float64(self.Y.data)
         self.YT = self.Y.T.tocsc()
         self.YT.data = np.float64(self.YT.data)
