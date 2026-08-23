@@ -464,7 +464,21 @@ class Problem:
         """Build the VoxelModel (inline grid or .vhr reference)."""
         import voxmodel
         if 'model' in self._doc:
-            return voxmodel.VoxelModel(self._doc['model']['vhr'])
+            # READ the file, do not just name it. `VoxelModel(path)` is
+            # an empty shell -- dims is None until something parses the
+            # geometry -- so this branch used to hand `tree()` a model
+            # with no dimensions and raise
+            #     TypeError: int() argument must be ... not 'NoneType'
+            # `[model] vhr` is a first-class part of the format (schema
+            # line 72, and mutually exclusive with `[grid]`), so this was
+            # THE documented route for running a VoxHenry file, and it
+            # could not run one. Nothing in examples/, validation/ or
+            # docs/input_doctrine.md exercised it, which is why it
+            # survived. `vhr.read_vhr` returns a fully-populated
+            # VoxelModel (VhrModel IS VoxelModel), which is what every
+            # other caller in the tree already uses.
+            import vhr as _vhr
+            return _vhr.read_vhr(self._doc['model']['vhr'])
         g = self._doc['grid']
         m = voxmodel.VoxelModel(self.path)
         m.dims = tuple(int(v) for v in g['dims'])
