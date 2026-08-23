@@ -33,6 +33,15 @@ rm -f _anchor_tmp.py
 # bit-identical (proof the removed code was inert). The dead-code
 # PRUNE then REBUILT mp_fortran, and a rebuild re-rolls the ~1e-30
 # rounding dust these converged residual norms are made of.
+# Anchor lineage (thread port): adding sppeec_threads re-based setup1
+# only -- 1.0201733741400102e-30 -> 1.0141635224321326e-30 -- while
+# setup2 and setup3 came back BIT-IDENTICAL. That is the shift this
+# header already predicted ("shift with OPENBLAS_NUM_THREADS"): pinning
+# OpenBLAS to one thread changes the reduction ORDER of the dense
+# kernels, so the ~1e-30 rounding dust these norms are made of re-rolls.
+# setup1 moved by 0.6% OF THE DUST, not of any answer, and the physics
+# gate for the change is the validator suite: 38/38 PASS, verdicts
+# identical to the pre-port run.
 # Lineage 2026-08-15: rebuilt again to ADD the MID_M2L_C64
 # subroutine (fp32 phase 3c); anchors re-rolled as expected -- the
 # anchor setups are lv2 (no MidLevel), so the changed code paths
@@ -41,7 +50,7 @@ rm -f _anchor_tmp.py
 echo "expected (this machine, stock env, binaries as built fresh in"
 echo "the SuperPEEC tree 2026-08-16; a rebuild or another machine"
 echo "re-bases these -- record your own values on first green run):"
-echo "          setup1 1.0201733741400102e-30"
+echo "          setup1 1.0141635224321326e-30"
 echo "          setup2 3.6833436970020444e-30"
 echo "          setup3 2.7418785553237524e-31"
 echo ALL DONE

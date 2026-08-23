@@ -24,6 +24,14 @@ import argparse
 import os
 import sys
 
+# Thread defaults before numpy loads its BLAS -- see sppeec_threads.py.
+# The CLI is a user's first contact with the solver, so it must not be
+# the one entry point that silently runs 6x slow.
+try:
+    import sppeec_threads  # noqa: F401
+except Exception:
+    pass
+
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

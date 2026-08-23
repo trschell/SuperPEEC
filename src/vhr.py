@@ -84,6 +84,19 @@ Command line::
     python3 vhr.py --build <file.vhr>               summarise and build
 """
 
+# Thread defaults -- see sppeec_threads.py. The library defaults cost
+# 6.3x on the FMM path (OpenBLAS spawning a dozen threads for each of
+# many small gemv calls) and 1.8x even on the dense LpPR path, and the
+# penalty is LARGEST on the coarse meshes the skin/corner studies use.
+# The runtime call works whatever the import order; the environment
+# block inside the module covers OMP and FFTW for anyone importing
+# early.
+try:
+    import sppeec_threads as _spthreads
+    _spthreads.enforce_blas()
+except Exception:                    # tuning must never break a solve
+    _spthreads = None
+
 import numpy as np
 import stencils as st
 
