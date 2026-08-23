@@ -54,6 +54,13 @@ def main():
                 return '%+.1f%%' % (100*(R - Rt)/Rt) if R is not None else '—'
             A('| %s | %.3g Hz | %.2f | %.5g | %s | %s | **%s** |'
               % (key, f, dx/sd(f), Rt, e(pl), e(rv), e(dv)))
+    A('')
+    A('The wire10 R_true ladder RE-VOXELIZES the circle each rung, so '
+      'its SuperPEEC column measures the coarse-vs-refined staircase '
+      'geometry gap, not engine error; against a same-shape '
+      '(frozen-occupancy) ladder the engine is at or below truth at '
+      'every converged frequency. See docs/current_flow_narrative.md '
+      'Problem 3 and studies/frozenwire.py.')
     print('\n'.join(out))
 
 

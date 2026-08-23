@@ -7,7 +7,8 @@ actually for.
 
 Measured 2026-08-23. Harness `studies/skinnarr.py`, tables
 `studies/skinnarr_report.py`, current maps `studies/skinnarr_profile.py`,
-raw data `studies/skinnarr_results.json`.
+raw data `studies/skinnarr_results.json`. The round-wire follow-up
+(same day): `studies/frozenwire.py`, `studies/frozenwire_results.json`.
 
 ---
 
@@ -85,9 +86,13 @@ At **dx/δ ≈ 1.5** (10 GHz on a 1 µm mesh), error in R against converged trut
 |---|---:|---:|---:|---:|
 | bar, 2 cells across | ±0.5% | −12.5% | **−12.5%** | **−0.7%** |
 | bar, 4 cells across | ±0.6% | −9.9% | **−9.9%** | **+0.5%** |
-| round wire (numex2) | ±0.0% | −5.5% | **−5.5%** | **+7.2%** |
+| round wire (numex2) | ±0.0% | −5.5% | **−5.5%** | **+7.2%**¹ |
 | hairpin (turning) | ±1.7% | −10.0% | −10.6% | **−0.5%** |
 | numex1, 20 across | ±0.6% | −2.8% | **−2.8%** | **−2.0%** |
+
+¹ Against a truth ladder whose staircase geometry changes as it
+refines. Against a same-shape ladder this row reads **−0.6%** — see
+Problem 3.
 
 Two findings dominate everything below.
 
@@ -100,8 +105,10 @@ converts a coarse-mesh answer from unusable to engineering-grade.** On
 rectangular sections they hold **within about 2% out to dx/delta ~ 2.4**,
 where the plain basis is 24-36% low, on the SAME cells. The striking
 case is the 2-cell bar at 100 GHz: -63.4% plain against **-0.5%** with
-the defaults, from two cells across the section. The one geometry where
-they genuinely misfire is the staircase round wire, +7 to +16%.
+the defaults, from two cells across the section. The round wire's
+apparent +7 to +16% overshoot, reported as a misfire in an earlier
+revision, turned out on same-shape refinement to be an artifact of the
+reference geometry, not of the engine — see Problem 3.
 
 ---
 
@@ -175,32 +182,65 @@ VoxHenry both land at **−5.5%** at 10 GHz, which for a design-stage
 number is defensible. Both are −18.4% by 25 GHz. Once again the two
 agree to four digits at every rung.
 
-**This is the one geometry where SuperPEEC's conduction modes make
-things worse.** At defaults they read +3.4% at 2.5 GHz, **+7.2% at
-10 GHz**, +7.6% at 25 GHz and +15.8% at 100 GHz — an overshoot
-throughout, where plain is 0.5–48% low. The modes are exponentials
-anchored to *cell faces*, exactly right for an axis-aligned rectangular
-boundary and wrong for a staircase approximation of a circle, where the
-true surface cuts diagonally through cells; the engine crowds current
-toward the wrong surfaces.
+**Against this problem's refinement ladder the conduction modes appear
+to make things worse.** At defaults they read +3.4% at 2.5 GHz, **+7.2%
+at 10 GHz**, +7.6% at 25 GHz and +15.8% at 100 GHz — an apparent
+overshoot throughout, where plain is 0.5–48% low, and the only rows in
+the study where plain beats the engine. An earlier revision of this
+document reported that as the engine's one genuine failure and blamed
+the face-anchored mode shapes.
 
-Two things make this the most interesting failure in the study. It is a
-property of the METHOD, not of a setting — it survives every default
-being correct, unlike the rectangular-section overshoots an earlier
-revision reported, which were a configuration error. And it errs HIGH,
-overstating loss, where the plain basis errs low and can be bounded. At
-10 GHz an engineer choosing between them would be better served by the
-plain basis (−5.5%) than by the modes (+7.2%), which is not true
-anywhere else in this study.
+### The overshoot resolved: it is the reference's geometry, not the engine
 
-One honest caveat about this problem's ground truth: refining a
-staircase circle *changes the geometry*, because the set of cells whose
-centres fall inside the circle is re-chosen at each resolution. The DC
-resistance therefore wobbles ±0.7% between rungs rather than converging
-monotonically, and the extrapolation is unreliable even where the value
-is stable. At 10 GHz the two finest rungs agree to four digits so the
-truth is solid; at 100 GHz the uncertainty is ±12% and no verdict is
-drawn.
+Refining a staircase circle *changes the geometry* — the set of cells
+whose centres fall inside the circle is re-chosen at every resolution,
+which is why the DC resistance wobbles ±0.7% between rungs instead of
+converging. So this problem's "truth" converges to a *finer staircase*,
+a different shape from the coarse 10-cell staircase the engine was
+actually asked to solve — and the coarse staircase's own resistance is
+genuinely higher (its jagged boundary crowds current at step corners;
+an independent 2026-08-05 measurement of exactly this gap, at the same
+r/dx = 5 and 10 GHz, put it at **+7.4%** — the size of the
+"overshoot").
+
+`studies/frozenwire.py` settles it by rebuilding the ladder with the
+**occupancy frozen**: every rung inherits the coarse disc mask
+(kron-refined), so all rungs are the same shape and R_dc is pinned
+exactly; the coarsest rung reproduces the campaign's wire file
+bit-for-bit. Scored against that same-shape truth, the same engine
+numbers read:
+
+| f | dx/δ | vs re-voxelized ladder | vs same-shape truth | of the AC rise |
+|---|---:|---:|---:|---:|
+| 1 GHz | 0.48 | −0.5% | −1.7% | 94% |
+| 2.5 GHz | 0.76 | +3.4% | **+0.4%** | 101% |
+| 10 GHz | 1.51 | +7.2% | **−0.6%** | 99% |
+| 25 GHz | 2.39 | +7.6% | **−4.5%** (−0.5% by Richardson) | 95% |
+| 100 GHz | 4.79 | +15.8% | ladder unconverged² | — |
+
+² Even a fourth rung at 256k cells (dx/δ = 1.2) leaves the frozen
+ladder still rising (0.0576 → 0.0952 → 0.1135 → 0.1219); the limit
+extrapolates to roughly 0.129–0.142 and the engine's 0.128 sits at or
+below every estimate of it. No verdict, but no overshoot.
+
+**The overshoot was never in the engine.** On its own shape the engine
+delivers 94–101% of the AC resistance rise — the same behaviour it
+shows on rectangular sections. What the campaign table measures on the
+wire rows is the *geometry gap* between the coarse staircase and its
+refined re-voxelization, and the plain basis only looked better there
+by error cancellation: its basis error (low) partially offsets the
+staircase's geometry error (high). That is the same cancellation
+already noted below for VoxHenry's celebrated numex2 figure. It also
+explains why the apparent overshoot sat roughly constant near +7%
+through the mid-band instead of growing with dx/δ as a basis defect
+would: a shape gap saturates (the staircase perimeter exceeds the
+circle's by a fixed 8/2π ≈ 27%).
+
+The practical residual is real but different from a solver defect: on a
+staircase-discretised curved section, the answer the engine faithfully
+gives is the *staircase's*, which overstates a true round wire's loss
+by several percent at these resolutions. Fixing that is a geometry-
+representation problem (sub-cell fill fractions), not a basis problem.
 
 ## Problem 4 — the hairpin, where the current has to turn
 
@@ -317,16 +357,18 @@ is -0.5% where plain is -63.4%. `bar4` and `bend4` behave the same way
 out to dx/delta ~ 2.4. This is the regime the engine was built for and
 it holds it comfortably.
 
-**Three places it degrades, all visible above:**
+**Places it appears to degrade, all visible above:**
 
-* **The staircase round wire, +3 to +16%.** The modes are exponentials
-  anchored to CELL FACES, exactly right for an axis-aligned rectangular
-  boundary and wrong where the true surface cuts diagonally through
-  cells. This is the one failure that is a property of the method
-  rather than of a setting, and it errs HIGH -- overstating loss.
+* **The staircase round wire rows, +3 to +16%, are an artifact of this
+  table's reference**, whose staircase geometry changes as it refines.
+  Against a same-shape ladder the engine is at or below truth at every
+  converged frequency (−0.6% at 10 GHz) — see Problem 3. The wire rows
+  above are kept because they are what this ladder measures; read them
+  as the coarse-staircase-vs-fine-staircase geometry gap, with plain's
+  smaller numbers being error cancellation, not accuracy.
 * **dx/delta ~ 4.8 on the widest sections**, where `bar4` reaches +6.1%
   and `bend4` +26.5%. There the sub-bar grid is trying to resolve a
-  skin depth thinner than a fifth of a cell.
+  skin depth thinner than a fifth of a cell. This one is genuine.
 * **numex1's mid-band, -5.1% at dx/delta = 1.2**, slightly worse than
   its own -3.4% at 2.39. The engine is not monotone in frequency.
 
@@ -354,8 +396,9 @@ SuperPEEC's conduction modes attack precisely the other problem. They
 are exponential profiles in the skin depth, net-zero within a cell, and
 they exist to let current crowd toward a surface at a resolution the
 mesh cannot express. They are worth roughly 5–10× in accuracy on
-rectangular sections at dx/δ ≥ 1.5, and they are actively harmful on
-staircase-curved ones.
+rectangular sections at dx/δ ≥ 1.5, and they hold that accuracy on
+staircase-curved ones too once the reference is the same shape — what
+they cannot do is turn a staircase back into a circle.
 
 **Neither code does both.** A voxel solver that handled turning *and*
 crowding would need both families, and nothing in this study prevents
@@ -387,13 +430,14 @@ engineering-grade answer in a regime the plain basis cannot represent at
 all. It also converges reliably -- the plain-basis ladder underpins
 every truth value in this document.
 
-**SuperPEEC falls short** on the staircase-discretised round wire, where
-it overshoots 7-8% through the mid-band and +15.8% at 100 GHz while the
-plain basis runs 5-48% low. The direction matters: an overshoot reports
-more loss than exists, whereas an under-resolved plain solve is always
-low and can be bounded. Nothing in the code warns that a curved section
-sits outside what face-anchored modes represent well. It is also the
-slowest arm on every problem here, and not monotone in frequency.
+**SuperPEEC falls short** in smaller ways. On a staircase-discretised
+curved section it faithfully returns the *staircase's* resistance,
+which overstates a true round wire's loss by several percent at these
+resolutions — an inherited geometry-representation limit shared by
+every voxel code here (plain and VoxHenry hide it only by error
+cancellation), but SuperPEEC is the arm accurate enough to expose it,
+and nothing in the code warns about it. It is also the slowest arm on
+every problem here, and not monotone in frequency on numex1.
 
 ## Where the plain error goes as the mesh loses the skin depth
 
@@ -439,9 +483,15 @@ work.**
   if tuned. The one probe that was run (an rc ladder on numex1) is not
   reported here because it was taken on the mis-configured path and
   would need redoing.
-* Why the engine is non-monotone in frequency on numex1, and why the
-  round wire overshoots by a roughly constant 7-8% rather than growing
-  with dx/delta, are both unexplained.
+* Why the engine is non-monotone in frequency on numex1 is unexplained.
+  (The round wire's roughly constant apparent overshoot is no longer a
+  puzzle — it is the saturating staircase geometry gap; see Problem 3.)
+* The frozen-shape ladder settles what the engine does on the coarse
+  staircase; what a *true circular* cross-section reads at these
+  frequencies is still unmeasured (the staircase perimeter never
+  converges to the circle's). The De Zutter/Knockaert exact circular
+  reference is the natural arbiter and has not been run against this
+  campaign.
 * VoxHenry's J2d/J3d shapes were characterised by their *effect* and by
   their coefficient norms, not by reading their definitions out of the
   Green's-function tensor. The conclusion "they are for turning, not

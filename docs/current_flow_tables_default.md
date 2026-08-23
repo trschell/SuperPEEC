@@ -25,3 +25,5 @@
 | numex1 | 1e+10 Hz | 0.76 | 0.020587 | -2.8% | -2.8% | **-2.0%** |
 | numex1 | 2.5e+10 Hz | 1.20 | 0.031066 | -7.0% | -7.0% | **-5.1%** |
 | numex1 | 1e+11 Hz | 2.39 | 0.055939 | -23.4% | -23.3% | **-3.4%** |
+
+The wire10 R_true ladder RE-VOXELIZES the circle each rung, so its SuperPEEC column measures the coarse-vs-refined staircase geometry gap, not engine error; against a same-shape (frozen-occupancy) ladder the engine is at or below truth at every converged frequency. See docs/current_flow_narrative.md Problem 3 and studies/frozenwire.py.
