@@ -56,9 +56,12 @@ FILE SHAPE::
     freq = [1e6, 1e7, 1e8]
     # optional: rtol, current
 """
+import os
 import tomllib
 
 import numpy as np
+
+import sppeec_status as _status
 
 MU0 = 4e-7*np.pi
 
@@ -853,6 +856,49 @@ class Problem:
                               pp, pn, foot_r0=self.foot_r0(), **kw)
 
 
+def _status_meta(prob, m, M, **params):
+    """Publish run identity + RESOLVED solver parameters to the status
+    API (sppeec_status; no-op unless enabled). Lives here, not in the
+    CLI, so library users -- a study driving a sweeper directly under
+    SPPEEC_STATUS=... -- report the same metadata."""
+    if not _status.enabled():
+        return
+    model = dict(
+        name=os.path.splitext(os.path.basename(prob.path))[0],
+        input=prob.path, formulation=prob.formulation)
+    try:
+        model.update(dims=[int(v) for v in m.dims],
+                     cells=int(np.asarray(m.struc()).sum()),
+                     fill_pct=float(m.fill()),
+                     nports=len(getattr(m, 'ports', []) or []),
+                     tree_levels=int(getattr(M, 'numlevels', 0)))
+    except Exception:                 # metadata must never break setup
+        pass
+    _status.run_meta(model=model,
+                     params=dict(method=prob.method, rtol=prob.rtol,
+                                 current=prob.current,
+                                 basis=prob.solver_basis, **params))
+    _status.sweep_meta(prob.freqs)
+
+
+def _status_result(freq, Z, info):
+    """Record one completed frequency point (scalar Z only -- the
+    multi-port matrix keeps counters but no single R/L)."""
+    if not _status.enabled():
+        return
+    if np.ndim(Z) != 0:
+        _status.record_result(freq, matvecs=info.get('matvecs'),
+                              time_s=info.get('time'))
+        return
+    w = 2*np.pi*float(freq)
+    _status.record_result(
+        freq, R=np.real(Z), imZ=np.imag(Z),
+        L=(abs(np.imag(Z))/w if w > 0 else None),
+        matvecs=info.get('matvecs'),
+        residual=info.get('residual', info.get('true_residual')),
+        time_s=info.get('time'))
+
+
 class _LpRSweep:
     """Per-frequency WireBondSolver behind the sweeper interface."""
     formulation = 'LpR'
@@ -861,13 +907,17 @@ class _LpRSweep:
         self.prob, self.m, self.M = prob, m, M
         self.verbose = verbose
         self.sol = None          # last WireBondSolver (wire export)
+        _status_meta(prob, m, M, wires=True)
 
     def solve(self, freq):
-        self.m.prepare(self.M, freq)
-        self.sol = self.prob.solver(self.M, freq, model=self.m,
-                                    verbose=self.verbose)
-        return self.sol.solve(freq, current=self.prob.current,
-                              rtol=self.prob.rtol)
+        with _status.freq_task(freq):
+            self.m.prepare(self.M, freq)
+            self.sol = self.prob.solver(self.M, freq, model=self.m,
+                                        verbose=self.verbose)
+            Z, info = self.sol.solve(freq, current=self.prob.current,
+                                     rtol=self.prob.rtol)
+        _status_result(freq, Z, info)
+        return Z, info
 
 
 class _EquiSweep:
@@ -1005,13 +1055,16 @@ class _EquiSweep:
                 'off (mesh resolves the skin depth)'), flush=True)
         self.sol = None          # no wire solver on this path
         self.efg = self.S.efg
+        _status_meta(prob, m, M, skin=dict(self.skin_kwargs))
 
     def solve(self, freq):
-        Z, i, info = self.S.solve(float(freq),
-                                  current=self.prob.current,
-                                  rtol=self.prob.rtol,
-                                  method=self.prob.method)
+        with _status.freq_task(freq):
+            Z, i, info = self.S.solve(float(freq),
+                                      current=self.prob.current,
+                                      rtol=self.prob.rtol,
+                                      method=self.prob.method)
         info['i_f'] = np.asarray(i[:self.efg])
+        _status_result(freq, Z, info)
         return Z, info
 
 
@@ -1035,27 +1088,32 @@ class _LpPRSweep:
         self.nports = len(m.ports)
         self.sol = None          # no wire solver on this path
         self._x = self._f = None
+        _status_meta(prob, m, M)
 
     def solve(self, freq):
         if self.nports > 1:
-            Z, infos = self.S.impedance_matrix(
-                float(freq), current=self.prob.current,
-                tol=self.prob.rtol, keep_drive=0,
-                verbose=self.verbose)
+            with _status.freq_task(freq):
+                Z, infos = self.S.impedance_matrix(
+                    float(freq), current=self.prob.current,
+                    tol=self.prob.rtol, keep_drive=0,
+                    verbose=self.verbose)
             info = dict(
                 matvecs=sum(i['matvecs'] for i in infos),
                 flag=max(i['flag'] for i in infos),
                 residual=max(i['residual'] for i in infos),
                 true_residual=max(i['true_residual'] for i in infos),
                 i_f=infos[0]['i_f'])
+            _status_result(freq, Z, info)
             return Z, info
-        z, x, info = self.S.solve(float(freq),
-                                  current=self.prob.current,
-                                  tol=self.prob.rtol, x0=self._x,
-                                  x0_freq=self._f,
-                                  verbose=self.verbose)
+        with _status.freq_task(freq):
+            z, x, info = self.S.solve(float(freq),
+                                      current=self.prob.current,
+                                      tol=self.prob.rtol, x0=self._x,
+                                      x0_freq=self._f,
+                                      verbose=self.verbose)
         self._x, self._f = x, float(freq)
         info['i_f'] = np.asarray(x[:self.S.S.efgsize])
+        _status_result(freq, z, info)
         return z, info
 
 

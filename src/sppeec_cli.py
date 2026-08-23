@@ -91,6 +91,17 @@ class CliOptions:
             '--quicklook', type=int, metavar='N', default=4,
             help='bin factor for the .vti quick-look companion '
                  '(default 4; 0 disables the companion)')
+        mon = p.add_argument_group(
+            'monitoring (run policy -- never changes the answer)')
+        mon.add_argument(
+            '--status', action='store_true',
+            help='live progress line on stderr while solving')
+        mon.add_argument(
+            '--status-file', metavar='PATH', default=None,
+            help='write machine-readable JSON progress to PATH '
+                 '(atomic, throttled -- poll it from a notebook, GUI '
+                 'or `python src/sppeec_status.py PATH`; '
+                 'SPPEEC_STATUS=PATH is the env-var equivalent)')
 
     def parse(self, argv=None):
         ns = self.parser.parse_args(argv)
@@ -155,6 +166,21 @@ class CliOptions:
 
 def main(argv=None):
     opts = CliOptions().parse(argv)
+    import sppeec_status as status
+    if opts.status or opts.status_file:
+        status.enable(path=opts.status_file, tty=opts.status)
+    try:
+        rc = _run(opts, status)
+    except SystemExit:
+        raise                     # parser.error: message already out
+    except BaseException as exc:
+        status.finish('failed', error=repr(exc))
+        raise
+    status.finish('done')
+    return rc
+
+
+def _run(opts, status):
     import sppeec_input
     import vtkout
 
@@ -167,13 +193,17 @@ def main(argv=None):
     if not freqs:
         opts.parser.error('nothing to solve: [solve].freq is empty')
 
-    m = prob.model()
-    M = prob.tree(m)
-    if opts.verbose:
-        print('%s: %s, dims %s, %.1f%% fill'
-              % (os.path.basename(opts.input), prob.formulation,
-                 tuple(m.dims), m.fill()), flush=True)
-    sw = prob.sweeper(m, M, verbose=opts.verbose)
+    with status.task('setup', kind='setup'):
+        m = prob.model()
+        M = prob.tree(m)
+        if opts.verbose:
+            print('%s: %s, dims %s, %.1f%% fill'
+                  % (os.path.basename(opts.input), prob.formulation,
+                     tuple(m.dims), m.fill()), flush=True)
+        sw = prob.sweeper(m, M, verbose=opts.verbose)
+    # the sweeper published the file's declared sweep; narrow it to
+    # what this run will actually solve (--freq)
+    status.sweep_meta(freqs)
 
     written = []
     lppr = prob.formulation == 'LpPR'
@@ -186,7 +216,8 @@ def main(argv=None):
                  'Im Z [Ohm]' if lppr else 'L [H]',
                  'C_eff/L_eff' if lppr else 'shares'))
     for f in freqs:
-        Z, info = sw.solve(f)
+        with status.freq_task(f):
+            Z, info = sw.solve(f)
         w = 2*np.pi*f
         if lppr and np.ndim(Z) == 2:
             names = [p.name for p in m.ports]

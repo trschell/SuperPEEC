@@ -121,6 +121,7 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.linalg import LinearOperator, lsqr, lgmres, bicgstab
 import sksparse.cholmod as cholmod
 import meshgraph as mg
+import sppeec_status as _status
 import vhr
 import stencils as st
 
@@ -253,23 +254,36 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
             return None
         return np.asarray(g, ref.dtype)
 
-    if method == 'lgmres':
-        return _finish(*lgmres(Aop, rhs, M=Pop, rtol=rtol,
-                               maxiter=maxiter, inner_m=inner_m,
-                               x0=_cast_x0(x0, rhs)))
-    if method != 'bicgstab':
+    if method not in ('lgmres', 'bicgstab'):
         raise ValueError("method must be 'bicgstab' or 'lgmres', "
                          "got %r" % (method,))
-    cap = max(1, (int(maxiter)*int(inner_m))//2)
-    x, flag = bicgstab(Aop, rhs, M=Pop, rtol=rtol, maxiter=cap,
-                       x0=_cast_x0(x0, rhs))
-    if flag != 0:
-        warnings.warn("bicgstab did not converge (flag %s); falling "
-                      "back to lgmres" % (flag,))
-        x0 = x if np.all(np.isfinite(x)) else None
-        x, flag = lgmres(Aop, rhs, M=Pop, x0=x0, rtol=rtol,
-                         maxiter=maxiter, inner_m=inner_m)
-    return _finish(x, flag)
+    # Status hooks: percent is matvecs against the HARD budget
+    # (maxiter*inner_m for either method), so it never overshoots. The
+    # counting wrapper forwards arrays untouched -- the iterate
+    # sequence, and therefore the answer, is bit-identical to a run
+    # with status off (gated by validate_status).
+    with _status.krylov_task(budget=int(maxiter)*int(inner_m),
+                             rtol=rtol, method=method):
+        if _status.enabled():
+            def _counted(v, _mv=Aop.matvec):
+                _status.tick_matvec()
+                return _mv(v)
+            Aop = LinearOperator(Aop.shape, matvec=_counted,
+                                 dtype=Aop.dtype)
+        if method == 'lgmres':
+            return _finish(*lgmres(Aop, rhs, M=Pop, rtol=rtol,
+                                   maxiter=maxiter, inner_m=inner_m,
+                                   x0=_cast_x0(x0, rhs)))
+        cap = max(1, (int(maxiter)*int(inner_m))//2)
+        x, flag = bicgstab(Aop, rhs, M=Pop, rtol=rtol, maxiter=cap,
+                           x0=_cast_x0(x0, rhs))
+        if flag != 0:
+            warnings.warn("bicgstab did not converge (flag %s); "
+                          "falling back to lgmres" % (flag,))
+            x0 = x if np.all(np.isfinite(x)) else None
+            x, flag = lgmres(Aop, rhs, M=Pop, x0=x0, rtol=rtol,
+                             maxiter=maxiter, inner_m=inner_m)
+        return _finish(x, flag)
 
 
 
