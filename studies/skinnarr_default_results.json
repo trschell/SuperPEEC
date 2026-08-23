@@ -1,0 +1,287 @@
+{
+ "bar2": {
+  "1000000000.0": {
+   "R": 0.04310344827586205,
+   "wall": 0.1430620400060434,
+   "skin": {
+    "subdivide": false,
+    "mode_basis": "conduction",
+    "rc_uu": 3,
+    "rc_cross": 4,
+    "boundary_only": true
+   }
+  },
+  "2500000000.0": {
+   "R": 0.04351313699312231,
+   "wall": 0.11311857600230724,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 3,
+    "rc_cross": 4,
+    "boundary_only": true
+   }
+  },
+  "10000000000.0": {
+   "R": 0.04891262668875487,
+   "wall": 0.11440075098653324,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 3,
+    "rc_cross": 4,
+    "boundary_only": true
+   }
+  },
+  "25000000000.0": {
+   "R": 0.06596674020322035,
+   "wall": 0.09370992600452155,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 3,
+    "rc_cross": 4,
+    "boundary_only": true
+   }
+  },
+  "100000000000.0": {
+   "R": 0.11702515437628108,
+   "wall": 0.10784344701096416,
+   "skin": {
+    "subdivide": 10,
+    "mode_basis": "conduction",
+    "rc_uu": 3,
+    "rc_cross": 4,
+    "boundary_only": true
+   }
+  }
+ },
+ "bar4": {
+  "1000000000.0": {
+   "R": 0.010936581734225098,
+   "wall": 0.030434972984949127,
+   "skin": {
+    "subdivide": false,
+    "mode_basis": "conduction",
+    "rc_uu": 6,
+    "rc_cross": 8,
+    "boundary_only": true
+   }
+  },
+  "2500000000.0": {
+   "R": 0.01204666518905734,
+   "wall": 0.7038843529880978,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 6,
+    "rc_cross": 8,
+    "boundary_only": true
+   }
+  },
+  "10000000000.0": {
+   "R": 0.01917419309869936,
+   "wall": 0.7308365489880089,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 6,
+    "rc_cross": 8,
+    "boundary_only": true
+   }
+  },
+  "25000000000.0": {
+   "R": 0.02741640007434752,
+   "wall": 0.6809506049903575,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 6,
+    "rc_cross": 8,
+    "boundary_only": true
+   }
+  },
+  "100000000000.0": {
+   "R": 0.05016844653732774,
+   "wall": 0.27520337398163974,
+   "skin": {
+    "subdivide": 10,
+    "mode_basis": "conduction",
+    "rc_uu": 6,
+    "rc_cross": 8,
+    "boundary_only": true
+   }
+  }
+ },
+ "bend4": {
+  "1000000000.0": {
+   "R": 0.046420592520073925,
+   "wall": 0.05161582201253623,
+   "skin": {
+    "subdivide": false,
+    "mode_basis": "conduction",
+    "rc_uu": 6,
+    "rc_cross": 8,
+    "boundary_only": true
+   }
+  },
+  "2500000000.0": {
+   "R": 0.05646179821385294,
+   "wall": 1.8234270400134847,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 6,
+    "rc_cross": 8,
+    "boundary_only": true
+   }
+  },
+  "10000000000.0": {
+   "R": 0.10049060217933992,
+   "wall": 1.6947351009876002,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 6,
+    "rc_cross": 8,
+    "boundary_only": true
+   }
+  },
+  "25000000000.0": {
+   "R": 0.1491099460408295,
+   "wall": 1.7991923299850896,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 6,
+    "rc_cross": 8,
+    "boundary_only": true
+   }
+  },
+  "100000000000.0": {
+   "R": 0.3225719031597784,
+   "wall": 0.8585521049972158,
+   "skin": {
+    "subdivide": 10,
+    "mode_basis": "conduction",
+    "rc_uu": 6,
+    "rc_cross": 8,
+    "boundary_only": true
+   }
+  }
+ },
+ "wire10": {
+  "1000000000.0": {
+   "R": 0.014991286263470483,
+   "wall": 0.8621336779906414,
+   "skin": {
+    "subdivide": false,
+    "mode_basis": "conduction",
+    "rc_uu": 12,
+    "rc_cross": 16,
+    "boundary_only": true
+   }
+  },
+  "2500000000.0": {
+   "R": 0.02273209021331299,
+   "wall": 13.830523927987088,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 12,
+    "rc_cross": 16,
+    "boundary_only": true
+   }
+  },
+  "10000000000.0": {
+   "R": 0.043138641820857186,
+   "wall": 13.834542456985218,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 12,
+    "rc_cross": 16,
+    "boundary_only": true
+   }
+  },
+  "25000000000.0": {
+   "R": 0.06585793293096417,
+   "wall": 16.28702494202298,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 12,
+    "rc_cross": 16,
+    "boundary_only": true
+   }
+  },
+  "100000000000.0": {
+   "R": 0.12813497096166954,
+   "wall": 11.834250696992967,
+   "skin": {
+    "subdivide": 10,
+    "mode_basis": "conduction",
+    "rc_uu": 12,
+    "rc_cross": 16,
+    "boundary_only": true
+   }
+  }
+ },
+ "numex1": {
+  "1000000000.0": {
+   "R": 0.007782736969027718,
+   "wall": 1.5884004700055812,
+   "skin": {
+    "subdivide": false,
+    "mode_basis": "conduction",
+    "rc_uu": 3,
+    "rc_cross": 4,
+    "boundary_only": true
+   }
+  },
+  "2500000000.0": {
+   "R": 0.011236070326647533,
+   "wall": 2.3274690939870197,
+   "skin": {
+    "subdivide": false,
+    "mode_basis": "conduction",
+    "rc_uu": 3,
+    "rc_cross": 4,
+    "boundary_only": true
+   }
+  },
+  "10000000000.0": {
+   "R": 0.02018168042194561,
+   "wall": 17.37605882398202,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 3,
+    "rc_cross": 4,
+    "boundary_only": true
+   }
+  },
+  "25000000000.0": {
+   "R": 0.029482650765157728,
+   "wall": 14.789479442988522,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 3,
+    "rc_cross": 4,
+    "boundary_only": true
+   }
+  },
+  "100000000000.0": {
+   "R": 0.05401602279978107,
+   "wall": 23.68011890500202,
+   "skin": {
+    "subdivide": 7,
+    "mode_basis": "conduction",
+    "rc_uu": 3,
+    "rc_cross": 4,
+    "boundary_only": true
+   }
+  }
+ }
+}
