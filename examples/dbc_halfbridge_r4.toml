@@ -47,9 +47,13 @@
 #   BW7 -- 2 wires each per the source connection table) as
 #   rise-span-descend polylines, radius 0.13 mm per the source wire
 #   library, apex 3 mm, vertical landings (the overlap rule).
-#   Contact points carry a +0.01 mm nudge so they never sit exactly
-#   on a cell boundary at any power-of-two ladder pitch (the foot
-#   tie-break trap).
+#   Contact points carry a +0.02 mm in-plane nudge (x/y end .27/.77
+#   mm) so they sit off cell boundaries at EVERY ladder pitch -- the
+#   power-of-two family AND the decimal rungs. The original +0.01
+#   nudge landed exactly ON boundaries at the R5 1/25 mm pitch
+#   (0.76 mm = 19 cells), tripping the foot tie-break warning; at
+#   the R6 1/50 mm pitch the .27/.77 coordinates are exact cell
+#   centres, the best case.
 # * Wire material set to Al (3.77e7 S/m), the usual heavy-wire metal;
 #   the source library's ambiguous "Resistivity 0.000001" is ignored.
 #
@@ -179,32 +183,32 @@ sigma  = 5.8e7
 # -- bond wires: high side, D1/D2 source -> T7 (BW1, BW3: 2 each) ---
 [[wire]]
 name   = "BW1a_D1_T7"
-points = [[15.76e-3, 16.26e-3, 1.26e-3], [15.76e-3, 16.26e-3, 3.0e-3],
-          [20.26e-3, 16.26e-3, 3.0e-3], [20.26e-3, 16.26e-3, 1.06e-3]]
+points = [[15.77e-3, 16.27e-3, 1.26e-3], [15.77e-3, 16.27e-3, 3.0e-3],
+          [20.27e-3, 16.27e-3, 3.0e-3], [20.27e-3, 16.27e-3, 1.06e-3]]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3
 
 [[wire]]
 name   = "BW1b_D1_T7"
-points = [[15.76e-3, 17.76e-3, 1.26e-3], [15.76e-3, 17.76e-3, 3.0e-3],
-          [20.26e-3, 17.76e-3, 3.0e-3], [20.26e-3, 17.76e-3, 1.06e-3]]
+points = [[15.77e-3, 17.77e-3, 1.26e-3], [15.77e-3, 17.77e-3, 3.0e-3],
+          [20.27e-3, 17.77e-3, 3.0e-3], [20.27e-3, 17.77e-3, 1.06e-3]]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3
 
 [[wire]]
 name   = "BW3a_D2_T7"
-points = [[15.76e-3, 26.26e-3, 1.26e-3], [15.76e-3, 26.26e-3, 3.0e-3],
-          [20.26e-3, 26.26e-3, 3.0e-3], [20.26e-3, 26.26e-3, 1.06e-3]]
+points = [[15.77e-3, 26.27e-3, 1.26e-3], [15.77e-3, 26.27e-3, 3.0e-3],
+          [20.27e-3, 26.27e-3, 3.0e-3], [20.27e-3, 26.27e-3, 1.06e-3]]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3
 
 [[wire]]
 name   = "BW3b_D2_T7"
-points = [[15.76e-3, 27.76e-3, 1.26e-3], [15.76e-3, 27.76e-3, 3.0e-3],
-          [20.26e-3, 27.76e-3, 3.0e-3], [20.26e-3, 27.76e-3, 1.06e-3]]
+points = [[15.77e-3, 27.77e-3, 1.26e-3], [15.77e-3, 27.77e-3, 3.0e-3],
+          [20.27e-3, 27.77e-3, 3.0e-3], [20.27e-3, 27.77e-3, 1.06e-3]]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3
@@ -212,32 +216,32 @@ max_seglen = 1.0e-3
 # -- bond wires: low side, D3/D4 source -> T1 (BW5, BW7: 2 each) ----
 [[wire]]
 name   = "BW5a_D3_T1"
-points = [[26.26e-3, 13.26e-3, 1.26e-3], [26.26e-3, 13.26e-3, 3.0e-3],
-          [26.26e-3, 6.76e-3, 3.0e-3], [26.26e-3, 6.76e-3, 1.06e-3]]
+points = [[26.27e-3, 13.27e-3, 1.26e-3], [26.27e-3, 13.27e-3, 3.0e-3],
+          [26.27e-3, 6.77e-3, 3.0e-3], [26.27e-3, 6.77e-3, 1.06e-3]]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3
 
 [[wire]]
 name   = "BW5b_D3_T1"
-points = [[27.76e-3, 13.26e-3, 1.26e-3], [27.76e-3, 13.26e-3, 3.0e-3],
-          [27.76e-3, 6.76e-3, 3.0e-3], [27.76e-3, 6.76e-3, 1.06e-3]]
+points = [[27.77e-3, 13.27e-3, 1.26e-3], [27.77e-3, 13.27e-3, 3.0e-3],
+          [27.77e-3, 6.77e-3, 3.0e-3], [27.77e-3, 6.77e-3, 1.06e-3]]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3
 
 [[wire]]
 name   = "BW7a_D4_T1"
-points = [[33.26e-3, 13.26e-3, 1.26e-3], [33.26e-3, 13.26e-3, 3.0e-3],
-          [33.26e-3, 6.76e-3, 3.0e-3], [33.26e-3, 6.76e-3, 1.06e-3]]
+points = [[33.27e-3, 13.27e-3, 1.26e-3], [33.27e-3, 13.27e-3, 3.0e-3],
+          [33.27e-3, 6.77e-3, 3.0e-3], [33.27e-3, 6.77e-3, 1.06e-3]]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3
 
 [[wire]]
 name   = "BW7b_D4_T1"
-points = [[34.76e-3, 13.26e-3, 1.26e-3], [34.76e-3, 13.26e-3, 3.0e-3],
-          [34.76e-3, 6.76e-3, 3.0e-3], [34.76e-3, 6.76e-3, 1.06e-3]]
+points = [[34.77e-3, 13.27e-3, 1.26e-3], [34.77e-3, 13.27e-3, 3.0e-3],
+          [34.77e-3, 6.77e-3, 3.0e-3], [34.77e-3, 6.77e-3, 1.06e-3]]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3

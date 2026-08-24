@@ -71,27 +71,27 @@
 # foot_model = "point"; cubic rungs (e.g. 0.2 or 0.1 mm uniform)
 # should switch to the calibrated "patch" feet.
 
-# THIS FILE IS THE R5 RUNG -- the intermediate stop between the R4
-# stretch rung (51.2M cells, ~29 GB measured) and the ~1e9-cell hero
-# run. Same physical module as examples/dbc_halfbridge.toml (which
-# carries the demo pitch and the full conversion notes -- read that
-# header first; geometry edits belong THERE and should be mirrored
-# here). Pitch: 1/25 mm in-plane (divides every 1 mm feature, exact
-# decimal) and 0.025 mm vertical (8 cells across each 0.2 mm layer)
-# over the fixed 40 x 50 x 4 mm envelope -> 200M cells, a 3.9x step
-# from R4. Projected peak RSS by the measured 567 B/cell law:
-# ~113 GB -- sized to run comfortably on a 192 GB node (OCI
-# BM.GPU2.2 class) with headroom for transients and export. The
-# wire contacts sit at fractional in-plane position 0.25/0.75 of a
-# cell at this pitch (the original +0.01 mm nudge put them exactly
-# ON boundaries here -- 0.76 mm = 19 cells -- which is what forced
-# the +0.02 mm renudge across the ladder), and the pitch is
-# anisotropic (aspect 1.6), so foot_model stays "point" per the
-# ladder policy.
+# THIS FILE IS THE R6 RUNG -- THE 1e9-CELL HERO RUN, the top of the
+# refinement ladder. Same physical module as
+# examples/dbc_halfbridge.toml (which carries the demo pitch and the
+# full conversion notes -- read that header first; geometry edits
+# belong THERE and should be mirrored here). Pitch: 1/50 mm UNIFORM
+# (divides every 1 mm feature exactly; 10 cells across each 0.2 mm
+# layer) over the fixed 40 x 50 x 4 mm envelope -> 2000 x 2500 x 200
+# = 1.0e9 cells, a 5x step from R5 (200M). Projected peak RSS by the
+# measured 567 B/cell law: ~570 GB -- this rung needs a
+# large-memory node (the GCP high-mem GPU target per the flagship
+# plan; nothing in this class fits a workstation). Use the streaming
+# field exporter if exporting (O(slab) memory) and expect hours per
+# frequency point. The wire contacts land on EXACT cell centres at
+# this pitch (the .27/.77 mm coordinates are odd multiples of half a
+# cell), the best case for the foot search; the pitch is CUBIC, so
+# foot_model switches to the calibrated "patch" feet per the ladder
+# policy.
 
 [grid]
-dims  = [1000, 1250, 160]
-pitch = [0.04e-3, 0.04e-3, 0.025e-3]
+dims  = [2000, 2500, 200]
+pitch = [0.02e-3, 0.02e-3, 0.02e-3]
 
 # -- bottom metal (eddy/image plane; Electrical 'G' in the source) --
 [[block]]
@@ -265,7 +265,7 @@ rtol = 1e-4               # the engineering target: the residual tail
                           # below this moves extracted L by < 1e-3 %
                           # (the measured 81%-waste law) -- ladder and
                           # extraction runs use this, oracles tighten
-foot_model = "point"      # demo pitch is anisotropic; cubic ladder
-                          # rungs should use "patch"
+foot_model = "patch"      # cubic pitch: the calibrated footprint
+                          # feet (the ladder policy for cubic rungs)
 basis = "overcomplete"    # the memory-flat scaling path (BlockAMG +
                           # exact Schur on the sharing chords)
