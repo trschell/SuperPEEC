@@ -58,14 +58,25 @@ SCHEMA (``"schema": 1``; consumers should ignore unknown keys)::
       "counters": { "matvecs_total": 412 }
     }
 
-HONESTY OF THE PERCENTAGES. ``task.pct`` inside a Krylov solve is
-matvecs/budget -- the budget is a hard cap (maxiter*inner_m), so this
-never overshoots, but a converging solve finishes "early". ``overall``
-uses static weights (setup 20% when a setup task was seen, sweep split
-evenly per frequency) sharpened by nothing yet -- adaptive re-weighting
-is phase 3. The raw numbers (matvecs, elapsed, per-frequency times in
-``sweep.results``) are always published so a smarter client can do
-better.
+HONESTY OF THE PERCENTAGES. ``task.pct`` inside an lgmres/bicgstab
+solve is matvecs/budget -- the budget is a hard cap (maxiter*inner_m),
+so this never overshoots, but a converging solve finishes "early". The
+LpPR fgmres path has true residual norms available per iteration and
+reports log-residual progress instead. ``overall`` starts from static
+weights (setup 20% when a setup task was seen, sweep split evenly per
+frequency) and RE-WEIGHTS adaptively once both the measured setup time
+and at least one per-frequency time exist; a monotonic ratchet keeps
+the re-weighting from ever reading as regress. The raw numbers
+(matvecs, elapsed, per-frequency times in ``sweep.results``) are
+always published so a smarter client can do better.
+
+EVENT LOG (phase 3). ``enable(events=path)`` -- or
+``SPPEEC_STATUS_EVENTS=path``, or the CLI's ``--status-events`` --
+appends one JSON line per state transition (``start``, ``sweep``,
+``task_start``, ``task_end`` with duration, ``result``, ``finish``),
+giving a GUI a timeline and a post-mortem of where the time went
+without parsing prints. Unlike the status file it is append-only
+history, not current state.
 
 Reading:  ``sppeec_status.read(path)`` -> dict with ``_stale_s`` and
 ``_alive`` added.  ``python src/sppeec_status.py PATH`` is a minimal
@@ -149,8 +160,9 @@ class _Status:
     """The state behind the module API. Use the module functions."""
 
     def __init__(self, path=None, callback=None, tty=False,
-                 interval=0.25):
+                 interval=0.25, events=None):
         self.path = path
+        self.events_path = events
         self.callbacks = [callback] if callback else []
         self.tty = bool(tty)
         self.interval = float(interval)
@@ -168,10 +180,26 @@ class _Status:
         self.stack = []              # list of _Task
         self.saw_setup = False
         self.setup_done = False
+        self.setup_s = 0.0           # measured setup wall (adaptive w)
         self.matvecs_total = 0
+        self._hwm = 0.0              # overall-percent ratchet
         self._last_write = 0.0
         self._last_tty = 0.0
         self._tty_len = 0
+
+    def event(self, ev, **fields):
+        """Append one JSONL line to the event log (no-op without one).
+        Failures disable the log, never the run."""
+        if not self.events_path:
+            return
+        try:
+            rec = dict(fields, t=time.time(), ev=ev)
+            with open(self.events_path, 'a') as fh:
+                fh.write(json.dumps(rec, default=_jdefault) + '\n')
+        except Exception as exc:
+            sys.stderr.write('sppeec_status: disabling event log '
+                             '(%r)\n' % (exc,))
+            self.events_path = None
 
     # -- progress model ----------------------------------------------
     def _leaf_frac(self):
@@ -202,8 +230,22 @@ class _Status:
         sw = self._sweep_frac()
         if sw is None:
             return None
-        w = SETUP_WEIGHT if self.saw_setup else 0.0
-        return 100.0 * (w * self._setup_frac() + (1.0 - w) * sw)
+        # ADAPTIVE RE-WEIGHTING: once both the measured setup wall and
+        # at least one per-frequency time exist, the setup:sweep split
+        # comes from measurement instead of the static 20/80 prior.
+        # The ratchet below keeps the switch from ever reading as
+        # regress (a smaller measured setup share would otherwise drop
+        # the number at the moment the first point completes).
+        n = len(self.freqs)
+        if self.freq_times and self.setup_s > 0.0 and n:
+            per = sum(self.freq_times) / len(self.freq_times)
+            tot = self.setup_s + per * n
+            w = self.setup_s / tot if tot > 0 else 0.0
+        else:
+            w = SETUP_WEIGHT if self.saw_setup else 0.0
+        val = 100.0 * (w * self._setup_frac() + (1.0 - w) * sw)
+        self._hwm = max(self._hwm, val)
+        return self._hwm
 
     def eta_s(self):
         sw = self._sweep_frac()
@@ -300,18 +342,22 @@ def enabled():
     return _S is not None
 
 
-def enable(path=None, callback=None, tty=False, interval=0.25):
+def enable(path=None, callback=None, tty=False, interval=0.25,
+           events=None):
     """Turn status reporting on (idempotent; sinks are merged)."""
     global _S
     with _LOCK:
         if _S is None:
             _S = _Status(path=path, callback=callback, tty=tty,
-                         interval=interval)
+                         interval=interval, events=events)
+            _S.event('start')
         else:
             if path:
                 _S.path = path
             if callback:
                 _S.callbacks.append(callback)
+            if events:
+                _S.events_path = events
             _S.tty = _S.tty or bool(tty)
         _S.publish(force=True)
         return _S
@@ -344,6 +390,7 @@ def sweep_meta(freqs):
     with _LOCK:
         _S.freqs = [float(f) for f in freqs]
         _S.freqs_done = 0
+        _S.event('sweep', n=len(_S.freqs))
         _S.publish(force=True)
 
 
@@ -360,6 +407,7 @@ def task(name, ticks=None, kind='', **detail):
         if kind == 'setup':
             _S.saw_setup = True
         _S.stack.append(t)
+        _S.event('task_start', task=name)
     _S.publish(force=True)
     try:
         yield t
@@ -369,6 +417,9 @@ def task(name, ticks=None, kind='', **detail):
                 _S.stack.remove(t)
             if kind == 'setup':
                 _S.setup_done = True
+                _S.setup_s += time.time() - t.t0
+            _S.event('task_end', task=name,
+                     dur_s=time.time() - t.t0)
         _S.publish(force=True)
 
 
@@ -408,6 +459,7 @@ def record_result(freq, **fields):
                 row[k] = str(v)
     with _LOCK:
         _S.results.append(row)
+        _S.event('result', **row)
     _S.publish(force=True)
 
 
@@ -445,6 +497,7 @@ def finish(state='done', error=None):
         _S.state = state
         _S.error = error
         _S.stack = []
+        _S.event('finish', state=state)
     _S.publish(force=True)
 
 
@@ -523,8 +576,9 @@ def _watch(path, interval=1.0):
 # env activation: any entry point that imports the solver gets the
 # file sink with no code change. SPPEEC_STATUS=0 / empty stays off.
 _env = os.environ.get('SPPEEC_STATUS', '')
-if _env and _env != '0':
-    enable(path=_env)
+_env_ev = os.environ.get('SPPEEC_STATUS_EVENTS', '')
+if (_env and _env != '0') or (_env_ev and _env_ev != '0'):
+    enable(path=_env or None, events=_env_ev or None)
 
 
 if __name__ == '__main__':

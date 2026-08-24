@@ -61,7 +61,8 @@ def unit():
         t.tick()
         t.set(pct=50)
 
-    st.enable(path=path, interval=0.0)
+    epath = path + 'l'                       # events JSONL alongside
+    st.enable(path=path, interval=0.0, events=epath)
     d = json.load(open(path))
     need = ('schema', 'pid', 'seq', 'state', 'started_at',
             'updated_at', 'model', 'params', 'sweep', 'task',
@@ -143,6 +144,18 @@ def unit():
           and d['_stale_s'] < 60)
     check('format_line renders', isinstance(st.format_line(d), str)
           and 'done' in st.format_line(d))
+
+    # phase 3: the JSONL event log is a parseable, time-ordered
+    # transition history covering every event class this run produced
+    evs = [json.loads(ln) for ln in open(epath)]
+    kinds = {e['ev'] for e in evs}
+    ts = [e['t'] for e in evs]
+    check('event log: all classes present, time-ordered',
+          {'start', 'sweep', 'task_start', 'task_end', 'result',
+           'finish'} <= kinds
+          and ts == sorted(ts), repr(sorted(kinds)))
+    check('event log: task_end carries duration',
+          all('dur_s' in e for e in evs if e['ev'] == 'task_end'))
     st.disable()
 
 
@@ -226,6 +239,54 @@ def phase2():
           and 'krylov' in seen)
     check('D: solve still lands', info.get('matvecs', 0) > 0
           and float(abs(Z)) > 0)
+    # phase 3: the streaming exporter's slab loop ticks
+    import vtkout
+    vti = os.path.join(tempfile.mkdtemp(prefix='sppeec_status_vti_'),
+                       'equibar.vti')
+    st.enable(callback=lambda d: seen.update(d['task']['stack']),
+              interval=0.0)
+    vtkout.export_currents_streaming(m, M, info['i_f'], vti,
+                                     quicklook=0)
+    st.disable()
+    check('D: export slab ticker observed + file written',
+          'export fields' in seen and os.path.getsize(vti) > 0)
+
+
+# --------------------------- E. phase-3 LpPR fgmres + per-drive tasks
+def phase3():
+    """The LpPR path reports residual-based fgmres progress, and a
+    multi-port solve shows one 'drive port j/n' task per column
+    (coupled_plates: the 2x2 Z-matrix example)."""
+    import sppeec_status as st
+    import sppeec_input
+    st.disable()
+    seen = set()
+    fg = []                       # fgmres detail snapshots
+
+    def sink(d):
+        seen.update(d['task']['stack'])
+        if d['task'].get('current') == 'fgmres' \
+                and d['task'].get('pct') is not None:
+            fg.append((d['task']['pct'],
+                       d['task']['detail'].get('residual')))
+    st.enable(callback=sink, interval=0.0)
+    pr = sppeec_input.load(os.path.join(ROOT, 'examples',
+                                        'coupled_plates.toml'))
+    m = pr.model()
+    M = pr.tree(m)
+    Z, info = pr.sweeper(m, M).solve(1e8)
+    st.finish('done')
+    st.disable()
+    check('E: fgmres + per-drive tasks observed',
+          'fgmres' in seen
+          and any(s.startswith('drive port') for s in seen),
+          repr(sorted(seen)))
+    check('E: fgmres reports residual-based percent in (0, 100)',
+          any(0 < p < 100 and r is not None for p, r in fg),
+          repr(fg[:3]))
+    check('E: multi-port solve still lands',
+          getattr(Z, 'shape', None) == (2, 2)
+          and info.get('matvecs', 0) > 0)
 
 
 def main():
@@ -235,6 +296,8 @@ def main():
     endtoend()
     print('validate_status: D. phase-2 setup tasks')
     phase2()
+    print('validate_status: E. phase-3 LpPR + drives')
+    phase3()
     if FAIL:
         print('FAIL: %d check(s): %s' % (len(FAIL), FAIL))
         return 1

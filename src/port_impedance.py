@@ -2241,9 +2241,31 @@ class LpPRSolver:
         # free (no probe matvec) -- the diagnostic that turned the
         # global-scaling null into the block-scaling fix.
         rlist = []
-        x, flag = _fgmres(self.Kprime, rhs, x0=guess, M=self.P, tol=tol,
-                          maxiter=maxiter, restrt=restrt,
-                          callback=callback, residuals=rlist)
+        # Status hook: pyamg fills `rlist` with TRUE residual norms as
+        # it iterates, so this path can report log-residual progress --
+        # orders of magnitude travelled toward the stopping test
+        # ||r|| < tol*||b|| -- which the scipy lgmres path cannot
+        # cheaply have. The chained callback leaves the caller's
+        # untouched and adds no matvecs.
+        cb = callback
+        if _status.enabled():
+            _nb = float(np.linalg.norm(rhs))
+
+            def cb(xk, _user=callback):
+                if rlist and _nb > 0 and tol > 0:
+                    rrel = max(float(rlist[-1])/_nb, 1e-300)
+                    r0 = max(float(rlist[0])/_nb, rrel)
+                    span = np.log(max(r0/tol, 1.0 + 1e-15))
+                    done = np.log(max(r0/rrel, 1.0))
+                    _fg_task.set(pct=min(99.0, 100.0*done/span),
+                                 residual=rrel,
+                                 matvecs=int(S.numiters - n0))
+                if _user is not None:
+                    _user(xk)
+        with _status.task('fgmres', rtol=tol) as _fg_task:
+            x, flag = _fgmres(self.Kprime, rhs, x0=guess, M=self.P,
+                              tol=tol, maxiter=maxiter, restrt=restrt,
+                              callback=cb, residuals=rlist)
         warm_r0 = (float(rlist[0]/np.linalg.norm(rhs))
                    if (guess is not None and rlist) else None)
         resid = float(np.linalg.norm(rhs - self.Kprime*x)
@@ -2311,9 +2333,11 @@ class LpPRSolver:
         Z = np.zeros((n, n), dtype=np.complex128)
         infos = []
         for j in range(n):
-            zjj, x, info = self.solve(freq, port=j, current=current,
-                                      weight=weight, verbose=verbose,
-                                      **kw)
+            with _status.task('drive port %d/%d' % (j + 1, n)):
+                zjj, x, info = self.solve(freq, port=j,
+                                          current=current,
+                                          weight=weight,
+                                          verbose=verbose, **kw)
             Z[j, j] = zjj
             xn = x[self.S.efgsize:]
             for i in range(n):

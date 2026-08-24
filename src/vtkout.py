@@ -55,6 +55,8 @@ import os
 import sys
 import numpy as np
 
+import sppeec_status as _spstatus
+
 # Where the CLI puts output when given a bare filename. The library
 # functions never redirect a path the caller gave them.
 RESULTS_DIR = 'results'
@@ -291,7 +293,9 @@ def export_currents_streaming(model, M, i, path, quicklook=4,
         accS = np.zeros((q[2], q[0], q[1]))
         czw = np.zeros(q[2])
 
-    with open(path, 'wb') as fh:
+    with _spstatus.task('export fields',
+                        ticks=-(-nz//slab_z)) as _t, \
+            open(path, 'wb') as fh:
         fh.write(header)
         base = len(header)
         for off, p in zip(offsets, payload):
@@ -343,6 +347,7 @@ def export_currents_streaming(model, M, i, path, quicklook=4,
                 np.add.at(accJ, zb, np.moveaxis(Jxy, 2, 0))
                 np.add.at(accS, zb, np.moveaxis(Sxy, 2, 0))
                 np.add.at(czw, zb, 1.0)
+            _t.tick()
         end = base + int(offsets[-1]) + 8 + payload[-1]
         fh.seek(end)
         fh.write(b"\n  </AppendedData>\n</VTKFile>\n")

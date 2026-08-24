@@ -102,6 +102,13 @@ class CliOptions:
                  '(atomic, throttled -- poll it from a notebook, GUI '
                  'or `python src/sppeec_status.py PATH`; '
                  'SPPEEC_STATUS=PATH is the env-var equivalent)')
+        mon.add_argument(
+            '--status-events', metavar='PATH', default=None,
+            help='append one JSON line per state transition (task '
+                 'start/end with durations, per-point results) to '
+                 'PATH -- a timeline for GUIs and post-mortems; '
+                 'SPPEEC_STATUS_EVENTS=PATH is the env-var '
+                 'equivalent)')
 
     def parse(self, argv=None):
         ns = self.parser.parse_args(argv)
@@ -167,8 +174,9 @@ class CliOptions:
 def main(argv=None):
     opts = CliOptions().parse(argv)
     import sppeec_status as status
-    if opts.status or opts.status_file:
-        status.enable(path=opts.status_file, tty=opts.status)
+    if opts.status or opts.status_file or opts.status_events:
+        status.enable(path=opts.status_file, tty=opts.status,
+                      events=opts.status_events)
     try:
         rc = _run(opts, status)
     except SystemExit:
