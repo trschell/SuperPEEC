@@ -262,18 +262,45 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
     # counting wrapper forwards arrays untouched -- the iterate
     # sequence, and therefore the answer, is bit-identical to a run
     # with status off (gated by validate_status).
+    #
+    # RESIDUAL AT ZERO EXTRA MATVECS: lgmres opens every outer cycle
+    # with `r_outer = matvec(x) - b` and calls the callback with x
+    # IMMEDIATELY after (scipy _isolve/lgmres.py). So when the
+    # callback fires, the counting wrapper's most recent application
+    # was A @ x for exactly that x -- one value compare per OUTER
+    # cycle confirms it, and ||rhs - A x|| falls out of work already
+    # paid for. The status file carries a true residual refreshed
+    # once per outer cycle. (bicgstab's callback iterate never
+    # coincides with its p/s work-vector matvecs, so it gets no
+    # residual -- the budget percent still applies.)
+    _snoop = None
     with _status.krylov_task(budget=int(maxiter)*int(inner_m),
                              rtol=rtol, method=method):
         if _status.enabled():
+            _nrhs = float(np.linalg.norm(rhs))
+            _last = [None]
+
+            def _snoop(xk):
+                pair = _last[0]
+                if pair is not None and _nrhs > 0 and \
+                        np.shape(pair[0]) == np.shape(xk) and \
+                        np.array_equal(pair[0], xk):
+                    _status.krylov_residual(
+                        float(np.linalg.norm(pair[1] - rhs))/_nrhs)
+
             def _counted(v, _mv=Aop.matvec):
                 _status.tick_matvec()
-                return _mv(v)
+                w = _mv(v)
+                _last[0] = (v, w)
+                return w
+
             Aop = LinearOperator(Aop.shape, matvec=_counted,
                                  dtype=Aop.dtype)
         if method == 'lgmres':
             return _finish(*lgmres(Aop, rhs, M=Pop, rtol=rtol,
                                    maxiter=maxiter, inner_m=inner_m,
-                                   x0=_cast_x0(x0, rhs)))
+                                   x0=_cast_x0(x0, rhs),
+                                   callback=_snoop))
         cap = max(1, (int(maxiter)*int(inner_m))//2)
         x, flag = bicgstab(Aop, rhs, M=Pop, rtol=rtol, maxiter=cap,
                            x0=_cast_x0(x0, rhs))
@@ -282,7 +309,8 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
                           "falling back to lgmres" % (flag,))
             x0 = x if np.all(np.isfinite(x)) else None
             x, flag = lgmres(Aop, rhs, M=Pop, x0=x0, rtol=rtol,
-                             maxiter=maxiter, inner_m=inner_m)
+                             maxiter=maxiter, inner_m=inner_m,
+                             callback=_snoop)
         return _finish(x, flag)
 
 

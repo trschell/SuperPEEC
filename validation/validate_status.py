@@ -218,8 +218,15 @@ def phase2():
     import sppeec_input
     st.disable()
     seen = set()
-    st.enable(callback=lambda d: seen.update(d['task']['stack']),
-              interval=0.0)
+    kres = []            # krylov residual readings (the free lgmres one)
+
+    def sink(d):
+        seen.update(d['task']['stack'])
+        if d['task'].get('current') == 'krylov':
+            r = d['task']['detail'].get('residual')
+            if r is not None:
+                kres.append(float(r))
+    st.enable(callback=sink, interval=0.0)
     pr = sppeec_input.load(os.path.join(ROOT, 'examples',
                                         'equibar.toml'))
     m = pr.model()
@@ -239,6 +246,15 @@ def phase2():
           and 'krylov' in seen)
     check('D: solve still lands', info.get('matvecs', 0) > 0
           and float(abs(Z)) > 0)
+    # the free lgmres residual: present once the solve runs more than
+    # one outer cycle, finite, and it must have DECREASED overall
+    mv = info.get('matvecs', 0)
+    if mv > 15:          # more than one inner_m=10 outer cycle
+        check('D: free lgmres residual reported and decreasing',
+              len(kres) >= 1 and all(r > 0 for r in kres)
+              and (len(kres) < 2 or min(kres) < kres[0]),
+              'first %s last %s' % (['%.1e' % r for r in kres[:2]],
+                                    ['%.1e' % r for r in kres[-2:]]))
     # phase 3: the streaming exporter's slab loop ticks
     import vtkout
     vti = os.path.join(tempfile.mkdtemp(prefix='sppeec_status_vti_'),

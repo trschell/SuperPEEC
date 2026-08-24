@@ -489,6 +489,21 @@ def tick_matvec(n=1):
     _S.publish()
 
 
+def krylov_residual(rrel):
+    """Attach a residual reading to the innermost Krylov task (the
+    one carrying a matvec budget). The lgmres hook computes it FREE --
+    by recognising the outer-cycle-opening matvec -- so this is just
+    the delivery."""
+    if _S is None:
+        return
+    with _LOCK:
+        for t in reversed(_S.stack):
+            if 'budget' in t.detail:
+                t.detail['residual'] = float(rrel)
+                break
+    _S.publish()
+
+
 def finish(state='done', error=None):
     """Terminal state; forces a final write."""
     if _S is None:
@@ -546,6 +561,8 @@ def format_line(d):
         det = t.get('detail', {})
         if 'matvecs' in det and 'budget' in det:
             s += ' mv %d/%d' % (det['matvecs'], det['budget'])
+        if det.get('residual') is not None:
+            s += ' res %.1e' % det['residual']
         parts.append(s)
     mem = d.get('mem', {})
     if mem.get('rss_mb'):

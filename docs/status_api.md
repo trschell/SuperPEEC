@@ -97,9 +97,12 @@ ways:
 * **`krylov`** (lgmres/bicgstab — every LpR-family outer solve):
   `pct = matvecs / budget` where the budget is the hard iteration cap
   (`maxiter × inner_m`). It never overshoots; a converging solve
-  simply finishes early. scipy's callbacks expose no residual, and
-  computing one would cost a matvec per outer iteration (~10%), so
-  this path deliberately reports work done against the worst case.
+  simply finishes early. On **lgmres** the detail also carries a true
+  relative `residual`, refreshed once per outer cycle at zero extra
+  matvecs: lgmres opens each cycle by applying A to the iterate it
+  just reported, and the counting wrapper recognises that call and
+  reads `‖rhs − A·x‖` off work already being paid for. bicgstab's
+  matvecs never touch the iterate, so it reports budget percent only.
 * **`fgmres`** (the LpPR path): true residual norms are available per
   iteration for free, so `pct` is **log-residual progress** — orders
   of magnitude travelled from the initial residual toward the
