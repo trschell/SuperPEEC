@@ -109,6 +109,13 @@ only — nothing on the command line can change converged numbers.
 | `--export-dir DIR` | directory for exported files (default `results/`) |
 | `--quicklook N` | bin factor for the quick-look `.vti` (default 4; 0 disables) |
 | `-v`, `--verbose` | solver diagnostics: setup timings, preconditioner engagement, residuals |
+| `--status` | live progress line on stderr (current task, percent, ETA) |
+| `--status-file PATH` | machine-readable JSON progress, atomically updated — poll it from a notebook or GUI (`SPPEEC_STATUS=PATH` works from any entry point) |
+| `--status-events PATH` | append-only JSONL timeline: task durations, per-point results (`SPPEEC_STATUS_EVENTS=PATH`) |
+
+The status file's schema and guarantees are frozen in
+`docs/status_api.md`; `examples/status_monitor.ipynb` is a worked
+live monitor with a filling-in Z(f) plot.
 
 Exports pair in ParaView: load the `.vti` under the `.vtp` wires and
 apply a Tube filter (radius from the `radius` cell array).

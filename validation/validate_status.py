@@ -289,6 +289,28 @@ def phase3():
           and info.get('matvecs', 0) > 0)
 
 
+# ------------------------------------ F. phase-4 consumer deliverables
+def phase4():
+    """The docs freeze schema 1 and the example notebook is valid:
+    parseable JSON, nbformat 4, every code cell compiles."""
+    doc = open(os.path.join(ROOT, 'docs', 'status_api.md')).read()
+    check('F: docs/status_api.md freezes schema 1',
+          '"schema": 1' in doc and 'task_end' in doc
+          and 'overall' in doc and 'SPPEEC_STATUS' in doc)
+    nb = json.load(open(os.path.join(ROOT, 'examples',
+                                     'status_monitor.ipynb')))
+    ok = nb.get('nbformat') == 4 and len(nb['cells']) >= 3
+    err = ''
+    for c in nb['cells']:
+        if c['cell_type'] != 'code':
+            continue
+        try:
+            compile(''.join(c['source']), c.get('id', '?'), 'exec')
+        except SyntaxError as exc:
+            ok, err = False, repr(exc)[:80]
+    check('F: status_monitor.ipynb valid, code cells compile', ok, err)
+
+
 def main():
     print('validate_status: A. unit')
     unit()
@@ -298,6 +320,8 @@ def main():
     phase2()
     print('validate_status: E. phase-3 LpPR + drives')
     phase3()
+    print('validate_status: F. phase-4 docs + notebook')
+    phase4()
     if FAIL:
         print('FAIL: %d check(s): %s' % (len(FAIL), FAIL))
         return 1
