@@ -16,9 +16,14 @@ hodlrnat:
 	  gcc -O2 -shared -fPIC hodlr_native.c -o libhodlrnat.so -l:libopenblas.so.0 || \
 	  gcc -O2 -shared -fPIC hodlr_native.c -o libhodlrnat.so -lblas)
 
+# -fopenmp/-lgomp are LOAD-BEARING: without them the !$OMP directives
+# in multipole_aux.f (P2P, MID_M2L) compile as comments and the
+# kernels run SERIAL. That is exactly what shipped -- the directives
+# were present but this recipe lacked the flags, found 2026-08-25
+# when OMP_NUM_THREADS measured as a no-op on the R4 rung.
 mp_fortran:
 	cd src && FC=gfortran $(PY) -m numpy.f2py -c -m mp_fortran multipole_aux.f \
-	  --f77flags="$(F77FLAGS)" --opt="-O3" -lfftw3
+	  --f77flags="$(F77FLAGS) -fopenmp" --opt="-O3" -lfftw3 -lgomp
 
 fmmtop:
 	cd src && FC=gfortran $(PY) -m numpy.f2py -c -m FMMtop fmmtop.f \

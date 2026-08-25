@@ -83,12 +83,23 @@ rm -f _anchor_tmp.py
 # anchor setups are lv2 (no MidLevel), so the changed code paths
 # are not even exercised there. Physics gate for the change: 34/34
 # validators incl. oracle tolerances to 1e-13 (baseline_phase3c).
+# Anchor lineage (OpenMP rebuild): adding -fopenmp to the mp_fortran
+# recipe 2026-08-25 (the shipped .so had compiled the !$OMP directives
+# as comments) re-rolled all three -- the recompile changes codegen,
+# so the ~1e-30 rounding dust these converged residual norms are made
+# of re-rolls, exactly as this header predicts for any rebuild. The
+# physics gate for the change was the full suite: 39/0/0, verdicts
+# identical, and the threaded kernels certified bit-identical against
+# serial on fixed data. Previous values (2026-08-16 build):
+# 1.0141635224321326e-30 / 3.6833436970020444e-30 /
+# 2.7418785553237524e-31.
 echo "expected (this machine, stock env, binaries as built fresh in"
-echo "the SuperPEEC tree 2026-08-16; a rebuild or another machine"
-echo "re-bases these -- record your own values on first green run):"
-echo "          setup1 1.0141635224321326e-30"
-echo "          setup2 3.6833436970020444e-30"
-echo "          setup3 2.7418785553237524e-31"
+echo "the SuperPEEC tree 2026-08-25 with -fopenmp; a rebuild or"
+echo "another machine re-bases these -- record your own values on"
+echo "first green run):"
+echo "          setup1 1.0187104968887117e-30"
+echo "          setup2 3.755716373280479e-30"
+echo "          setup3 2.680201690959317e-31"
 echo ALL DONE
 # Non-zero exit on any FAIL so CI and callers can gate on this script.
 # Skips deliberately do NOT fail the run -- they are legitimate when the

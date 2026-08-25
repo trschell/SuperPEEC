@@ -25,6 +25,12 @@ CF2PY INTEGER, INTENT(HIDE), DEPEND(TRANSFER) :: NPAR=SHAPE(TRANSFER, 3)
 C
       INTEGER GIDX, POS, NEIGH, NGROUP, IDXNM, IDXJK
 C
+C     Each GIDX owns OUTMAT(:, GIDX) alone and the accumulation order
+C     within a column is unchanged, so parallel results are
+C     BIT-IDENTICAL to serial (the P2P recipe). Thread count follows
+C     OMP_NUM_THREADS.
+!$OMP PARALLEL DO DEFAULT(SHARED)
+!$OMP& PRIVATE(GIDX,POS,NEIGH,NGROUP,IDXNM,IDXJK)
       DO GIDX = 1, SIZEIDX
           POS = IDX(GIDX) + 1
           DO IDXNM = 1, NNMAX
@@ -43,6 +49,7 @@ C
               ENDIF
           ENDDO
       ENDDO
+!$OMP END PARALLEL DO
 C
       END
 C
@@ -76,6 +83,12 @@ CF2PY INTEGER, INTENT(HIDE), DEPEND(TRANSFER) :: NPAR=SHAPE(TRANSFER, 3)
 C
       INTEGER GIDX, POS, NEIGH, NGROUP, IDXNM, IDXJK
 C
+C     Each GIDX owns OUTMAT(:, GIDX) alone and the accumulation order
+C     within a column is unchanged, so parallel results are
+C     BIT-IDENTICAL to serial (the P2P recipe). Thread count follows
+C     OMP_NUM_THREADS.
+!$OMP PARALLEL DO DEFAULT(SHARED)
+!$OMP& PRIVATE(GIDX,POS,NEIGH,NGROUP,IDXNM,IDXJK)
       DO GIDX = 1, SIZEIDX
           POS = IDX(GIDX) + 1
           DO IDXNM = 1, NNMAX
@@ -94,6 +107,7 @@ C
               ENDIF
           ENDDO
       ENDDO
+!$OMP END PARALLEL DO
 C
       END
 C
