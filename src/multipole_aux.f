@@ -1207,3 +1207,147 @@ c
       end
 c
 c
+C
+C
+      SUBROUTINE CSRMV_S(INDPTR, INDICES, DATA, X, Y,
+     +                    NROW, NNZ, NCOL)
+C
+C     y = A @ x for a CSR matrix -- REAL*4 data, INTEGER*4 indices.
+C     Row-parallel: each Y(I) is one thread's ORDERED dot product
+C     (ascending column index, same as scipy's csr_matvec), so
+C     threaded results are BIT-IDENTICAL to serial at any OMP count.
+C     Added 2026-08-25 for the GeoMG v-cycle, whose scipy SpMV was
+C     the largest single-threaded line left in a CPU solve cycle
+C     (7.9 s of ~26 at R4 after the MID_M2L/P2P threading).
+C
+CF2PY INTENT(OUT) :: Y
+CF2PY REAL :: DATA, X, Y
+CF2PY INTEGER :: INDPTR, INDICES
+CF2PY INTEGER, INTENT(HIDE), DEPEND(INDPTR) :: NROW=SIZE(INDPTR)-1
+CF2PY INTEGER, INTENT(HIDE), DEPEND(DATA) :: NNZ=SIZE(DATA)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(X) :: NCOL=SIZE(X)
+      INTEGER NROW, NNZ, NCOL
+      INTEGER INDPTR(NROW+1), INDICES(NNZ)
+      REAL DATA(NNZ), X(NCOL)
+      REAL Y(NROW)
+      INTEGER I
+      INTEGER J
+      REAL ACC
+!$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J, ACC)
+      DO I = 1, NROW
+          ACC = 0.0
+          DO J = INDPTR(I) + 1, INDPTR(I + 1)
+              ACC = ACC + DATA(J)*X(INDICES(J) + 1)
+          ENDDO
+          Y(I) = ACC
+      ENDDO
+!$OMP END PARALLEL DO
+      END
+C
+C
+      SUBROUTINE CSRMV_D(INDPTR, INDICES, DATA, X, Y,
+     +                    NROW, NNZ, NCOL)
+C
+C     y = A @ x for a CSR matrix -- REAL*8 data, INTEGER*4 indices.
+C     Row-parallel: each Y(I) is one thread's ORDERED dot product
+C     (ascending column index, same as scipy's csr_matvec), so
+C     threaded results are BIT-IDENTICAL to serial at any OMP count.
+C     Added 2026-08-25 for the GeoMG v-cycle, whose scipy SpMV was
+C     the largest single-threaded line left in a CPU solve cycle
+C     (7.9 s of ~26 at R4 after the MID_M2L/P2P threading).
+C
+CF2PY INTENT(OUT) :: Y
+CF2PY REAL*8 :: DATA, X, Y
+CF2PY INTEGER :: INDPTR, INDICES
+CF2PY INTEGER, INTENT(HIDE), DEPEND(INDPTR) :: NROW=SIZE(INDPTR)-1
+CF2PY INTEGER, INTENT(HIDE), DEPEND(DATA) :: NNZ=SIZE(DATA)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(X) :: NCOL=SIZE(X)
+      INTEGER NROW, NNZ, NCOL
+      INTEGER INDPTR(NROW+1), INDICES(NNZ)
+      REAL*8 DATA(NNZ), X(NCOL)
+      REAL*8 Y(NROW)
+      INTEGER I
+      INTEGER J
+      REAL*8 ACC
+!$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J, ACC)
+      DO I = 1, NROW
+          ACC = 0.0
+          DO J = INDPTR(I) + 1, INDPTR(I + 1)
+              ACC = ACC + DATA(J)*X(INDICES(J) + 1)
+          ENDDO
+          Y(I) = ACC
+      ENDDO
+!$OMP END PARALLEL DO
+      END
+C
+C
+      SUBROUTINE CSRMV_SL(INDPTR, INDICES, DATA, X, Y,
+     +                    NROW, NNZ, NCOL)
+C
+C     y = A @ x for a CSR matrix -- REAL*4 data, INTEGER*8 indices.
+C     Row-parallel: each Y(I) is one thread's ORDERED dot product
+C     (ascending column index, same as scipy's csr_matvec), so
+C     threaded results are BIT-IDENTICAL to serial at any OMP count.
+C     Added 2026-08-25 for the GeoMG v-cycle, whose scipy SpMV was
+C     the largest single-threaded line left in a CPU solve cycle
+C     (7.9 s of ~26 at R4 after the MID_M2L/P2P threading).
+C
+CF2PY INTENT(OUT) :: Y
+CF2PY REAL :: DATA, X, Y
+CF2PY INTEGER*8 :: INDPTR, INDICES
+CF2PY INTEGER, INTENT(HIDE), DEPEND(INDPTR) :: NROW=SIZE(INDPTR)-1
+CF2PY INTEGER, INTENT(HIDE), DEPEND(DATA) :: NNZ=SIZE(DATA)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(X) :: NCOL=SIZE(X)
+      INTEGER NROW, NNZ, NCOL
+      INTEGER*8 INDPTR(NROW+1), INDICES(NNZ)
+      REAL DATA(NNZ), X(NCOL)
+      REAL Y(NROW)
+      INTEGER I
+      INTEGER*8 J
+      REAL ACC
+!$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J, ACC)
+      DO I = 1, NROW
+          ACC = 0.0
+          DO J = INDPTR(I) + 1, INDPTR(I + 1)
+              ACC = ACC + DATA(J)*X(INDICES(J) + 1)
+          ENDDO
+          Y(I) = ACC
+      ENDDO
+!$OMP END PARALLEL DO
+      END
+C
+C
+      SUBROUTINE CSRMV_DL(INDPTR, INDICES, DATA, X, Y,
+     +                    NROW, NNZ, NCOL)
+C
+C     y = A @ x for a CSR matrix -- REAL*8 data, INTEGER*8 indices.
+C     Row-parallel: each Y(I) is one thread's ORDERED dot product
+C     (ascending column index, same as scipy's csr_matvec), so
+C     threaded results are BIT-IDENTICAL to serial at any OMP count.
+C     Added 2026-08-25 for the GeoMG v-cycle, whose scipy SpMV was
+C     the largest single-threaded line left in a CPU solve cycle
+C     (7.9 s of ~26 at R4 after the MID_M2L/P2P threading).
+C
+CF2PY INTENT(OUT) :: Y
+CF2PY REAL*8 :: DATA, X, Y
+CF2PY INTEGER*8 :: INDPTR, INDICES
+CF2PY INTEGER, INTENT(HIDE), DEPEND(INDPTR) :: NROW=SIZE(INDPTR)-1
+CF2PY INTEGER, INTENT(HIDE), DEPEND(DATA) :: NNZ=SIZE(DATA)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(X) :: NCOL=SIZE(X)
+      INTEGER NROW, NNZ, NCOL
+      INTEGER*8 INDPTR(NROW+1), INDICES(NNZ)
+      REAL*8 DATA(NNZ), X(NCOL)
+      REAL*8 Y(NROW)
+      INTEGER I
+      INTEGER*8 J
+      REAL*8 ACC
+!$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J, ACC)
+      DO I = 1, NROW
+          ACC = 0.0
+          DO J = INDPTR(I) + 1, INDPTR(I + 1)
+              ACC = ACC + DATA(J)*X(INDICES(J) + 1)
+          ENDDO
+          Y(I) = ACC
+      ENDDO
+!$OMP END PARALLEL DO
+      END

@@ -15,9 +15,40 @@ against pyamg (including the correction that the STORED AMG hierarchy
 is ~240 B/loop and flat -- not the terabyte-scale wall it was once
 extrapolated to be).
 """
+import os
+
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+
+# Threaded CSR matvec (mp_fortran CSRMV_*, 2026-08-25): row-parallel,
+# so threaded results are BIT-IDENTICAL to serial AND measured exactly
+# equal to scipy's csr_matvec (same ordered accumulation; maxrel 0.0
+# on a 14M-nnz probe) -- and this lives inside a PRECONDITIONER, where
+# rounding can only move iteration counts, never converged answers.
+# The v-cycle's scipy SpMV was the largest single-threaded line left
+# in a CPU solve cycle (7.9 s of ~26 at R4). SPPEEC_SPMV=0 opts out;
+# thread count follows OMP_NUM_THREADS.
+_CSRMV = {}
+if os.environ.get('SPPEEC_SPMV') != '0':
+    try:
+        import mp_fortran as _mpf
+        _CSRMV = {(np.float32, np.int32): _mpf.csrmv_s,
+                  (np.float64, np.int32): _mpf.csrmv_d,
+                  (np.float32, np.int64): _mpf.csrmv_sl,
+                  (np.float64, np.int64): _mpf.csrmv_dl}
+    except (ImportError, AttributeError):  # old .so: quiet fallback
+        _CSRMV = {}
+
+
+def _spmv(A, x):
+    """``A @ x`` through the threaded kernel when the types fit,
+    scipy otherwise. CSR only; x must match A's real dtype."""
+    f = _CSRMV.get((A.data.dtype.type, A.indices.dtype.type))
+    if (f is None or A.format != 'csr'
+            or x.dtype != A.data.dtype or not x.flags.c_contiguous):
+        return A @ x
+    return f(A.indptr, A.indices, A.data, x)
 
 
 def plaquette_geometry(Y, fil_axis, fil_cell, nplaq):
@@ -108,6 +139,12 @@ class GeoMG:
         self.dinv = [(1.0/np.where(np.abs(L.diagonal()) > 0,
                                    L.diagonal(), 1.0)).astype(self.dtype)
                      for L in self.levels]
+        # CSR transposes of the prolongators, so the restriction
+        # P.T @ r runs through the row-parallel threaded kernel too
+        # (a CSC transpose apply scatters and cannot thread
+        # deterministically). P is 1-nnz-per-row aggregation, so the
+        # extra storage is negligible.
+        self.PTs = [P.T.tocsr() for P in self.Ps]
         Ac = self.levels[-1]
         # pinv rank decisions in float64 (the kernel is exact and must
         # be cut cleanly); STORAGE in the hierarchy dtype
@@ -139,7 +176,7 @@ class GeoMG:
     def _smooth(self, lv, x, b):
         A, di = self.levels[lv], self.dinv[lv]
         for _ in range(self.nu):
-            x = x + self.omega*di*(b - A @ x)
+            x = x + self.omega*di*(b - _spmv(A, x))
         return x
 
     def _vcycle(self, lv, b, x):
@@ -148,11 +185,11 @@ class GeoMG:
                 return self.coarse_pinv @ b
             return spla.lsqr(self.levels[lv], b, atol=1e-10, btol=1e-10)[0]
         x = self._smooth(lv, x, b)
-        r = b - self.levels[lv] @ x
+        r = b - _spmv(self.levels[lv], x)
         P = self.Ps[lv]
-        xc = self._vcycle(lv + 1, P.T @ r,
+        xc = self._vcycle(lv + 1, _spmv(self.PTs[lv], r),
                           np.zeros(P.shape[1], dtype=self.dtype))
-        x = x + P @ xc
+        x = x + _spmv(P, xc)
         return self._smooth(lv, x, b)
 
     def __call__(self, b, cycles=1):
