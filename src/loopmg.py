@@ -65,6 +65,198 @@ def _int8_ok(data):
                 and np.all(data == np.rint(data)))
 
 
+_STEN = {}
+if os.environ.get('SPPEEC_STENCIL') != '0' and _CSRMV8:
+    try:
+        _STEN = {np.float32: (_mpf.stenjac_s, _mpf.stenmv_s),
+                 np.float64: (_mpf.stenjac_d, _mpf.stenmv_d)}
+    except AttributeError:
+        _STEN = {}
+
+
+class _Stencil0:
+    """Tiled-stencil form of the level-0 Gram (tier 2, 2026-08-26).
+
+    The plaquette Gram is a translation-invariant stencil (constant
+    coefficient per (normal->normal, offset); verified on real Grams:
+    36 offsets, coefficients +-1, diagonal 4). This packs the
+    plaquette vector into per-normal dense 16^3 tiles over the
+    occupied lattice and applies the stencil in Fortran with a 1-cell
+    halo -- streaming only vectors, no matrix. Engagement is gated on
+    EXACT probe equality against the csr path in :func:`build`, so a
+    geometry that breaks any assumption silently keeps the csr.
+    """
+    TL = 16
+
+    def __init__(self, dtype, tables, tile_of, loc, shape):
+        self.jac, self.mv = _STEN[dtype.type]
+        (self.nbt, self.nsrc, self.of, self.cf, self.sptr) = tables
+        self.tile_of = tile_of          # plaquette -> tile index
+        self.loc = loc                  # plaquette -> (nrm, lz, ly, lx)
+        self.shape = shape              # (NT, 3, TL, TL, TL)
+        self.dtype = dtype
+        self._buf = {}
+
+    def _tiled(self, key):
+        b = self._buf.get(key)
+        if b is None:
+            b = self._buf[key] = np.zeros(self.shape, dtype=self.dtype)
+        return b
+
+    def pack(self, v, key):
+        t = self._tiled(key)
+        t[self.tile_of, self.loc[0], self.loc[1], self.loc[2],
+          self.loc[3]] = v
+        return t
+
+    def unpack(self, t):
+        return np.ascontiguousarray(
+            t[self.tile_of, self.loc[0], self.loc[1], self.loc[2],
+              self.loc[3]])
+
+    def matvec(self, x):
+        xt = self.pack(x, 'x')
+        yt = self.mv(xt.T, self.nbt, self.nsrc, self.of, self.cf,
+                     self.sptr)
+        return self.unpack(yt.T)
+
+    def jacobi(self, x, b, wdi_t, nu):
+        xt = self.pack(x, 'x')
+        bt = self.pack(b, 'b')
+        for _ in range(nu):
+            xt = self.jac(xt.T, bt.T, wdi_t.T, self.nbt, self.nsrc,
+                          self.of, self.cf, self.sptr).T
+        return self.unpack(xt)
+
+    @staticmethod
+    def build(A, normal, base, dtype, jacobi_probe):
+        """Extract + certify; returns (_Stencil0, wdi_tiled) or None.
+
+        Certification is two EXACT probe comparisons (matvec and one
+        fused Jacobi sweep) against the csr-path results the caller
+        supplies -- bit-identity or fallback, never tolerance-equal.
+        """
+        if not _STEN or dtype.type not in _STEN:
+            return None
+        TL = _Stencil0.TL
+        A = A.tocsr()
+        n = A.shape[0]
+        # extraction can run on a row SAMPLE: the exact probes below
+        # certify the FULL reconstruction, so an offset the sample
+        # missed or a coefficient it got wrong fails the probe and
+        # falls back -- sampling costs correctness nothing and keeps
+        # the setup temporaries bounded at rung scale.
+        if n > 2_000_000:
+            rows = np.random.default_rng(7).choice(
+                n, 2_000_000, replace=False)
+            rows.sort()
+            As = A[rows]
+            coo = As.tocoo()
+            di = rows[coo.row]
+        else:
+            coo = A.tocoo()
+            di = coo.row
+        dj, dv = coo.col, coo.data.astype(np.float64)
+        # slot key per nnz: (ni, nj, dx+1, dy+1, dz+1); diagonal is
+        # the (nn, nn, 0,0,0) slot with coefficient 4
+        dvec = base[dj] - base[di]
+        if dvec.min() < -1 or dvec.max() > 1:
+            return None                       # not a 1-halo stencil
+        key = (((normal[di]*3 + normal[dj])*3 + dvec[:, 0] + 1)*3
+               + dvec[:, 1] + 1)*3 + dvec[:, 2] + 1
+        uk, inv = np.unique(key, return_inverse=True)
+        # constancy: one coefficient per slot
+        vmin = np.full(uk.size, np.inf)
+        vmax = np.full(uk.size, -np.inf)
+        np.minimum.at(vmin, inv, dv)
+        np.maximum.at(vmax, inv, dv)
+        if not np.all(vmin == vmax) or abs(vmin).max() > 127:
+            return None
+        # order: row-adjacent precedence pairs (csr columns ascend);
+        # dedupe in numpy before touching python sets
+        same = (di[1:] == di[:-1])
+        pair = np.unique(inv[:-1][same].astype(np.int64)*64
+                         + inv[1:][same])
+        prec = {(int(p)//64, int(p) % 64) for p in pair}
+        if any((b_, a_) in prec for a_, b_ in prec):
+            return None
+        # toposort per output normal. Key decode (see encode above):
+        #   u = ni*81 + nj*27 + (dx+1)*9 + (dy+1)*3 + (dz+1)
+        onrm = uk//81
+        nsrc, of, cf, sptr = [], [], [], [0]
+        for nn in range(3):
+            rest = {int(s) for s in np.flatnonzero(onrm == nn)}
+            order = []
+            while rest:
+                free = [s for s in rest
+                        if not any((t, s) in prec for t in rest
+                                   if t != s)]
+                if not free:
+                    return None               # cycle: bad derivation
+                s = min(free)
+                order.append(s)
+                rest.discard(s)
+            for s in order:
+                u = int(uk[s])
+                nsrc.append((u//27) % 3 + 1)
+                of.append([(u//9) % 3 - 1, (u//3) % 3 - 1,
+                           u % 3 - 1])
+                cf.append(int(vmin[s]))
+            sptr.append(len(nsrc))
+        nsrc = np.asarray(nsrc, np.int32)
+        of = np.asarray(of, np.int64)
+        cf = np.asarray(cf, np.int8)
+        sptr = np.asarray(sptr, np.int32)
+        # tiles
+        tc = base//TL
+        tkey = (tc[:, 0].astype(np.int64) << 42) \
+            | (tc[:, 1].astype(np.int64) << 21) | tc[:, 2]
+        ut, tile_of = np.unique(tkey, return_inverse=True)
+        nt = ut.size
+        # neighbour table: 27 offsets per tile
+        nbt = np.zeros((27, nt), np.int32, order='F')
+        tx = (ut >> 42) & 0x1FFFFF
+        ty = (ut >> 21) & 0x1FFFFF
+        tz = ut & 0x1FFFFF
+        pos = {int(k): i for i, k in enumerate(ut)}
+        for hx in (-1, 0, 1):
+            for hy in (-1, 0, 1):
+                for hz in (-1, 0, 1):
+                    slot = 9*(hx + 1) + 3*(hy + 1) + (hz + 1)
+                    for i in range(nt):
+                        k = ((int(tx[i]) + hx) << 42) \
+                            | ((int(ty[i]) + hy) << 21) \
+                            | (int(tz[i]) + hz)
+                        nbt[slot, i] = pos.get(k, -1) + 1
+        # pack layout (NT, 3, TL, TL, TL) C-ordered; its .T is the
+        # Fortran (X, Y, Z, ON, T) view, so the Fortran X axis is the
+        # base-x local coordinate and OF rows are (dx, dy, dz)
+        loc = (normal.astype(np.intp),
+               (base[:, 2] % TL).astype(np.intp),
+               (base[:, 1] % TL).astype(np.intp),
+               (base[:, 0] % TL).astype(np.intp))
+        shape = (nt, 3, TL, TL, TL)
+        s2 = _Stencil0(dtype, (np.asfortranarray(nbt), nsrc,
+                               np.asfortranarray(
+                                   of.T.astype(np.int32)),
+                               cf, sptr),
+                       tile_of.astype(np.intp), loc, shape)
+        # ---- certification: exact probe equality or bust ----------
+        rng = np.random.default_rng(17)
+        for _ in range(2):
+            x = rng.standard_normal(n).astype(dtype)
+            if not np.array_equal(s2.matvec(x), _spmv(A, x)):
+                return None
+        x = rng.standard_normal(n).astype(dtype)
+        b = rng.standard_normal(n).astype(dtype)
+        ref, wdi = jacobi_probe(x, b)
+        wdi_t = s2.pack(np.asarray(wdi, dtype), 'w').copy()
+        got = s2.jacobi(x, b, wdi_t, 1)
+        if not np.array_equal(got, ref):
+            return None
+        return s2, wdi_t
+
+
 def _spmv(A, x):
     """``A @ x`` through the threaded kernel when the types fit,
     scipy otherwise. CSR only; x must match the vector dtype the
@@ -199,6 +391,33 @@ class GeoMG:
             for P in list(self.Ps) + list(self.PTs):
                 if _int8_ok(P.data):
                     P.data = P.data.astype(np.int8)
+        # tier 2: certified tiled stencil for level 0. build() gates
+        # engagement on EXACT probe equality against the csr path
+        # (matvec and one fused sweep), so any geometry that breaks a
+        # stencil assumption silently keeps the csr. The probe below
+        # reproduces exactly what _smooth would compute.
+        self._sten0 = None
+        self._wdi0_t = None
+        if len(self.levels) > 1 and _STEN:
+            def _probe(x, b):
+                A0 = self.levels[0]
+                wdi = self._wdi[0]
+                if A0.data.dtype == np.int8:
+                    f = _JACOBI8.get((x.dtype.type,
+                                      A0.indices.dtype.type))
+                    if f is not None:
+                        return f(A0.indptr, A0.indices, A0.data,
+                                 x, b, wdi), wdi
+                return np.asarray(
+                    x + self.omega*self.dinv[0]*(b - _spmv(A0, x)),
+                    dtype=self.dtype), wdi
+            try:
+                got = _Stencil0.build(self.levels[0], normal, base,
+                                      np.dtype(self.dtype), _probe)
+            except Exception:          # a stencil must never break
+                got = None             # a solve; the csr path stands
+            if got is not None:
+                self._sten0, self._wdi0_t = got
         Ac = self.levels[-1]
         # pinv rank decisions in float64 (the kernel is exact and must
         # be cut cleanly); STORAGE in the hierarchy dtype
@@ -208,6 +427,14 @@ class GeoMG:
         self.nnz = sum(L.nnz for L in self.levels)
         self.nnz_ratio = self.nnz/max(self.levels[0].nnz, 1)
         self.sizes = [L.shape[0] for L in self.levels]
+        if self._sten0 is not None and \
+                os.environ.get('SPPEEC_GPU') == '0':
+            # CPU-only run with the stencil certified: the level-0
+            # csr has no remaining reader (smoother/residual go
+            # through the stencil; only the coarsest level feeds
+            # lsqr/pinv) -- release it. Any accidental use fails
+            # loudly rather than silently slowly.
+            self.levels[0] = None
 
     def _aggregate(self, normal, base):
         """2x2x2 geometric agglomeration, per face orientation."""
@@ -228,6 +455,8 @@ class GeoMG:
         return P.tocsc(), normal[first], cb[first]
 
     def _smooth(self, lv, x, b):
+        if lv == 0 and self._sten0 is not None:
+            return self._sten0.jacobi(x, b, self._wdi0_t, self.nu)
         A, di = self.levels[lv], self.dinv[lv]
         if A.data.dtype == np.int8:
             f = _JACOBI8.get((x.dtype.type, A.indices.dtype.type))
@@ -250,7 +479,10 @@ class GeoMG:
                 return self.coarse_pinv @ b
             return spla.lsqr(self.levels[lv], b, atol=1e-10, btol=1e-10)[0]
         x = self._smooth(lv, x, b)
-        r = b - _spmv(self.levels[lv], x)
+        if lv == 0 and self._sten0 is not None:
+            r = b - self._sten0.matvec(x)
+        else:
+            r = b - _spmv(self.levels[lv], x)
         P = self.Ps[lv]
         xc = self._vcycle(lv + 1, _spmv(self.PTs[lv], r),
                           np.zeros(P.shape[1], dtype=self.dtype))

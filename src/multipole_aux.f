@@ -1683,3 +1683,389 @@ C     the numpy sweep is the contract
       ENDDO
 !$OMP END PARALLEL DO
       END
+C
+C
+      SUBROUTINE STENJAC_S(XT, BT, WT, NBT, NSRC, OF, CF, SPTR,
+     +                     YT, TL, NT, NSL)
+C
+C     One fused damped-Jacobi sweep, y = x + wdi*(b - A x).
+C     Tiled stencil for the plaquette Gram (tier 2, 2026-08-26): the
+C     Gram is a translation-invariant stencil (verified constant per
+C     (normal->normal, offset); coefficients +-1, diagonal 4), so
+C     level 0 applies from per-normal dense TILES (TL^3 cells x 3
+C     normals per tile) with a 1-cell halo gathered from the 27
+C     neighbour tiles (NBT; 0 = absent -> zeros). Absent plaquettes
+C     hold 0 in the tiles, so missing neighbours contribute nothing
+C     and no mask is needed. Slots run in the build-time verified
+C     order (the diagonal is an ordinary slot: source normal = own,
+C     coeff 4, offset 0), which reproduces the CSR row's ascending-
+C     column summation exactly -- BIT-IDENTICAL to the csr path --
+C     and per-tile output ownership makes threaded == serial.
+C
+CF2PY INTENT(OUT) :: YT
+CF2PY REAL :: XT, BT, WT, YT
+CF2PY INTEGER*1 :: CF
+CF2PY INTEGER :: NBT, NSRC, OF, SPTR
+CF2PY INTEGER, INTENT(HIDE), DEPEND(XT) :: TL=SHAPE(XT, 0)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(XT) :: NT=SHAPE(XT, 4)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(NSRC) :: NSL=SIZE(NSRC)
+      INTEGER TL, NT, NSL
+      REAL XT(TL, TL, TL, 3, NT)
+      REAL BT(TL, TL, TL, 3, NT)
+      REAL WT(TL, TL, TL, 3, NT)
+      REAL YT(TL, TL, TL, 3, NT)
+      INTEGER NBT(27, NT), NSRC(NSL), OF(3, NSL), SPTR(4)
+      INTEGER*1 CF(NSL)
+      INTEGER T, ON, S, X, Y, Z, HX, HY, HZ, NB
+      INTEGER XL, XH, YL, YH, ZL, ZH
+      REAL PAD(0:TL+1, 0:TL+1, 0:TL+1, 3)
+      REAL ACC, TMP
+C     VOLATILE: no FMA contraction of the
+C     multiply-add tail (bit-identity with the
+C     separately-rounded csr/numpy path)
+      VOLATILE TMP
+!$OMP PARALLEL DO DEFAULT(SHARED)
+!$OMP& PRIVATE(T, ON, S, X, Y, Z, HX, HY, HZ, NB)
+!$OMP& PRIVATE(XL, XH, YL, YH, ZL, ZH, PAD, ACC, TMP)
+      DO T = 1, NT
+          DO ON = 1, 3
+          DO Z = 0, TL + 1
+          DO Y = 0, TL + 1
+          DO X = 0, TL + 1
+              PAD(X, Y, Z, ON) = 0.0
+          ENDDO
+          ENDDO
+          ENDDO
+          ENDDO
+C         centre + 1-cell halo from the 27 neighbours. For offset
+C         HX in {-1,0,1}: source cells X = TL (HX=-1), 1..TL (0),
+C         1 (HX=+1), landing at PAD coord X + HX*TL.
+          DO HX = -1, 1
+          DO HY = -1, 1
+          DO HZ = -1, 1
+              NB = NBT(9*(HX+1) + 3*(HY+1) + (HZ+1) + 1, T)
+              IF (NB.GE.1) THEN
+                  XL = 1 + (TL-1)*MAX(-HX, 0)
+                  XH = TL - (TL-1)*MAX(HX, 0)
+                  YL = 1 + (TL-1)*MAX(-HY, 0)
+                  YH = TL - (TL-1)*MAX(HY, 0)
+                  ZL = 1 + (TL-1)*MAX(-HZ, 0)
+                  ZH = TL - (TL-1)*MAX(HZ, 0)
+                  DO ON = 1, 3
+                  DO Z = ZL, ZH
+                  DO Y = YL, YH
+                  DO X = XL, XH
+                      PAD(X + HX*TL, Y + HY*TL, Z + HZ*TL, ON) =
+     +                    XT(X, Y, Z, ON, NB)
+                  ENDDO
+                  ENDDO
+                  ENDDO
+                  ENDDO
+              ENDIF
+          ENDDO
+          ENDDO
+          ENDDO
+          DO ON = 1, 3
+          DO Z = 1, TL
+          DO Y = 1, TL
+          DO X = 1, TL
+              ACC = 0.0
+              DO S = SPTR(ON) + 1, SPTR(ON + 1)
+                  ACC = ACC + CF(S)*PAD(X + OF(1, S), Y + OF(2, S),
+     +                                  Z + OF(3, S), NSRC(S))
+              ENDDO
+              TMP = WT(X, Y, Z, ON, T)*(BT(X, Y, Z, ON, T) - ACC)
+              YT(X, Y, Z, ON, T) = PAD(X, Y, Z, ON) + TMP
+          ENDDO
+          ENDDO
+          ENDDO
+          ENDDO
+      ENDDO
+!$OMP END PARALLEL DO
+      END
+C
+C
+      SUBROUTINE STENMV_S(XT, NBT, NSRC, OF, CF, SPTR,
+     +                     YT, TL, NT, NSL)
+C
+C     Plain apply, y = A x (for the v-cycle residual).
+C     Tiled stencil for the plaquette Gram (tier 2, 2026-08-26): the
+C     Gram is a translation-invariant stencil (verified constant per
+C     (normal->normal, offset); coefficients +-1, diagonal 4), so
+C     level 0 applies from per-normal dense TILES (TL^3 cells x 3
+C     normals per tile) with a 1-cell halo gathered from the 27
+C     neighbour tiles (NBT; 0 = absent -> zeros). Absent plaquettes
+C     hold 0 in the tiles, so missing neighbours contribute nothing
+C     and no mask is needed. Slots run in the build-time verified
+C     order (the diagonal is an ordinary slot: source normal = own,
+C     coeff 4, offset 0), which reproduces the CSR row's ascending-
+C     column summation exactly -- BIT-IDENTICAL to the csr path --
+C     and per-tile output ownership makes threaded == serial.
+C
+CF2PY INTENT(OUT) :: YT
+CF2PY REAL :: XT, YT
+CF2PY INTEGER*1 :: CF
+CF2PY INTEGER :: NBT, NSRC, OF, SPTR
+CF2PY INTEGER, INTENT(HIDE), DEPEND(XT) :: TL=SHAPE(XT, 0)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(XT) :: NT=SHAPE(XT, 4)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(NSRC) :: NSL=SIZE(NSRC)
+      INTEGER TL, NT, NSL
+      REAL XT(TL, TL, TL, 3, NT)
+      REAL YT(TL, TL, TL, 3, NT)
+      INTEGER NBT(27, NT), NSRC(NSL), OF(3, NSL), SPTR(4)
+      INTEGER*1 CF(NSL)
+      INTEGER T, ON, S, X, Y, Z, HX, HY, HZ, NB
+      INTEGER XL, XH, YL, YH, ZL, ZH
+      REAL PAD(0:TL+1, 0:TL+1, 0:TL+1, 3)
+      REAL ACC
+!$OMP PARALLEL DO DEFAULT(SHARED)
+!$OMP& PRIVATE(T, ON, S, X, Y, Z, HX, HY, HZ, NB)
+!$OMP& PRIVATE(XL, XH, YL, YH, ZL, ZH, PAD, ACC)
+      DO T = 1, NT
+          DO ON = 1, 3
+          DO Z = 0, TL + 1
+          DO Y = 0, TL + 1
+          DO X = 0, TL + 1
+              PAD(X, Y, Z, ON) = 0.0
+          ENDDO
+          ENDDO
+          ENDDO
+          ENDDO
+C         centre + 1-cell halo from the 27 neighbours. For offset
+C         HX in {-1,0,1}: source cells X = TL (HX=-1), 1..TL (0),
+C         1 (HX=+1), landing at PAD coord X + HX*TL.
+          DO HX = -1, 1
+          DO HY = -1, 1
+          DO HZ = -1, 1
+              NB = NBT(9*(HX+1) + 3*(HY+1) + (HZ+1) + 1, T)
+              IF (NB.GE.1) THEN
+                  XL = 1 + (TL-1)*MAX(-HX, 0)
+                  XH = TL - (TL-1)*MAX(HX, 0)
+                  YL = 1 + (TL-1)*MAX(-HY, 0)
+                  YH = TL - (TL-1)*MAX(HY, 0)
+                  ZL = 1 + (TL-1)*MAX(-HZ, 0)
+                  ZH = TL - (TL-1)*MAX(HZ, 0)
+                  DO ON = 1, 3
+                  DO Z = ZL, ZH
+                  DO Y = YL, YH
+                  DO X = XL, XH
+                      PAD(X + HX*TL, Y + HY*TL, Z + HZ*TL, ON) =
+     +                    XT(X, Y, Z, ON, NB)
+                  ENDDO
+                  ENDDO
+                  ENDDO
+                  ENDDO
+              ENDIF
+          ENDDO
+          ENDDO
+          ENDDO
+          DO ON = 1, 3
+          DO Z = 1, TL
+          DO Y = 1, TL
+          DO X = 1, TL
+              ACC = 0.0
+              DO S = SPTR(ON) + 1, SPTR(ON + 1)
+                  ACC = ACC + CF(S)*PAD(X + OF(1, S), Y + OF(2, S),
+     +                                  Z + OF(3, S), NSRC(S))
+              ENDDO
+              YT(X, Y, Z, ON, T) = ACC
+          ENDDO
+          ENDDO
+          ENDDO
+          ENDDO
+      ENDDO
+!$OMP END PARALLEL DO
+      END
+C
+C
+      SUBROUTINE STENJAC_D(XT, BT, WT, NBT, NSRC, OF, CF, SPTR,
+     +                     YT, TL, NT, NSL)
+C
+C     One fused damped-Jacobi sweep, y = x + wdi*(b - A x).
+C     Tiled stencil for the plaquette Gram (tier 2, 2026-08-26): the
+C     Gram is a translation-invariant stencil (verified constant per
+C     (normal->normal, offset); coefficients +-1, diagonal 4), so
+C     level 0 applies from per-normal dense TILES (TL^3 cells x 3
+C     normals per tile) with a 1-cell halo gathered from the 27
+C     neighbour tiles (NBT; 0 = absent -> zeros). Absent plaquettes
+C     hold 0 in the tiles, so missing neighbours contribute nothing
+C     and no mask is needed. Slots run in the build-time verified
+C     order (the diagonal is an ordinary slot: source normal = own,
+C     coeff 4, offset 0), which reproduces the CSR row's ascending-
+C     column summation exactly -- BIT-IDENTICAL to the csr path --
+C     and per-tile output ownership makes threaded == serial.
+C
+CF2PY INTENT(OUT) :: YT
+CF2PY REAL*8 :: XT, BT, WT, YT
+CF2PY INTEGER*1 :: CF
+CF2PY INTEGER :: NBT, NSRC, OF, SPTR
+CF2PY INTEGER, INTENT(HIDE), DEPEND(XT) :: TL=SHAPE(XT, 0)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(XT) :: NT=SHAPE(XT, 4)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(NSRC) :: NSL=SIZE(NSRC)
+      INTEGER TL, NT, NSL
+      REAL*8 XT(TL, TL, TL, 3, NT)
+      REAL*8 BT(TL, TL, TL, 3, NT)
+      REAL*8 WT(TL, TL, TL, 3, NT)
+      REAL*8 YT(TL, TL, TL, 3, NT)
+      INTEGER NBT(27, NT), NSRC(NSL), OF(3, NSL), SPTR(4)
+      INTEGER*1 CF(NSL)
+      INTEGER T, ON, S, X, Y, Z, HX, HY, HZ, NB
+      INTEGER XL, XH, YL, YH, ZL, ZH
+      REAL*8 PAD(0:TL+1, 0:TL+1, 0:TL+1, 3)
+      REAL*8 ACC, TMP
+C     VOLATILE: no FMA contraction of the
+C     multiply-add tail (bit-identity with the
+C     separately-rounded csr/numpy path)
+      VOLATILE TMP
+!$OMP PARALLEL DO DEFAULT(SHARED)
+!$OMP& PRIVATE(T, ON, S, X, Y, Z, HX, HY, HZ, NB)
+!$OMP& PRIVATE(XL, XH, YL, YH, ZL, ZH, PAD, ACC, TMP)
+      DO T = 1, NT
+          DO ON = 1, 3
+          DO Z = 0, TL + 1
+          DO Y = 0, TL + 1
+          DO X = 0, TL + 1
+              PAD(X, Y, Z, ON) = 0.0
+          ENDDO
+          ENDDO
+          ENDDO
+          ENDDO
+C         centre + 1-cell halo from the 27 neighbours. For offset
+C         HX in {-1,0,1}: source cells X = TL (HX=-1), 1..TL (0),
+C         1 (HX=+1), landing at PAD coord X + HX*TL.
+          DO HX = -1, 1
+          DO HY = -1, 1
+          DO HZ = -1, 1
+              NB = NBT(9*(HX+1) + 3*(HY+1) + (HZ+1) + 1, T)
+              IF (NB.GE.1) THEN
+                  XL = 1 + (TL-1)*MAX(-HX, 0)
+                  XH = TL - (TL-1)*MAX(HX, 0)
+                  YL = 1 + (TL-1)*MAX(-HY, 0)
+                  YH = TL - (TL-1)*MAX(HY, 0)
+                  ZL = 1 + (TL-1)*MAX(-HZ, 0)
+                  ZH = TL - (TL-1)*MAX(HZ, 0)
+                  DO ON = 1, 3
+                  DO Z = ZL, ZH
+                  DO Y = YL, YH
+                  DO X = XL, XH
+                      PAD(X + HX*TL, Y + HY*TL, Z + HZ*TL, ON) =
+     +                    XT(X, Y, Z, ON, NB)
+                  ENDDO
+                  ENDDO
+                  ENDDO
+                  ENDDO
+              ENDIF
+          ENDDO
+          ENDDO
+          ENDDO
+          DO ON = 1, 3
+          DO Z = 1, TL
+          DO Y = 1, TL
+          DO X = 1, TL
+              ACC = 0.0
+              DO S = SPTR(ON) + 1, SPTR(ON + 1)
+                  ACC = ACC + CF(S)*PAD(X + OF(1, S), Y + OF(2, S),
+     +                                  Z + OF(3, S), NSRC(S))
+              ENDDO
+              TMP = WT(X, Y, Z, ON, T)*(BT(X, Y, Z, ON, T) - ACC)
+              YT(X, Y, Z, ON, T) = PAD(X, Y, Z, ON) + TMP
+          ENDDO
+          ENDDO
+          ENDDO
+          ENDDO
+      ENDDO
+!$OMP END PARALLEL DO
+      END
+C
+C
+      SUBROUTINE STENMV_D(XT, NBT, NSRC, OF, CF, SPTR,
+     +                     YT, TL, NT, NSL)
+C
+C     Plain apply, y = A x (for the v-cycle residual).
+C     Tiled stencil for the plaquette Gram (tier 2, 2026-08-26): the
+C     Gram is a translation-invariant stencil (verified constant per
+C     (normal->normal, offset); coefficients +-1, diagonal 4), so
+C     level 0 applies from per-normal dense TILES (TL^3 cells x 3
+C     normals per tile) with a 1-cell halo gathered from the 27
+C     neighbour tiles (NBT; 0 = absent -> zeros). Absent plaquettes
+C     hold 0 in the tiles, so missing neighbours contribute nothing
+C     and no mask is needed. Slots run in the build-time verified
+C     order (the diagonal is an ordinary slot: source normal = own,
+C     coeff 4, offset 0), which reproduces the CSR row's ascending-
+C     column summation exactly -- BIT-IDENTICAL to the csr path --
+C     and per-tile output ownership makes threaded == serial.
+C
+CF2PY INTENT(OUT) :: YT
+CF2PY REAL*8 :: XT, YT
+CF2PY INTEGER*1 :: CF
+CF2PY INTEGER :: NBT, NSRC, OF, SPTR
+CF2PY INTEGER, INTENT(HIDE), DEPEND(XT) :: TL=SHAPE(XT, 0)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(XT) :: NT=SHAPE(XT, 4)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(NSRC) :: NSL=SIZE(NSRC)
+      INTEGER TL, NT, NSL
+      REAL*8 XT(TL, TL, TL, 3, NT)
+      REAL*8 YT(TL, TL, TL, 3, NT)
+      INTEGER NBT(27, NT), NSRC(NSL), OF(3, NSL), SPTR(4)
+      INTEGER*1 CF(NSL)
+      INTEGER T, ON, S, X, Y, Z, HX, HY, HZ, NB
+      INTEGER XL, XH, YL, YH, ZL, ZH
+      REAL*8 PAD(0:TL+1, 0:TL+1, 0:TL+1, 3)
+      REAL*8 ACC
+!$OMP PARALLEL DO DEFAULT(SHARED)
+!$OMP& PRIVATE(T, ON, S, X, Y, Z, HX, HY, HZ, NB)
+!$OMP& PRIVATE(XL, XH, YL, YH, ZL, ZH, PAD, ACC)
+      DO T = 1, NT
+          DO ON = 1, 3
+          DO Z = 0, TL + 1
+          DO Y = 0, TL + 1
+          DO X = 0, TL + 1
+              PAD(X, Y, Z, ON) = 0.0
+          ENDDO
+          ENDDO
+          ENDDO
+          ENDDO
+C         centre + 1-cell halo from the 27 neighbours. For offset
+C         HX in {-1,0,1}: source cells X = TL (HX=-1), 1..TL (0),
+C         1 (HX=+1), landing at PAD coord X + HX*TL.
+          DO HX = -1, 1
+          DO HY = -1, 1
+          DO HZ = -1, 1
+              NB = NBT(9*(HX+1) + 3*(HY+1) + (HZ+1) + 1, T)
+              IF (NB.GE.1) THEN
+                  XL = 1 + (TL-1)*MAX(-HX, 0)
+                  XH = TL - (TL-1)*MAX(HX, 0)
+                  YL = 1 + (TL-1)*MAX(-HY, 0)
+                  YH = TL - (TL-1)*MAX(HY, 0)
+                  ZL = 1 + (TL-1)*MAX(-HZ, 0)
+                  ZH = TL - (TL-1)*MAX(HZ, 0)
+                  DO ON = 1, 3
+                  DO Z = ZL, ZH
+                  DO Y = YL, YH
+                  DO X = XL, XH
+                      PAD(X + HX*TL, Y + HY*TL, Z + HZ*TL, ON) =
+     +                    XT(X, Y, Z, ON, NB)
+                  ENDDO
+                  ENDDO
+                  ENDDO
+                  ENDDO
+              ENDIF
+          ENDDO
+          ENDDO
+          ENDDO
+          DO ON = 1, 3
+          DO Z = 1, TL
+          DO Y = 1, TL
+          DO X = 1, TL
+              ACC = 0.0
+              DO S = SPTR(ON) + 1, SPTR(ON + 1)
+                  ACC = ACC + CF(S)*PAD(X + OF(1, S), Y + OF(2, S),
+     +                                  Z + OF(3, S), NSRC(S))
+              ENDDO
+              YT(X, Y, Z, ON, T) = ACC
+          ENDDO
+          ENDDO
+          ENDDO
+          ENDDO
+      ENDDO
+!$OMP END PARALLEL DO
+      END

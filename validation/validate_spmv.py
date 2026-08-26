@@ -129,6 +129,78 @@ def main():
           and not loopmg._int8_ok(np.array([200.0], np.float32))
           and not loopmg._int8_ok(np.array([0.5], np.float32)))
 
+    # F. tier 2: the tiled stencil engages on a real Gram and is
+    # bit-identical to the csr path IT CERTIFIED AGAINST -- the
+    # hierarchy's own level-0 construction. (An ad-hoc rebuilt Gram
+    # is NOT a valid reference: scipy slicing can order columns
+    # differently, changing the summation order at the ulp level --
+    # the reference-artifact trap, again.)
+    import sppeec_input
+    from port_impedance import _PRECOND_DT
+    doc = (open(os.path.join(HERE, '..', 'examples', 'equibar.toml'))
+           .read() + '\nbasis = "overcomplete"\n')
+    os.chdir(os.path.join(HERE, '..'))
+    pr = sppeec_input.loads(doc)
+    m = pr.model()
+    M = pr.tree(m)
+    m.prepare(M, 1e6)
+    sw = pr.sweeper(m, M)
+    S = sw.S
+    mg = S.chol.mg
+    check('F: stencil engaged on the equibar Gram',
+          getattr(mg, '_sten0', None) is not None)
+    if mg._sten0 is not None:
+        YT32 = S.YT.astype(_PRECOND_DT)
+        A = ((YT32 @ YT32.T).tocsr()[:S.nplaq][:, :S.nplaq]).tocsr()
+        A8 = A.copy()
+        A8.data = A8.data.astype(np.int8)
+        rng = np.random.default_rng(23)
+        ok = True
+        for _ in range(3):
+            x = rng.standard_normal(A.shape[0]).astype(np.float32)
+            if not np.array_equal(mg._sten0.matvec(x),
+                                  loopmg._spmv(A8, x)):
+                ok = False
+        check('F: stencil matvec bit-identical to its csr path', ok)
+        wdi = mg._wdi[0]
+        x = rng.standard_normal(A.shape[0]).astype(np.float32)
+        b = rng.standard_normal(A.shape[0]).astype(np.float32)
+        import mp_fortran as mpf
+        ref = mpf.jacobi8_s(A8.indptr, A8.indices, A8.data, x, b, wdi)
+        check('F: stencil fused sweep bit-identical to jacobi8',
+              np.array_equal(
+                  mg._sten0.jacobi(x, b, mg._wdi0_t, 1), ref))
+        # threaded == serial for the tiled kernels, fresh processes
+        st_probe = (
+            "import os, sys, hashlib, numpy as np\n"
+            "sys.path[:0] = [%r, %r]\n"
+            "os.chdir(%r)\n"
+            "import sppeec_input\n"
+            "doc = open('examples/equibar.toml').read() + "
+            "'\\nbasis = \"overcomplete\"\\n'\n"
+            "pr = sppeec_input.loads(doc)\n"
+            "m = pr.model(); M = pr.tree(m); m.prepare(M, 1e6)\n"
+            "sw = pr.sweeper(m, M)\n"
+            "st = sw.S.chol.mg._sten0\n"
+            "x = np.random.default_rng(4).standard_normal("
+            "st.tile_of.size).astype(np.float32)\n"
+            "print('HASH', hashlib.sha256("
+            "st.matvec(x).tobytes()).hexdigest())\n"
+            % (os.path.join(HERE, '..', 'src'), HERE,
+               os.path.join(HERE, '..')))
+        hs = []
+        for t in ('1', '4'):
+            r = subprocess.run(
+                [sys.executable, '-c', st_probe],
+                capture_output=True, text=True,
+                env=dict(os.environ, OMP_NUM_THREADS=t,
+                         SPPEEC_GPU='0'))
+            for ln in r.stdout.splitlines():
+                if ln.startswith('HASH'):
+                    hs.append(ln.split()[1])
+        check('F: tiled kernels threaded == serial',
+              len(hs) == 2 and hs[0] == hs[1], repr(hs))
+
     if FAIL:
         print('FAIL: %d check(s): %s' % (len(FAIL), FAIL))
         return 1
