@@ -14,14 +14,17 @@ reproducible:
   solver build;
 * **transients**: high-water deltas across the marked sub-phases.
 
-Headline numbers:
+Headline numbers (before → after the 2026-08-26/27 transient fixes;
+"after" is the shipped state):
 
-    peak (HWM, build phase)         11.73 GB   <- what OOM-kills
-    post-build resident (RSS)        7.97 GB
+    peak (HWM, build phase)         11.73 -> 10.46 GB  <- what OOM-kills
+    post-build resident (RSS)        7.97 ->  6.79 GB
     census-reachable arrays          6.40 GB
-    unattributed resident            ~1.5 GB   (FFTW plan buffers x18,
-                                                cholmod factor,
-                                                allocator overhead)
+    unattributed resident      1.5 -> ~0.6 GB  (FFTW plan buffers x18,
+                                    cholmod factor, allocator overhead;
+                                    the other ~0.9 GB was the
+                                    node_of_cell python dict, now a
+                                    75 MB CellIndex)
 
 The peak sits **in the build, not the solve**: model 0.41 GB → tree
 0.99 (HWM 1.41) → solver build 7.97 resident with the 11.73 HWM
@@ -47,12 +50,13 @@ below.
   frequency retune; never freed.
 * **Precision**: complex64 dominant (deliberate — the tables are
   coupling coefficients, fp32-adequate by the wirekernel gates).
-* **Opportunity (open, the largest single one)**: the retune cache
-  is dead weight on a single-frequency run, but the census does not
-  yet separate "cache" (retune-only) from "tables" (read per
-  matvec) inside the 2.27 GB of complex64 — **attribute first,
-  then add a release knob** for the retune-only share. Do not
-  release blind: the far tables are hot.
+* **Attribution (done 2026-08-26, and it closes the big idea)**:
+  the 2.27 GB of complex64 is `wc._far` at 2.36 GB — the per-leaf
+  far-field tables read on **every matvec**. The retune-only kernel
+  caches (`_kern_ww` etc.) measure only ~130 MB. A release knob for
+  the cache is therefore worth ~1% of peak, not 20% — deprioritised.
+  Any real reduction here means shrinking `_far` itself (per-leaf
+  list-of-arrays layout, dedup/packing) — unscoped.
 
 ### 2. GeoMG preconditioner (hierarchy + stencil + Schur) — 1666 MB (14%)
 
@@ -157,21 +161,25 @@ solution), the spanning-forest arrays (4 × 35 MB), adjacency tables
 * Per-solve temporaries: `Baugᵀ` complex cast for the lsqr
   projections, rhs/ihat vectors — a few hundred MB, freed per solve.
 
-## Build transients (the ~3.8 GB between resident 7.97 and peak 11.73)
+## Build transients — corrected attribution, and the fixes
 
-Attribution by high-water markers, in build order:
+The census's first draft blamed `getmesh_full`; finer pre/post
+brackets acquitted it (its Fortran buffers are int32/int8, ~0.5 GB,
+and its whole transient fits under the peak already set). The real
+owners, with the shipped fixes:
 
-| sub-phase | HWM after | owns |
-|---|---:|---|
-| wire coupler build | 3.6 GB | quadrature temporaries |
-| **`getmesh_full` (plaquette enumeration)** | **10.2 GB** | **+6.6 GB — the peak owner**: the overcomplete basis's COO intermediates |
-| stencil extraction + certification | ~+0.6 GB | sampled COO/key arrays (was +2.5 GB before the 500k-row trim) |
-| Gram formation / factor / cholS | no further growth | freed eagerly since the `del G` pass |
+| sub-phase | transient (before) | after | fix |
+|---|---:|---:|---|
+| **`_forest` spanning-forest build** | **+4.0 GB** | ~+1.1 GB | the defaultdict of ~26M python tuples replaced by sorted adjacency arrays + a list-based DFS with the identical traversal order — **bit-identical forest**, 6 s wall |
+| **`sparse_incidence`** | +2.6 GB | ~+1.7 GB | direct CSR assembly (2 entries/row ⇒ no COO sort; int32 indices, f32 ±1 data = the canonical stored form; per-row column swap keeps the old summation order — bit-identical) |
+| `node_of_cell` dict | 0.9 GB *resident* | 75 MB | `CellIndex` (sorted-key searchsorted, dict-compatible `[]` + vectorised `lookup`) |
+| Gram/hierarchy formation (`_GeoMGFactor`) | +1.3 GB | +1.3 GB | eager `del G`/`del A` shipped earlier; the remaining live-set is the Galerkin products — open |
+| stencil extraction | +0.6 GB | +0.6 GB | already trimmed (500k-row sample) |
+| `getmesh_full`, `sp.bmat`, coupler quadrature | fit under peak | — | innocent / no action |
 
-**Opportunity (open, the #1 peak reduction)**: `getmesh_full`'s
-+6.6 GB transient — chunked or streaming plaquette enumeration in
-`meshgraph` would lower the number that actually OOM-kills runs.
-This is real Fortran/scipy surgery and is recorded on the docket.
+Remaining peak-over-resident after the fixes: ~3.7 GB, spread across
+the Gram/hierarchy formation and `Bmat` assembly — flatter, with no
+single dominant owner left.
 
 ## Scaling notes
 
@@ -185,11 +193,20 @@ count × tree depth, not cells). The build-peak overhang
 
 | action | scope | saving @R4 | status |
 |---|---|---:|---|
-| separate + release wc retune cache | resident | up to ~2.3 GB (attribute first) | **open, #1 resident** |
-| chunk `getmesh_full` enumeration | peak | up to ~6 GB | **open, #1 peak** |
+| `_forest` array/list rewrite | peak | ~2.9 GB | **done** (bit-identical) |
+| `sparse_incidence` direct CSR | peak | ~0.9 GB | **done** (bit-identical) |
+| `node_of_cell` → `CellIndex` | resident | ~0.9 GB | **done** |
+| wc retune-cache release | resident | ~130 MB (measured — not the hoped 2.3 GB; `_far` is hot) | deprioritised |
+| ~~chunk `getmesh_full`~~ | — | — | **withdrawn** (acquitted by measurement) |
+| shrink `_far` layout (dedup/pack per-leaf lists) | resident | unscoped | open |
+| Gram/Galerkin live-set | peak | ~1 GB | open, medium |
 | flat-intp stencil pack maps | resident | ~450 MB | open, easy |
 | Bmat Y/ST block split (f32/f64) | resident | ~300 MB | open, medium |
 | int8 hierarchy, level-0 stencil drop, B/Y/YT/Baug f32, fp32 Krylov, eager G frees | — | shipped | done |
 | `release_lattice_arrays()` (sigma etc.) | solve resident | 195 MB | done (explicit opt-in) |
 | GPU stencil (device VRAM) | VRAM | — | parked (docket; treecost trigger) |
 | `whole` buffer to complex64 | resident | 134 MB | **rejected** (field precision) |
+
+Projected to the larger rungs (these transients scale with
+filaments): R5 peak ~93 → **~83–85 GB**; R6 projected peak ~490 →
+**~430–445 GB** — the 624 GB hero node's margin widens accordingly.

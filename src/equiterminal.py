@@ -107,6 +107,44 @@ def node_cells(M):
     return np.stack([cx, cy, cz], axis=1)
 
 
+class CellIndex:
+    """Dict-like ``cell-tuple -> node id``, backed by sorted keys.
+
+    Replaces the ``{tuple(c): i}`` python dict over every node --
+    measured ~0.9 GB of RESIDENT interpreter objects at R4 (4.6M
+    tuple keys), built to serve a handful of scalar lookups plus one
+    vectorised sweep. Arrays: ~75 MB. ``__getitem__`` for the scalar
+    sites, ``lookup`` for whole-array queries."""
+
+    def __init__(self, cells):
+        c = np.asarray(cells, dtype=np.int64)
+        self._m1 = int(c[:, 1].max()) + 1
+        self._m2 = int(c[:, 2].max()) + 1
+        keys = (c[:, 0]*self._m1 + c[:, 1])*self._m2 + c[:, 2]
+        self._order = np.argsort(keys, kind='stable')
+        self._keys = keys[self._order]
+
+    def _key(self, c):
+        return (c[..., 0]*self._m1 + c[..., 1])*self._m2 + c[..., 2]
+
+    def __getitem__(self, cell):
+        k = (int(cell[0])*self._m1 + int(cell[1]))*self._m2 \
+            + int(cell[2])
+        i = int(np.searchsorted(self._keys, k))
+        if i >= self._keys.size or self._keys[i] != k:
+            raise KeyError(tuple(cell))
+        return int(self._order[i])
+
+    def lookup(self, cells):
+        """Vectorised node ids for an (n, 3) cell array."""
+        k = self._key(np.asarray(cells, dtype=np.int64))
+        i = np.searchsorted(self._keys, k)
+        i = np.minimum(i, self._keys.size - 1)
+        if not np.array_equal(self._keys[i], k):
+            raise KeyError("cells outside the node set")
+        return self._order[i]
+
+
 def sparse_incidence(M, whole, efgsize, nodesize):
     """Explicit sparse incidence ``B`` (efg x nodes), entries +-1.
 
@@ -141,13 +179,26 @@ def sparse_incidence(M, whole, efgsize, nodesize):
         raise RuntimeError(
             "connectA produced an invalid incidence -- under the EDGE "
             "scheme a single-level tree needs N >= NT+1")
-    rows = np.repeat(np.arange(efgsize), 2)
-    cols = np.column_stack([n_ev, n_od]).ravel()
-    vals = np.column_stack([np.sign(r_ev), np.sign(r_od)]).ravel()
-    B = sp.coo_matrix((vals, (rows, cols)),
-                      shape=(efgsize, nodesize)).tocsr()
-    per_row = np.diff(B.indptr)
-    if (per_row != 2).any() or np.abs(B.sum(axis=1)).max() > 1e-9:
+    # DIRECT csr assembly: every row has exactly two entries, so the
+    # COO->CSR sort the old construction paid (part of a measured
+    # +2.6 GB build transient at R4) is a per-row column swap.
+    # int32 indices and float32 +-1 data ARE the canonical stored
+    # form (the shrink pass produced exactly this); the per-row sort
+    # reproduces the old canonical column order, so every downstream
+    # byte is unchanged.
+    cols = np.column_stack([n_ev, n_od]).astype(np.int32)
+    vals = np.column_stack([np.sign(r_ev), np.sign(r_od)]
+                           ).astype(np.float32)
+    del r_ev, r_od, n_ev, n_od, resp
+    swap = cols[:, 0] > cols[:, 1]
+    cols[swap] = cols[swap][:, ::-1]
+    vals[swap] = vals[swap][:, ::-1]
+    del swap
+    B = sp.csr_matrix((vals.ravel(), cols.ravel(),
+                       np.arange(0, 2*efgsize + 1, 2,
+                                 dtype=np.int32)),
+                      shape=(efgsize, nodesize))
+    if np.abs(B.sum(axis=1)).max() > 1e-9:
         raise RuntimeError("incidence rows are not +1/-1 pairs")
     return B, cells
 
@@ -199,7 +250,7 @@ def _check_orientation(B, fil_axis, fil_cell, node_of_cell):
     terminal coupling and leaves reciprocity intact -- i.e. it would not
     show up in the obvious guard. So it is measured, not assumed.
     """
-    lo = np.array([node_of_cell[tuple(c)] for c in fil_cell])
+    lo = np.asarray(node_of_cell.lookup(fil_cell))
     got = np.asarray(B[np.arange(B.shape[0]), lo]).ravel()
     if not np.all(got == 1.0):
         n_bad = int((got != 1.0).sum())
@@ -1903,7 +1954,7 @@ class EquiTerminalSolver:
         self.term = Terminals(model, M, port, t_l=t_l)
         self.B, self.ncell = sparse_incidence(M, self.whole, self.efg,
                                               self.nnode)
-        self.node_of_cell = {tuple(c): i for i, c in enumerate(self.ncell)}
+        self.node_of_cell = CellIndex(self.ncell)
         self.fil_axis, self.fil_cell = filament_cells(M)
         _check_orientation(self.B, self.fil_axis, self.fil_cell,
                            self.node_of_cell)

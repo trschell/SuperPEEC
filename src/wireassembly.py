@@ -69,13 +69,81 @@ from scipy.sparse.linalg import LinearOperator, lgmres
 
 import meshgraph as mg
 import wirekernel as wk
-from equiterminal import sparse_incidence, filament_cells, node_cells
+from equiterminal import (CellIndex, sparse_incidence, filament_cells,
+                          node_cells)
 from wirecoupler import WireCoupler
 
 MU0 = 4e-7*np.pi
 
 
 # ------------------------------------------------- lattice path machinery
+
+def _forest_adjacency(B):
+    """CSR-style node adjacency with edge ids and signs.
+
+    Per node, entries run in ascending edge id -- exactly the
+    insertion order of the defaultdict-of-lists this replaces, so
+    the DFS below reproduces the IDENTICAL forest. The dict held
+    ~26M python tuples: a measured +4.0 GB of the R4 build peak;
+    these arrays are ~650 MB and die at function exit."""
+    Bc = B.tocoo()
+    pos = Bc.data > 0
+    ne = B.shape[0]
+    lo = np.zeros(ne, dtype=np.int64)
+    hi = np.zeros(ne, dtype=np.int64)
+    lo[Bc.row[pos]] = Bc.col[pos]
+    hi[Bc.row[~pos]] = Bc.col[~pos]
+    node = np.concatenate([lo, hi])
+    nbr = np.concatenate([hi, lo])
+    eid = np.concatenate([np.arange(ne, dtype=np.int64)]*2)
+    sgn = np.concatenate([np.ones(ne, np.int8),
+                          -np.ones(ne, np.int8)])
+    o = np.lexsort((eid, node))
+    nn = B.shape[1]
+    ptr = np.zeros(nn + 1, dtype=np.int64)
+    np.cumsum(np.bincount(node, minlength=nn), out=ptr[1:])
+    return ptr, nbr[o], eid[o], sgn[o]
+
+
+def _forest_walk(B, nn, roots):
+    """The shared DFS behind :func:`_forest`/:func:`_forest_rooted`;
+    traversal order identical to the historical dict version (same
+    per-node edge order, same LIFO stack), so the forest -- and every
+    gauge-dependent byte downstream -- is unchanged."""
+    ptr, nbr, eid, sgn = _forest_adjacency(B)
+    # plain python ints for the DFS hot loop: per-element numpy
+    # scalar boxing made the first array version several times
+    # slower than the old tuple dict; these lists cost ~0.9 GB
+    # transient (vs the dict's 4.0) and die at return
+    ptr_l = ptr.tolist()
+    nbr_l = nbr.tolist()
+    eid_l = eid.tolist()
+    sgn_l = sgn.tolist()
+    del nbr, eid, sgn
+    parent = np.full(nn, -1, dtype=np.int64)
+    pedge = np.full(nn, -1, dtype=np.int64)
+    psign = np.zeros(nn)
+    comp_l = [-1]*nn
+    ncomp = 0
+    for root in roots:
+        if comp_l[root] >= 0 or ptr_l[root] == ptr_l[root + 1]:
+            continue
+        comp_l[root] = ncomp
+        stack = [root]
+        while stack:
+            u = stack.pop()
+            for i in range(ptr_l[u], ptr_l[u + 1]):
+                v = nbr_l[i]
+                if comp_l[v] < 0:
+                    comp_l[v] = ncomp
+                    parent[v] = u
+                    pedge[v] = eid_l[i]
+                    psign[v] = sgn_l[i]
+                    stack.append(v)
+        ncomp += 1
+    comp = np.asarray(comp_l, dtype=np.int64)
+    return parent, pedge, psign, comp, ncomp
+
 
 def _forest(B, nn):
     """Spanning forest of the lattice node graph.
@@ -85,39 +153,7 @@ def _forest(B, nn):
     filament joining them, the SIGN a unit current takes on that
     filament when flowing parent -> node, and the component label.
     """
-    Bc = B.tocoo()
-    pos = Bc.data > 0
-    k = Bc.row[pos]
-    lo = np.zeros(B.shape[0], dtype=np.int64)
-    hi = np.zeros(B.shape[0], dtype=np.int64)
-    lo[k] = Bc.col[pos]
-    hi[Bc.row[~pos]] = Bc.col[~pos]
-    # adjacency with edge ids
-    import collections
-    adj = collections.defaultdict(list)
-    for e in range(B.shape[0]):
-        adj[lo[e]].append((hi[e], e, +1.0))   # traversing lo->hi = +1
-        adj[hi[e]].append((lo[e], e, -1.0))
-    parent = np.full(nn, -1, dtype=np.int64)
-    pedge = np.full(nn, -1, dtype=np.int64)
-    psign = np.zeros(nn)
-    comp = np.full(nn, -1, dtype=np.int64)
-    ncomp = 0
-    for root in range(nn):
-        if comp[root] >= 0 or not adj[root]:
-            continue
-        comp[root] = ncomp
-        stack = [root]
-        while stack:
-            u = stack.pop()
-            for v, e, sgn in adj[u]:
-                if comp[v] < 0:
-                    comp[v] = ncomp
-                    parent[v] = u
-                    pedge[v] = e
-                    psign[v] = sgn
-                    stack.append(v)
-        ncomp += 1
+    parent, pedge, psign, comp, _ = _forest_walk(B, nn, range(nn))
     return parent, pedge, psign, comp
 
 
@@ -537,7 +573,7 @@ class WireBondSolver:
                                "model.prepare(M, freq) first")
         self.B, ncell = sparse_incidence(M, self.whole, self.efg,
                                          self.nnode)
-        self.node_of_cell = {tuple(c): i for i, c in enumerate(ncell)}
+        self.node_of_cell = CellIndex(ncell)
         # share the coupler's copies -- filament_cells is linear in N
         self.fil_axis, self.fil_cell = wcs.fil_axis, wcs.fil_cell
         self.parent, self.pedge, self.psign, self.comp = _forest(
@@ -1262,35 +1298,5 @@ class WireBondSolver:
 def _forest_rooted(B, nn, order):
     """As :func:`_forest` but visiting roots in the given order --
     a different gauge for the path system (validator part I)."""
-    Bc = B.tocoo()
-    pos = Bc.data > 0
-    lo = np.zeros(B.shape[0], dtype=np.int64)
-    hi = np.zeros(B.shape[0], dtype=np.int64)
-    lo[Bc.row[pos]] = Bc.col[pos]
-    hi[Bc.row[~pos]] = Bc.col[~pos]
-    import collections
-    adj = collections.defaultdict(list)
-    for e in range(B.shape[0]):
-        adj[lo[e]].append((hi[e], e, +1.0))
-        adj[hi[e]].append((lo[e], e, -1.0))
-    parent = np.full(nn, -1, dtype=np.int64)
-    pedge = np.full(nn, -1, dtype=np.int64)
-    psign = np.zeros(nn)
-    comp = np.full(nn, -1, dtype=np.int64)
-    ncomp = 0
-    for root in order:
-        if comp[root] >= 0 or not adj[root]:
-            continue
-        comp[root] = ncomp
-        stack = [root]
-        while stack:
-            u = stack.pop()
-            for v, e, sgn in adj[u]:
-                if comp[v] < 0:
-                    comp[v] = ncomp
-                    parent[v] = u
-                    pedge[v] = e
-                    psign[v] = sgn
-                    stack.append(v)
-        ncomp += 1
+    parent, pedge, psign, comp, _ = _forest_walk(B, nn, order)
     return parent, pedge, psign, comp
