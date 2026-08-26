@@ -138,6 +138,41 @@ MU0 = 4e-7*np.pi
 _SINGLE_RTOL_FLOOR = 1e-5
 
 
+def _checkpoint_load(path, rhs, x0):
+    """The stored iterate, if ``path`` checkpoints THIS system.
+
+    Identity test: same size and stored rhs equal to the live one at
+    1e-9 relative (never bitwise -- see the checkpoint note in
+    :func:`krylov_solve`). Anything else -- absent file, another
+    system's checkpoint, junk, non-finite iterate -- returns the
+    caller's ``x0`` untouched. Never raises."""
+    try:
+        with np.load(path) as z:
+            xs = np.asarray(z['x'])
+            rs = np.asarray(z['rhs'])
+        if xs.shape != rhs.shape or rs.shape != rhs.shape:
+            return x0
+        nr = float(np.linalg.norm(rhs))
+        if nr == 0.0 or not np.all(np.isfinite(xs)):
+            return x0
+        if float(np.linalg.norm(rs.astype(rhs.dtype) - rhs)) > 1e-9*nr:
+            return x0
+        return xs
+    except Exception:
+        return x0
+
+
+def _checkpoint_dump(path, x, rhs):
+    """Atomic iterate dump (tmp + rename); a failure never interrupts
+    the solve it is insuring."""
+    tmp = path + '.tmp.npz'
+    try:
+        np.savez(tmp, x=x, rhs=rhs)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
 def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
                  maxiter=30, inner_m=None, precision='auto', x0=None):
     """One preconditioned Krylov solve; returns ``(x, flag)``.
@@ -243,6 +278,14 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
         rhs = np.asarray(rhs, c64)
 
     def _finish(x, flag):
+        if _ckpath and flag == 0:
+            # converged: a checkpoint now describes a FINISHED solve;
+            # remove it so a stale file can only ever belong to an
+            # interrupted one
+            try:
+                os.remove(_ckpath)
+            except OSError:
+                pass
         return np.asarray(x, np.complex128), flag
 
     def _cast_x0(g, ref):
@@ -257,6 +300,22 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
     if method not in ('lgmres', 'bicgstab'):
         raise ValueError("method must be 'bicgstab' or 'lgmres', "
                          "got %r" % (method,))
+    # CHECKPOINT/RESUME (2026-08-26, after a 4.4 h R5 solve died ONE
+    # outer cycle short of tolerance under a dropped ssh session).
+    # SPPEEC_CHECKPOINT=path: every outer-cycle callback dumps the
+    # current iterate + rhs atomically, throttled to
+    # SPPEEC_CHECKPOINT_S seconds (default 300); a fresh solve
+    # warm-starts from a checkpoint OF THE SAME SYSTEM -- same size,
+    # rhs equal to 1e-9 RELATIVE. Deliberately not bitwise: the rhs
+    # is built through FFT plans whose choice differs between
+    # processes at the 1e-15 level (the documented plan variance),
+    # and a warm start needs a good iterate, not a bit-equal one --
+    # lgmres then converges to the same answer within tolerance,
+    # exactly like the shipped sweep warm start. A different
+    # system's file fails the rhs test and is ignored.
+    _ckpath = os.environ.get('SPPEEC_CHECKPOINT')
+    if _ckpath:
+        x0 = _checkpoint_load(_ckpath, rhs, x0)
     # Status hooks: percent is matvecs against the HARD budget
     # (maxiter*inner_m for either method), so it never overshoots. The
     # counting wrapper forwards arrays untouched -- the iterate
@@ -273,20 +332,21 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
     # once per outer cycle. (bicgstab's callback iterate never
     # coincides with its p/s work-vector matvecs, so it gets no
     # residual -- the budget percent still applies.)
-    _snoop = None
+    _cbs = []
     with _status.krylov_task(budget=int(maxiter)*int(inner_m),
                              rtol=rtol, method=method):
         if _status.enabled():
             _nrhs = float(np.linalg.norm(rhs))
             _last = [None]
 
-            def _snoop(xk):
+            def _res_snoop(xk):
                 pair = _last[0]
                 if pair is not None and _nrhs > 0 and \
                         np.shape(pair[0]) == np.shape(xk) and \
                         np.array_equal(pair[0], xk):
                     _status.krylov_residual(
                         float(np.linalg.norm(pair[1] - rhs))/_nrhs)
+            _cbs.append(_res_snoop)
 
             def _counted(v, _mv=Aop.matvec):
                 _status.tick_matvec()
@@ -296,6 +356,23 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
 
             Aop = LinearOperator(Aop.shape, matvec=_counted,
                                  dtype=Aop.dtype)
+        if _ckpath:
+            _ck_last = [0.0]
+            _ck_every = float(os.environ.get('SPPEEC_CHECKPOINT_S',
+                                             '300'))
+
+            def _ck_dump(xk):
+                now = time.time()
+                if now - _ck_last[0] >= _ck_every:
+                    _ck_last[0] = now
+                    _checkpoint_dump(_ckpath, np.asarray(xk), rhs)
+            _cbs.append(_ck_dump)
+        if _cbs:
+            def _snoop(xk):
+                for _f in _cbs:
+                    _f(xk)
+        else:
+            _snoop = None
         if method == 'lgmres':
             return _finish(*lgmres(Aop, rhs, M=Pop, rtol=rtol,
                                    maxiter=maxiter, inner_m=inner_m,

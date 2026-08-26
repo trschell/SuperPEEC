@@ -117,6 +117,13 @@ The status file's schema and guarantees are frozen in
 `docs/status_api.md`; `examples/status_monitor.ipynb` is a worked
 live monitor with a filling-in Z(f) plot.
 
+For multi-hour solves, `SPPEEC_CHECKPOINT=/path/ck.npz` makes the
+Krylov loop dump its iterate periodically (`SPPEEC_CHECKPOINT_S`
+seconds, default 300, atomic) and a relaunch of the same solve
+resumes from it instead of starting cold — a killed 4-hour run
+restarts minutes from convergence. The file is removed on success,
+and a checkpoint from a different system is recognised and ignored.
+
 Exports pair in ParaView: load the `.vti` under the `.vtp` wires and
 apply a Tube filter (radius from the `radius` cell array).
 
