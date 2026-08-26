@@ -138,6 +138,25 @@ MU0 = 4e-7*np.pi
 _SINGLE_RTOL_FLOOR = 1e-5
 
 
+def shrink_exact_f32(M):
+    """Store a sparse matrix's float64 data as float32 WHEN EXACT.
+
+    The big basis/incidence matrices (plaquette Y, stacked Bmat,
+    filament incidence B) carry +-1s and small dyadics that float32
+    represents exactly, yet are built float64 -- ~10-18 GB of dead
+    precision at the hero rung. Because every stored value casts back
+    to the identical float64, every downstream product (including
+    against complex128 vectors) is BIT-UNCHANGED; the conversion is
+    refused entirely if even one entry would round. In place; returns
+    M for chaining."""
+    d = getattr(M, 'data', None)
+    if d is not None and d.dtype == np.float64:
+        d32 = d.astype(np.float32)
+        if np.array_equal(d32.astype(np.float64), d):
+            M.data = d32
+    return M
+
+
 def _checkpoint_load(path, rhs, x0):
     """The stored iterate, if ``path`` checkpoints THIS system.
 
@@ -660,17 +679,24 @@ class _GeoMGFactor:
         G = (YT @ YT.T).tocsr().astype(_PRECOND_DT)
         self._dt = G.dtype
         n = G.shape[0]
+        gnnz = G.nnz
         self.loc = np.arange(min(nplaq, n))
         self.mac = np.arange(self.loc.size, n)
         self.nmac = self.mac.size
         A = G[self.loc][:, self.loc].tocsr()
         self.B = G[self.loc][:, self.mac].tocsr()
         C = G[self.mac][:, self.mac].toarray()
+        # G is fully consumed by the three slices above; at rung
+        # scale it is GBs of setup transient sitting under the whole
+        # hierarchy build -- free it before, not after (HWM is what
+        # OOM-kills a run, and everything below runs beneath it)
+        del G
         self.mg = loopmg.GeoMG(A, geom_normal, geom_base, nu=nu,
                                omega=omega, max_coarse=max_coarse)
-        self.cycles = int(cycles)
+        del A                      # alive inside mg (or dropped by
+        self.cycles = int(cycles)  # the stencil); not needed here
         self.nnz = self.mg.nnz
-        self.nnz_ratio = self.nnz/max(G.nnz, 1)
+        self.nnz_ratio = self.nnz/max(gnnz, 1)
         AiB = np.column_stack([self._A(self.B[:, j].toarray().ravel())
                                for j in range(self.nmac)]) \
             if self.nmac else np.zeros((self.loc.size, 0))

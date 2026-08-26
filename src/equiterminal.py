@@ -2259,6 +2259,12 @@ class EquiTerminalSolver:
         else:
             self.chol = cholmod.cholesky_AAt(YT32, mode=self.chol_mode,
                                              ordering_method=self.chol_ordering)
+        # +-1 bases store exactly in float32 (bit-unchanged products,
+        # refused if any entry would round); the factors above already
+        # consumed their own full-precision copies
+        from port_impedance import shrink_exact_f32
+        for _mat in (self.Y, self.YT, self.B, self.Baug):
+            shrink_exact_f32(_mat)
 
     def _spanning_tree(self):
         """BFS FOREST over the conductor graph: one tree per component.

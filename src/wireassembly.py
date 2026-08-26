@@ -724,6 +724,8 @@ class WireBondSolver:
                 self.fil_axis, self.fil_cell, self.nplaq)
             geo = _GeoMGFactor(Byt, nrm, bse, self.nplaq,
                                cycles=self.amg_cycles)
+            del Byt                # setup transient: the factor holds
+            del nrm, bse           # everything it needs
             if verbose:
                 print("GeoMG precond apply: %s" % geo.gpu_state,
                       flush=True)
@@ -771,6 +773,15 @@ class WireBondSolver:
             from sksparse.cholmod import cholesky
             G = (self.Bmat.T @ self.Bmat).tocsc()
             self.chol = cholesky(G)
+            del G                  # setup transient
+        # the stacked basis and incidence carry +-1s and small
+        # dyadics: float32 stores them exactly, halving their bytes
+        # with every product bit-unchanged (refused if any entry
+        # would round). AFTER the factor builds: those consumed
+        # full-precision copies of their own.
+        from port_impedance import shrink_exact_f32
+        shrink_exact_f32(self.Bmat)
+        shrink_exact_f32(self.B)
         self.matvecs = 0
         self.t_setup = time.perf_counter() - t0
         if verbose:

@@ -162,7 +162,13 @@ def unit():
 
 # ------------------------------------- B/C. end-to-end + A/B identical
 def run_cli(extra_env, *args):
-    env = dict(os.environ, SPPEEC_GPU='0')
+    # SPPEEC_STENCIL=0 in BOTH arms: this A/B certifies that the
+    # STATUS instrumentation changes nothing, byte for byte. The
+    # reordered-mode stencil (engaged on multi-block geometry) is a
+    # legitimate preconditioner reorder that may move iteration
+    # counts, so it must be held fixed here -- its own certification
+    # lives in validate_spmv.
+    env = dict(os.environ, SPPEEC_GPU='0', SPPEEC_STENCIL='0')
     env.pop('SPPEEC_STATUS', None)
     env.update(extra_env)
     return subprocess.run(

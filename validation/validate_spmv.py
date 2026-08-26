@@ -200,6 +200,52 @@ def main():
                     hs.append(ln.split()[1])
         check('F: tiled kernels threaded == serial',
               len(hs) == 2 and hs[0] == hs[1], repr(hs))
+        check('F: single-block Gram engages in exact mode',
+              getattr(mg._sten0, 'mode', None) == 'exact')
+
+    # G. multi-block geometry: no global slot order exists (measured
+    # 30 precedence conflicts on the halfbridge), so the stencil
+    # engages in 'reordered' mode -- same operator, summation
+    # reordered at the ulp level, certified to tolerance. Sound for
+    # a preconditioner: iteration counts may move, answers cannot.
+    doc2 = (open('examples/module3wire.toml').read()
+            + '\nbasis = "overcomplete"\n')
+    pr2 = sppeec_input.loads(doc2)
+    m2 = pr2.model()
+    M2 = pr2.tree(m2)
+    m2.prepare(M2, 1e5)
+    sol2 = pr2.solver(M2, 1e5, model=m2)
+    fn = getattr(sol2.chol.__call__, '__func__', None)
+    cells = getattr(fn, '__closure__', None) or ()
+    geo = [c.cell_contents for c in cells
+           if type(c.cell_contents).__name__ == '_GeoMGFactor']
+    check('G: wire-path GeoMG reachable', len(geo) == 1)
+    if geo:
+        mg2 = geo[0].mg
+        st2 = getattr(mg2, '_sten0', None)
+        check('G: multi-block Gram engages (reordered mode)',
+              st2 is not None
+              and getattr(st2, 'mode', None) == 'reordered')
+        if st2 is not None:
+            # tolerance certification: an ad-hoc Gram rebuild is a
+            # VALID reference here (unlike the bitwise checks --
+            # column order differs, but 1e-5 >> reorder rounding)
+            idx_yt = np.r_[0:sol2.nplaq,
+                           sol2.nplaq + sol2.nd:sol2.size]
+            Byt = sol2.Bmat[:, idx_yt].T.tocsr().astype(np.float32)
+            A2 = ((Byt @ Byt.T).tocsr()
+                  [:sol2.nplaq][:, :sol2.nplaq]).tocsr()
+            A2.data = A2.data.astype(np.int8)
+            rng = np.random.default_rng(31)
+            worst = 0.0
+            for _ in range(3):
+                x = rng.standard_normal(A2.shape[0]).astype(np.float32)
+                ref = loopmg._spmv(A2, x)
+                d = float(np.linalg.norm(st2.matvec(x) - ref)
+                          / np.linalg.norm(ref))
+                worst = max(worst, d)
+            check('G: reordered matvec within reorder tolerance',
+                  worst < 1e-5, 'worst rel %.2e' % worst)
 
     if FAIL:
         print('FAIL: %d check(s): %s' % (len(FAIL), FAIL))

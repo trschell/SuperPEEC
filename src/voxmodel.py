@@ -251,6 +251,37 @@ class VoxelModel:
 
     # -- geometry ---------------------------------------------------
 
+    def release_lattice_arrays(self):
+        """Free the per-cell lattice arrays (sigma, epsilon, lambdaL).
+
+        For a run that will do no further ``prepare()`` (no more
+        frequency points) and no field export, these arrays are dead
+        weight -- ~5 GB at the 1e9-cell hero rung. This is an
+        EXPLICIT opt-in for callers that know their run shape (a
+        single-point extraction after the solver is built); nothing
+        calls it automatically, because ``struc()`` feeds the field
+        exporter and ``resistances()`` every retune. Afterwards both
+        raise loudly rather than compute garbage. Returns bytes
+        freed. NOTE the measured RSS high-water sits in the BUILD
+        phase, so this lowers solve-phase residency (co-tenancy,
+        head-room for exports elsewhere), not the OOM-critical peak.
+        """
+        freed = 0
+        for name in ('sigma', 'epsilon', 'lambdaL'):
+            a = getattr(self, name, None)
+            if isinstance(a, np.ndarray):
+                freed += a.nbytes
+                setattr(self, name, None)
+        self._lattice_released = True
+        return freed
+
+    def _lattice_guard(self, what):
+        if getattr(self, '_lattice_released', False):
+            raise RuntimeError(
+                "%s needs the per-cell lattice arrays, but "
+                "release_lattice_arrays() has freed them -- do not "
+                "release before the last prepare()/export" % what)
+
     def struc(self):
         """Occupancy grid for ``Tree``: int8, 1 = conductor voxel.
 
@@ -258,6 +289,7 @@ class VoxelModel:
         -- for superconductors, where sigma may legitimately be 0 -- a
         nonzero London depth.
         """
+        self._lattice_guard('struc()')
         occ = self.sigma != 0.0
         if self.lambdaL is not None:
             occ |= self.lambdaL != 0.0
@@ -677,6 +709,7 @@ class VoxelModel:
         Toeplitz/FMM structure is touched -- the same argument that
         admitted per-cell conductivity.
         """
+        self._lattice_guard('resistances()')
         if self.superconductor or self.epsilon is not None:
             return self._complex_resistances(M, freq)
         vals = self.sigma_values()

@@ -146,17 +146,25 @@ class _Stencil0:
         # missed or a coefficient it got wrong fails the probe and
         # falls back -- sampling costs correctness nothing and keeps
         # the setup temporaries bounded at rung scale.
-        if n > 2_000_000:
+        # 500k rows: at R4 the 2M-row extraction stacked +2.5 GB of
+        # COO/key intermediates ON TOP of the getmesh_full peak
+        # (measured; getmesh owns the build HWM at +6.6 GB) -- the
+        # probes certify the full reconstruction either way, so the
+        # sample only needs to SEE every slot, and 500k rows of a
+        # 36-slot stencil oversamples that by orders of magnitude
+        if n > 500_000:
             rows = np.random.default_rng(7).choice(
-                n, 2_000_000, replace=False)
+                n, 500_000, replace=False)
             rows.sort()
             As = A[rows]
             coo = As.tocoo()
             di = rows[coo.row]
+            del As
         else:
             coo = A.tocoo()
             di = coo.row
         dj, dv = coo.col, coo.data.astype(np.float64)
+        del coo
         # slot key per nnz: (ni, nj, dx+1, dy+1, dz+1); diagonal is
         # the (nn, nn, 0,0,0) slot with coefficient 4
         dvec = base[dj] - base[di]
@@ -173,13 +181,25 @@ class _Stencil0:
         if not np.all(vmin == vmax) or abs(vmin).max() > 127:
             return None
         # order: row-adjacent precedence pairs (csr columns ascend);
-        # dedupe in numpy before touching python sets
+        # dedupe in numpy before touching python sets. On a single
+        # solid block the pairs are conflict-free and one global slot
+        # order reproduces every row's CSR summation EXACTLY. On
+        # multi-block geometry they conflict (measured: 30 conflicts
+        # on the halfbridge -- plaquette column ids interleave
+        # differently per region), so no such order exists; the
+        # stencil then engages in 'reordered' mode -- certified to
+        # TOLERANCE instead of bitwise, which is sound for a
+        # preconditioner (a reordered preconditioner cannot change
+        # the converged answer, only the iteration count -- the
+        # off-by-nholes lineage).
         same = (di[1:] == di[:-1])
         pair = np.unique(inv[:-1][same].astype(np.int64)*64
                          + inv[1:][same])
         prec = {(int(p)//64, int(p) % 64) for p in pair}
-        if any((b_, a_) in prec for a_, b_ in prec):
-            return None
+        conf = {(a_, b_) for (a_, b_) in prec if (b_, a_) in prec}
+        mode = 'exact' if not conf else 'reordered'
+        prec -= conf
+        del di, dj, dv, dvec, key, inv, same, pair
         # toposort per output normal. Key decode (see encode above):
         #   u = ni*81 + nj*27 + (dx+1)*9 + (dy+1)*3 + (dz+1)
         onrm = uk//81
@@ -241,18 +261,32 @@ class _Stencil0:
                                    of.T.astype(np.int32)),
                                cf, sptr),
                        tile_of.astype(np.intp), loc, shape)
-        # ---- certification: exact probe equality or bust ----------
+        s2.mode = mode
+        # ---- certification ----------------------------------------
+        # 'exact' mode: bitwise probe equality or bust. 'reordered'
+        # mode: tolerance equality -- the reconstruction must be the
+        # same OPERATOR (any mismatch of pattern or coefficients
+        # shows up far above summation-reorder rounding, which for a
+        # 13-term fp32 row sits at ~1e-7 relative).
+        tol = 1e-5 if dtype.itemsize == 4 else 1e-11
+
+        def _agree(got, ref):
+            if mode == 'exact':
+                return np.array_equal(got, ref)
+            nr = float(np.linalg.norm(ref))
+            return nr == 0.0 or \
+                float(np.linalg.norm(got - ref)) <= tol*nr
         rng = np.random.default_rng(17)
         for _ in range(2):
             x = rng.standard_normal(n).astype(dtype)
-            if not np.array_equal(s2.matvec(x), _spmv(A, x)):
+            if not _agree(s2.matvec(x), _spmv(A, x)):
                 return None
         x = rng.standard_normal(n).astype(dtype)
         b = rng.standard_normal(n).astype(dtype)
         ref, wdi = jacobi_probe(x, b)
         wdi_t = s2.pack(np.asarray(wdi, dtype), 'w').copy()
         got = s2.jacobi(x, b, wdi_t, 1)
-        if not np.array_equal(got, ref):
+        if not _agree(got, ref):
             return None
         return s2, wdi_t
 
