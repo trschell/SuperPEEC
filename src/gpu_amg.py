@@ -193,7 +193,12 @@ class GPUGeoCore:
         self.cycles = int(cycles)
         self.nu = int(mg.nu)
         self.omega = float(mg.omega)
-        self.dtype = mg.levels[0].dtype       # fp32 under phase 1
+        # the VECTOR dtype (fp32 under phase 1), NOT levels[0].dtype:
+        # since the int8 hierarchy (tier 1, 2026-08-26) the stored
+        # level data may be int8, which cupy sparse cannot hold -- the
+        # .astype(self.dtype) on every upload below upcasts it, so the
+        # device hierarchy is byte-for-byte what it was pre-int8
+        self.dtype = mg.dtype
         nlev = len(mg.levels)
         itm = np.dtype(self.dtype).itemsize
 

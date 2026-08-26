@@ -29,7 +29,7 @@ import scipy.sparse.linalg as spla
 # The v-cycle's scipy SpMV was the largest single-threaded line left
 # in a CPU solve cycle (7.9 s of ~26 at R4). SPPEEC_SPMV=0 opts out;
 # thread count follows OMP_NUM_THREADS.
-_CSRMV = {}
+_CSRMV, _CSRMV8, _JACOBI8 = {}, {}, {}
 if os.environ.get('SPPEEC_SPMV') != '0':
     try:
         import mp_fortran as _mpf
@@ -37,16 +37,51 @@ if os.environ.get('SPPEEC_SPMV') != '0':
                   (np.float64, np.int32): _mpf.csrmv_d,
                   (np.float32, np.int64): _mpf.csrmv_sl,
                   (np.float64, np.int64): _mpf.csrmv_dl}
+        # int8-data twins (tier 1, 2026-08-26): the loop Gram's
+        # entries are exactly {4, +-1} and the aggregation
+        # prolongators are 0/1, so int8 storage is LOSSLESS -- the
+        # mixed int8*real product promotes to the same reals -- and
+        # streams 4x fewer data bytes through a bandwidth-bound
+        # kernel. JACOBI8 additionally fuses the damped-Jacobi
+        # update, replacing four NROW-sized numpy temporaries per
+        # sweep with one pass.
+        _CSRMV8 = {(np.float32, np.int32): _mpf.csrmv8_s,
+                   (np.float64, np.int32): _mpf.csrmv8_d,
+                   (np.float32, np.int64): _mpf.csrmv8_sl,
+                   (np.float64, np.int64): _mpf.csrmv8_dl}
+        _JACOBI8 = {(np.float32, np.int32): _mpf.jacobi8_s,
+                    (np.float64, np.int32): _mpf.jacobi8_d,
+                    (np.float32, np.int64): _mpf.jacobi8_sl,
+                    (np.float64, np.int64): _mpf.jacobi8_dl}
     except (ImportError, AttributeError):  # old .so: quiet fallback
-        _CSRMV = {}
+        _CSRMV, _CSRMV8, _JACOBI8 = {}, {}, {}
+
+
+def _int8_ok(data):
+    """True when the entries store losslessly in int8 (the {4, +-1}
+    Gram and 0/1 prolongators do; a deep Galerkin level could in
+    principle outgrow the range and must then stay in fp)."""
+    return bool(np.all(np.abs(data) <= 127)
+                and np.all(data == np.rint(data)))
 
 
 def _spmv(A, x):
     """``A @ x`` through the threaded kernel when the types fit,
-    scipy otherwise. CSR only; x must match A's real dtype."""
+    scipy otherwise. CSR only; x must match the vector dtype the
+    kernel expects (int8-data matrices pair with x's own dtype)."""
+    if not x.flags.c_contiguous or A.format != 'csr':
+        return A @ x
+    if A.data.dtype == np.int8:
+        f = _CSRMV8.get((x.dtype.type, A.indices.dtype.type))
+        # int8 levels only exist when the kernels loaded, so f is
+        # only None for an exotic x dtype -- restore fp then
+        if f is None:
+            return sp.csr_matrix(
+                (A.data.astype(x.dtype), A.indices, A.indptr),
+                shape=A.shape) @ x
+        return f(A.indptr, A.indices, A.data, x)
     f = _CSRMV.get((A.data.dtype.type, A.indices.dtype.type))
-    if (f is None or A.format != 'csr'
-            or x.dtype != A.data.dtype or not x.flags.c_contiguous):
+    if f is None or x.dtype != A.data.dtype:
         return A @ x
     return f(A.indptr, A.indices, A.data, x)
 
@@ -145,6 +180,25 @@ class GeoMG:
         # deterministically). P is 1-nnz-per-row aggregation, so the
         # extra storage is negligible.
         self.PTs = [P.T.tocsr() for P in self.Ps]
+        # wdi = omega*dinv precomputed per level for the fused Jacobi
+        # kernel; numerically identical to evaluating omega*di inside
+        # the sweep (same multiply, same values)
+        self._wdi = [(self.omega*di).astype(self.dtype)
+                     for di in self.dinv]
+        # LOSSLESS int8 conversion of the hierarchy data (tier 1,
+        # 2026-08-26). Every level but the coarsest (which lsqr/pinv
+        # must read numerically) and every prolongator whose entries
+        # fit int8 exactly -- {4, +-1} Gram, 0/1 aggregation -- drops
+        # its fp data for int8: 4x fewer data bytes streamed per
+        # sweep, identical floats out. Only done when the kernels
+        # loaded (an int8-data csr must never reach plain scipy `@`).
+        if _CSRMV8:
+            for L in self.levels[:-1]:
+                if _int8_ok(L.data):
+                    L.data = L.data.astype(np.int8)
+            for P in list(self.Ps) + list(self.PTs):
+                if _int8_ok(P.data):
+                    P.data = P.data.astype(np.int8)
         Ac = self.levels[-1]
         # pinv rank decisions in float64 (the kernel is exact and must
         # be cut cleanly); STORAGE in the hierarchy dtype
@@ -175,6 +229,17 @@ class GeoMG:
 
     def _smooth(self, lv, x, b):
         A, di = self.levels[lv], self.dinv[lv]
+        if A.data.dtype == np.int8:
+            f = _JACOBI8.get((x.dtype.type, A.indices.dtype.type))
+            if f is not None and x.flags.c_contiguous \
+                    and b.flags.c_contiguous:
+                # fused sweep: one pass instead of four NROW-sized
+                # numpy temporaries; same per-element operation order,
+                # so the floats are identical
+                wdi = self._wdi[lv]
+                for _ in range(self.nu):
+                    x = f(A.indptr, A.indices, A.data, x, b, wdi)
+                return x
         for _ in range(self.nu):
             x = x + self.omega*di*(b - _spmv(A, x))
         return x

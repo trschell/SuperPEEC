@@ -1351,3 +1351,335 @@ CF2PY INTEGER, INTENT(HIDE), DEPEND(X) :: NCOL=SIZE(X)
       ENDDO
 !$OMP END PARALLEL DO
       END
+C
+C
+      SUBROUTINE CSRMV8_S(INDPTR, INDICES, DATA, X, Y,
+     +                     NROW, NNZ, NCOL)
+C
+C     y = A @ x for a CSR matrix whose DATA is INTEGER*1 -- the loop
+C     Gram's entries are exactly {4, +-1} and the aggregation
+C     prolongators are 0/1, so int8 storage is LOSSLESS and streams
+C     4x fewer data bytes through a bandwidth-bound kernel.
+C     REAL*4 vectors, INTEGER*4 indices. Row-parallel: bit-identical to serial at any OMP count,
+C     and the mixed int8*real product promotes to the same real
+C     values as the fp-stored data, so results equal the fp path
+C     exactly.
+C
+CF2PY INTENT(OUT) :: Y
+CF2PY REAL :: X, Y
+CF2PY INTEGER*1 :: DATA
+CF2PY INTEGER :: INDPTR, INDICES
+CF2PY INTEGER, INTENT(HIDE), DEPEND(INDPTR) :: NROW=SIZE(INDPTR)-1
+CF2PY INTEGER, INTENT(HIDE), DEPEND(DATA) :: NNZ=SIZE(DATA)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(X) :: NCOL=SIZE(X)
+      INTEGER NROW, NNZ, NCOL
+      INTEGER INDPTR(NROW+1), INDICES(NNZ)
+      INTEGER*1 DATA(NNZ)
+      REAL X(NCOL)
+      REAL Y(NROW)
+      INTEGER I
+      INTEGER J
+      REAL ACC
+!$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J, ACC)
+      DO I = 1, NROW
+          ACC = 0.0
+          DO J = INDPTR(I) + 1, INDPTR(I + 1)
+              ACC = ACC + DATA(J)*X(INDICES(J) + 1)
+          ENDDO
+          Y(I) = ACC
+      ENDDO
+!$OMP END PARALLEL DO
+      END
+C
+C
+      SUBROUTINE CSRMV8_D(INDPTR, INDICES, DATA, X, Y,
+     +                     NROW, NNZ, NCOL)
+C
+C     y = A @ x for a CSR matrix whose DATA is INTEGER*1 -- the loop
+C     Gram's entries are exactly {4, +-1} and the aggregation
+C     prolongators are 0/1, so int8 storage is LOSSLESS and streams
+C     4x fewer data bytes through a bandwidth-bound kernel.
+C     REAL*8 vectors, INTEGER*4 indices. Row-parallel: bit-identical to serial at any OMP count,
+C     and the mixed int8*real product promotes to the same real
+C     values as the fp-stored data, so results equal the fp path
+C     exactly.
+C
+CF2PY INTENT(OUT) :: Y
+CF2PY REAL*8 :: X, Y
+CF2PY INTEGER*1 :: DATA
+CF2PY INTEGER :: INDPTR, INDICES
+CF2PY INTEGER, INTENT(HIDE), DEPEND(INDPTR) :: NROW=SIZE(INDPTR)-1
+CF2PY INTEGER, INTENT(HIDE), DEPEND(DATA) :: NNZ=SIZE(DATA)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(X) :: NCOL=SIZE(X)
+      INTEGER NROW, NNZ, NCOL
+      INTEGER INDPTR(NROW+1), INDICES(NNZ)
+      INTEGER*1 DATA(NNZ)
+      REAL*8 X(NCOL)
+      REAL*8 Y(NROW)
+      INTEGER I
+      INTEGER J
+      REAL*8 ACC
+!$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J, ACC)
+      DO I = 1, NROW
+          ACC = 0.0
+          DO J = INDPTR(I) + 1, INDPTR(I + 1)
+              ACC = ACC + DATA(J)*X(INDICES(J) + 1)
+          ENDDO
+          Y(I) = ACC
+      ENDDO
+!$OMP END PARALLEL DO
+      END
+C
+C
+      SUBROUTINE CSRMV8_SL(INDPTR, INDICES, DATA, X, Y,
+     +                     NROW, NNZ, NCOL)
+C
+C     y = A @ x for a CSR matrix whose DATA is INTEGER*1 -- the loop
+C     Gram's entries are exactly {4, +-1} and the aggregation
+C     prolongators are 0/1, so int8 storage is LOSSLESS and streams
+C     4x fewer data bytes through a bandwidth-bound kernel.
+C     REAL*4 vectors, INTEGER*8 indices. Row-parallel: bit-identical to serial at any OMP count,
+C     and the mixed int8*real product promotes to the same real
+C     values as the fp-stored data, so results equal the fp path
+C     exactly.
+C
+CF2PY INTENT(OUT) :: Y
+CF2PY REAL :: X, Y
+CF2PY INTEGER*1 :: DATA
+CF2PY INTEGER*8 :: INDPTR, INDICES
+CF2PY INTEGER, INTENT(HIDE), DEPEND(INDPTR) :: NROW=SIZE(INDPTR)-1
+CF2PY INTEGER, INTENT(HIDE), DEPEND(DATA) :: NNZ=SIZE(DATA)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(X) :: NCOL=SIZE(X)
+      INTEGER NROW, NNZ, NCOL
+      INTEGER*8 INDPTR(NROW+1), INDICES(NNZ)
+      INTEGER*1 DATA(NNZ)
+      REAL X(NCOL)
+      REAL Y(NROW)
+      INTEGER I
+      INTEGER*8 J
+      REAL ACC
+!$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J, ACC)
+      DO I = 1, NROW
+          ACC = 0.0
+          DO J = INDPTR(I) + 1, INDPTR(I + 1)
+              ACC = ACC + DATA(J)*X(INDICES(J) + 1)
+          ENDDO
+          Y(I) = ACC
+      ENDDO
+!$OMP END PARALLEL DO
+      END
+C
+C
+      SUBROUTINE CSRMV8_DL(INDPTR, INDICES, DATA, X, Y,
+     +                     NROW, NNZ, NCOL)
+C
+C     y = A @ x for a CSR matrix whose DATA is INTEGER*1 -- the loop
+C     Gram's entries are exactly {4, +-1} and the aggregation
+C     prolongators are 0/1, so int8 storage is LOSSLESS and streams
+C     4x fewer data bytes through a bandwidth-bound kernel.
+C     REAL*8 vectors, INTEGER*8 indices. Row-parallel: bit-identical to serial at any OMP count,
+C     and the mixed int8*real product promotes to the same real
+C     values as the fp-stored data, so results equal the fp path
+C     exactly.
+C
+CF2PY INTENT(OUT) :: Y
+CF2PY REAL*8 :: X, Y
+CF2PY INTEGER*1 :: DATA
+CF2PY INTEGER*8 :: INDPTR, INDICES
+CF2PY INTEGER, INTENT(HIDE), DEPEND(INDPTR) :: NROW=SIZE(INDPTR)-1
+CF2PY INTEGER, INTENT(HIDE), DEPEND(DATA) :: NNZ=SIZE(DATA)
+CF2PY INTEGER, INTENT(HIDE), DEPEND(X) :: NCOL=SIZE(X)
+      INTEGER NROW, NNZ, NCOL
+      INTEGER*8 INDPTR(NROW+1), INDICES(NNZ)
+      INTEGER*1 DATA(NNZ)
+      REAL*8 X(NCOL)
+      REAL*8 Y(NROW)
+      INTEGER I
+      INTEGER*8 J
+      REAL*8 ACC
+!$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J, ACC)
+      DO I = 1, NROW
+          ACC = 0.0
+          DO J = INDPTR(I) + 1, INDPTR(I + 1)
+              ACC = ACC + DATA(J)*X(INDICES(J) + 1)
+          ENDDO
+          Y(I) = ACC
+      ENDDO
+!$OMP END PARALLEL DO
+      END
+C
+C
+      SUBROUTINE JACOBI8_S(INDPTR, INDICES, DATA, X, B, WDI, Y,
+     +                      NROW, NNZ)
+C
+C     One fused damped-Jacobi sweep on an int8-data CSR:
+C         y_i = x_i + wdi_i*(b_i - sum_j a_ij x_j)
+C     with wdi = omega*dinv precomputed. Replaces the numpy chain
+C     `x + omega*di*(b - A@x)`, which walked four NROW-sized
+C     temporaries per sweep; identical operation ORDER per element,
+C     so the result is bit-identical to the numpy expression.
+C     REAL*4 vectors, INTEGER*4 indices. Row-parallel: bit-identical to serial.
+C
+CF2PY INTENT(OUT) :: Y
+CF2PY REAL :: X, B, WDI, Y
+CF2PY INTEGER*1 :: DATA
+CF2PY INTEGER :: INDPTR, INDICES
+CF2PY INTEGER, INTENT(HIDE), DEPEND(INDPTR) :: NROW=SIZE(INDPTR)-1
+CF2PY INTEGER, INTENT(HIDE), DEPEND(DATA) :: NNZ=SIZE(DATA)
+      INTEGER NROW, NNZ
+      INTEGER INDPTR(NROW+1), INDICES(NNZ)
+      INTEGER*1 DATA(NNZ)
+      REAL X(NROW), B(NROW), WDI(NROW)
+      REAL Y(NROW)
+      INTEGER I
+      INTEGER J
+      REAL ACC, TMP
+C     VOLATILE forces the store, so the
+C     multiply and add cannot contract
+C     into an FMA -- numpy rounds them
+C     separately, and bit-identity with
+C     the numpy sweep is the contract
+      VOLATILE TMP
+!$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J, ACC, TMP)
+      DO I = 1, NROW
+          ACC = 0.0
+          DO J = INDPTR(I) + 1, INDPTR(I + 1)
+              ACC = ACC + DATA(J)*X(INDICES(J) + 1)
+          ENDDO
+          TMP = WDI(I)*(B(I) - ACC)
+          Y(I) = X(I) + TMP
+      ENDDO
+!$OMP END PARALLEL DO
+      END
+C
+C
+      SUBROUTINE JACOBI8_D(INDPTR, INDICES, DATA, X, B, WDI, Y,
+     +                      NROW, NNZ)
+C
+C     One fused damped-Jacobi sweep on an int8-data CSR:
+C         y_i = x_i + wdi_i*(b_i - sum_j a_ij x_j)
+C     with wdi = omega*dinv precomputed. Replaces the numpy chain
+C     `x + omega*di*(b - A@x)`, which walked four NROW-sized
+C     temporaries per sweep; identical operation ORDER per element,
+C     so the result is bit-identical to the numpy expression.
+C     REAL*8 vectors, INTEGER*4 indices. Row-parallel: bit-identical to serial.
+C
+CF2PY INTENT(OUT) :: Y
+CF2PY REAL*8 :: X, B, WDI, Y
+CF2PY INTEGER*1 :: DATA
+CF2PY INTEGER :: INDPTR, INDICES
+CF2PY INTEGER, INTENT(HIDE), DEPEND(INDPTR) :: NROW=SIZE(INDPTR)-1
+CF2PY INTEGER, INTENT(HIDE), DEPEND(DATA) :: NNZ=SIZE(DATA)
+      INTEGER NROW, NNZ
+      INTEGER INDPTR(NROW+1), INDICES(NNZ)
+      INTEGER*1 DATA(NNZ)
+      REAL*8 X(NROW), B(NROW), WDI(NROW)
+      REAL*8 Y(NROW)
+      INTEGER I
+      INTEGER J
+      REAL*8 ACC, TMP
+C     VOLATILE forces the store, so the
+C     multiply and add cannot contract
+C     into an FMA -- numpy rounds them
+C     separately, and bit-identity with
+C     the numpy sweep is the contract
+      VOLATILE TMP
+!$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J, ACC, TMP)
+      DO I = 1, NROW
+          ACC = 0.0
+          DO J = INDPTR(I) + 1, INDPTR(I + 1)
+              ACC = ACC + DATA(J)*X(INDICES(J) + 1)
+          ENDDO
+          TMP = WDI(I)*(B(I) - ACC)
+          Y(I) = X(I) + TMP
+      ENDDO
+!$OMP END PARALLEL DO
+      END
+C
+C
+      SUBROUTINE JACOBI8_SL(INDPTR, INDICES, DATA, X, B, WDI, Y,
+     +                      NROW, NNZ)
+C
+C     One fused damped-Jacobi sweep on an int8-data CSR:
+C         y_i = x_i + wdi_i*(b_i - sum_j a_ij x_j)
+C     with wdi = omega*dinv precomputed. Replaces the numpy chain
+C     `x + omega*di*(b - A@x)`, which walked four NROW-sized
+C     temporaries per sweep; identical operation ORDER per element,
+C     so the result is bit-identical to the numpy expression.
+C     REAL*4 vectors, INTEGER*8 indices. Row-parallel: bit-identical to serial.
+C
+CF2PY INTENT(OUT) :: Y
+CF2PY REAL :: X, B, WDI, Y
+CF2PY INTEGER*1 :: DATA
+CF2PY INTEGER*8 :: INDPTR, INDICES
+CF2PY INTEGER, INTENT(HIDE), DEPEND(INDPTR) :: NROW=SIZE(INDPTR)-1
+CF2PY INTEGER, INTENT(HIDE), DEPEND(DATA) :: NNZ=SIZE(DATA)
+      INTEGER NROW, NNZ
+      INTEGER*8 INDPTR(NROW+1), INDICES(NNZ)
+      INTEGER*1 DATA(NNZ)
+      REAL X(NROW), B(NROW), WDI(NROW)
+      REAL Y(NROW)
+      INTEGER I
+      INTEGER*8 J
+      REAL ACC, TMP
+C     VOLATILE forces the store, so the
+C     multiply and add cannot contract
+C     into an FMA -- numpy rounds them
+C     separately, and bit-identity with
+C     the numpy sweep is the contract
+      VOLATILE TMP
+!$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J, ACC, TMP)
+      DO I = 1, NROW
+          ACC = 0.0
+          DO J = INDPTR(I) + 1, INDPTR(I + 1)
+              ACC = ACC + DATA(J)*X(INDICES(J) + 1)
+          ENDDO
+          TMP = WDI(I)*(B(I) - ACC)
+          Y(I) = X(I) + TMP
+      ENDDO
+!$OMP END PARALLEL DO
+      END
+C
+C
+      SUBROUTINE JACOBI8_DL(INDPTR, INDICES, DATA, X, B, WDI, Y,
+     +                      NROW, NNZ)
+C
+C     One fused damped-Jacobi sweep on an int8-data CSR:
+C         y_i = x_i + wdi_i*(b_i - sum_j a_ij x_j)
+C     with wdi = omega*dinv precomputed. Replaces the numpy chain
+C     `x + omega*di*(b - A@x)`, which walked four NROW-sized
+C     temporaries per sweep; identical operation ORDER per element,
+C     so the result is bit-identical to the numpy expression.
+C     REAL*8 vectors, INTEGER*8 indices. Row-parallel: bit-identical to serial.
+C
+CF2PY INTENT(OUT) :: Y
+CF2PY REAL*8 :: X, B, WDI, Y
+CF2PY INTEGER*1 :: DATA
+CF2PY INTEGER*8 :: INDPTR, INDICES
+CF2PY INTEGER, INTENT(HIDE), DEPEND(INDPTR) :: NROW=SIZE(INDPTR)-1
+CF2PY INTEGER, INTENT(HIDE), DEPEND(DATA) :: NNZ=SIZE(DATA)
+      INTEGER NROW, NNZ
+      INTEGER*8 INDPTR(NROW+1), INDICES(NNZ)
+      INTEGER*1 DATA(NNZ)
+      REAL*8 X(NROW), B(NROW), WDI(NROW)
+      REAL*8 Y(NROW)
+      INTEGER I
+      INTEGER*8 J
+      REAL*8 ACC, TMP
+C     VOLATILE forces the store, so the
+C     multiply and add cannot contract
+C     into an FMA -- numpy rounds them
+C     separately, and bit-identity with
+C     the numpy sweep is the contract
+      VOLATILE TMP
+!$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J, ACC, TMP)
+      DO I = 1, NROW
+          ACC = 0.0
+          DO J = INDPTR(I) + 1, INDPTR(I + 1)
+              ACC = ACC + DATA(J)*X(INDICES(J) + 1)
+          ENDDO
+          TMP = WDI(I)*(B(I) - ACC)
+          Y(I) = X(I) + TMP
+      ENDDO
+!$OMP END PARALLEL DO
+      END
