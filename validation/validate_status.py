@@ -27,6 +27,7 @@ _sp.path[:0] = [_op.path.join(_op.path.dirname(
     _op.path.abspath(__file__)), _d) for _d in ('../src', '.')]
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -191,6 +192,13 @@ def endtoend():
           d['model'].get('name') == 'module3wire'
           and d['model'].get('formulation') == 'LpR'
           and d['model'].get('cells', 0) > 0)
+    mo = d['model']
+    check('B: both cell counts, consistent with fill_pct',
+          0 < mo.get('cells_occupied', 0) <= mo.get('cells_lattice', 0)
+          and mo['cells_lattice'] == math.prod(int(v) for v in mo['dims'])
+          and mo['cells'] == mo['cells_occupied']
+          and abs(100.0*mo['cells_occupied']/mo['cells_lattice']
+                  - mo['fill_pct']) < 1e-6)
     check('B: resolved params published',
           d['params'].get('method') in ('lgmres', 'bicgstab')
           and d['params'].get('rtol', 0) > 0)

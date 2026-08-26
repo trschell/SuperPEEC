@@ -39,8 +39,10 @@ write. Poll it; don't tail it.
   "state": "running",
   "started_at": 1755950000.1, "updated_at": 1755950096.3,
   "model":  { "name": "module3wire", "input": "examples/module3wire.toml",
-              "formulation": "LpR", "cells": 3780, "dims": [65, 21, 3],
-              "fill_pct": 92.3, "nports": 0, "tree_levels": 2 },
+              "formulation": "LpR", "dims": [65, 21, 3],
+              "cells_occupied": 3780, "cells_lattice": 4095,
+              "cells": 3780, "fill_pct": 92.3,
+              "nports": 0, "tree_levels": 2 },
   "params": { "method": "lgmres", "rtol": 1e-4, "current": 1.0,
               "basis": "auto",
               "skin": { "subdivide": 7, "mode_basis": "conduction",
@@ -69,7 +71,15 @@ Field notes, in reading order:
   recent. `sppeec_status.read(path)` does both, returning the dict
   with `_alive` and `_stale_s` added.
 * **`model`** — identity of the run. `name` is the input file's stem.
-  `nports` is 0 on the wire path (no port objects there).
+  Two cell counts, both true: **`cells_occupied`** is the conductor
+  cells — what the solve's unknowns scale with (filaments and loops
+  live only on metal) — and **`cells_lattice`** is the bounding grid
+  (`dims` product), the count if the whole envelope were metal, which
+  sizes the FFT/Toeplitz machinery and is what memory laws and the
+  refinement-rung names refer to.
+  `fill_pct = 100 · occupied/lattice`. `cells` is a legacy alias for
+  `cells_occupied`. `nports` is 0 on the wire path (no port objects
+  there).
 * **`params`** — the **resolved** settings, post-default and
   post-auto: what the solver is actually using, not what was asked
   for. `skin` appears on the equipotential path with the engaged

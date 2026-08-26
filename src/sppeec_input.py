@@ -867,8 +867,17 @@ def _status_meta(prob, m, M, **params):
         name=os.path.splitext(os.path.basename(prob.path))[0],
         input=prob.path, formulation=prob.formulation)
     try:
+        # two cell counts, both true: OCCUPIED is what the unknowns
+        # scale with (filaments/loops live only on metal); LATTICE is
+        # the bounding grid -- the count if the whole envelope were
+        # metal -- which sizes the FFT/Toeplitz tables and is what the
+        # 567 B/cell memory law and the rung names (R4 = 51M, R5 =
+        # 200M, R6 = 1e9) refer to. `cells` stays as a legacy alias
+        # for occupied (schema 1 additivity).
+        occ = int(np.asarray(m.struc()).sum())
+        lat = int(np.prod(np.asarray(m.dims, dtype=np.int64)))
         model.update(dims=[int(v) for v in m.dims],
-                     cells=int(np.asarray(m.struc()).sum()),
+                     cells=occ, cells_occupied=occ, cells_lattice=lat,
                      fill_pct=float(m.fill()),
                      nports=len(getattr(m, 'ports', []) or []),
                      tree_levels=int(getattr(M, 'numlevels', 0)))
