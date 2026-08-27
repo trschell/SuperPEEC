@@ -177,6 +177,46 @@ def unequal_kernel(l, orientation, n, p, q, s0):
     return np.transpose(out, perm)
 
 
+def unequal_kernel_at(l, orientation, k, m0, m1, p, q, s0):
+    """:func:`unequal_kernel` evaluated at POINTS instead of tabulated.
+
+    ``k`` is the SIGNED axial cell offset, ``m0``/``m1`` the absolute
+    transverse separations in cells -- 1-D integer arrays of one common
+    length (never 0-d: numpy's scalar transcendental fast paths differ
+    from the array loops in the last ulp, and this function is held
+    bit-identical to the table, entry for entry, including partial-
+    vector tails). Same expressions in the same order as the table
+    builder, so ``unequal_kernel_at(...)[i] == unequal_kernel(...)[m0,
+    k + n, m1]`` exactly.
+
+    Why it exists (2026-08-26): the table's cost is 5 x 27 box_selfind
+    sweeps over n_x n_y n_z entries -- 765 of 991 s of setup on the
+    1.1M-cell RSFQ JTL -- while the equiterminal solver only ever reads
+    the 27-box near pairs and the terminal-terminal pairs.
+    """
+    d = FILAMENT_AXIS[orientation]
+    others = [i for i in range(3) if i != d]
+    k = np.asarray(k)
+    m0 = np.asarray(m0)
+    m1 = np.asarray(m1)
+    if k.ndim == 0 or m0.ndim == 0 or m1.ndim == 0:
+        raise ValueError("unequal_kernel_at takes 1-D arrays (bit-identity "
+                         "with the table requires the array loops)")
+    s = s0 + k*l[d]
+    ax_len = np.stack([np.abs(s + q), np.abs(s),
+                       np.abs(s + q - p), np.abs(s - p)], axis=-1)
+    w_len = np.stack([np.abs(m0 - 1), m0, m0 + 1], axis=-1)*l[others[0]]
+    t_len = np.stack([np.abs(m1 - 1), m1, m1 + 1], axis=-1)*l[others[1]]
+    out = np.zeros(k.shape)
+    for a, ca in enumerate(_TRANSVERSE_C):
+        for b, cb in enumerate(_AXIAL_C):
+            for c, cc in enumerate(_TRANSVERSE_C):
+                out += ca*cb*cc*box_selfind(w_len[..., a], ax_len[..., b],
+                                            t_len[..., c])
+    out /= l[others[0]]**2 * l[others[1]]**2
+    return out
+
+
 def mutual_offset(kern, orientation, k, n_axial, transverse=(0, 0)):
     """Look up :func:`unequal_kernel` at signed axial separation ``k``."""
     d = FILAMENT_AXIS[orientation]

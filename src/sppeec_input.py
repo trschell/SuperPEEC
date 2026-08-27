@@ -981,11 +981,13 @@ class _EquiSweep:
                     "off the partial rim: %s" % bad[:6])
         m.prepare(M, prob.freqs[0] if prob.freqs else 1e6)
         kw = dict(amg_cycles=prob.amg_cycles,
-                  gram_solver=prob.gram_solver)
-        if prob.solver_basis != 'auto':
-            # equiterminal has no size-evaluated 'auto'; leave its
-            # own default ('selected') unless the file names one
-            kw['basis'] = prob.solver_basis
+                  gram_solver=prob.gram_solver,
+                  basis=prob.solver_basis,
+                  nsolves=max(1, len(prob.freqs)))
+        # 'auto' is size- and topology-evaluated in EquiTerminalSolver
+        # too (2026-08-26): the exact Cholesky where the plaquettes
+        # span and the model is small, the over-complete frame where
+        # they do not (moated planes) or it is not -- doctrine 6b
         # sub-cell skin engine: conduction by default, engaged only
         # when the cell size justifies it (the engine's
         # recommend_subdivision at the sweep's highest frequency)

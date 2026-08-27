@@ -369,33 +369,39 @@ class Terminals:
           terminal->terminal   both same type: 0; low->high: +t_l;
                                high->low: -t_l
         """
-        dims = [int(v) for v in np.asarray(M.ntotal, dtype=int)]
-        others = [c for c in range(3) if c != self.axis]
-        n = [0, 0, 0]
-        n[self.axis] = dims[self.axis] + 2
-        n[others[0]] = dims[others[0]] + 1
-        n[others[1]] = dims[others[1]] + 1
-        self.nax = n[self.axis]
-        l = self.l
+        # (p, q, s0) per face-type combination; the kernel is evaluated
+        # AT THE REQUESTED POINTS (terminal.unequal_kernel_at, bit-
+        # identical to the former tables) rather than tabulated over
+        # the whole grid: those tables cost 5 x 27 box_selfind sweeps
+        # over n_x n_y n_z entries -- 765 of 991 s of setup on the
+        # 1.1M-cell RSFQ JTL, and a volume-proportional memory term --
+        # while only the 27-box near pairs and the terminal pairs are
+        # ever read (2026-08-26).
         p, dx = self.t_l, self.dx
-        self.kf = {False: tm.unequal_kernel(l, self.orient, n, p, dx, p),
-                   True: tm.unequal_kernel(l, self.orient, n, p, dx, 0.0)}
-        s0 = {0.0: tm.unequal_kernel(l, self.orient, n, p, p, 0.0),
-              +1: tm.unequal_kernel(l, self.orient, n, p, p, p),
-              -1: tm.unequal_kernel(l, self.orient, n, p, p, -p)}
-        self.kt = {(False, False): s0[0.0], (True, True): s0[0.0],
-                   (False, True): s0[+1], (True, False): s0[-1]}
+        self.kf = {False: (p, dx, p), True: (p, dx, 0.0)}
+        self.kt = {(False, False): (p, p, 0.0), (True, True): (p, p, 0.0),
+                   (False, True): (p, p, p), (True, False): (p, p, -p)}
+
+    def _kernel(self, params, k, m0, m1):
+        p, q, s0 = params
+        return tm.unequal_kernel_at(self.l, self.orient, k, m0, m1,
+                                    p, q, s0)
 
     def self_block(self):
         """Dense ``Lp`` between terminal filaments (n x n, henries)."""
         L = np.zeros((self.n, self.n))
-        for a in range(self.n):
-            for b in range(self.n):
-                L[a, b] = tm.mutual_offset(
-                    self.kt[(bool(self.hi[a]), bool(self.hi[b]))],
-                    self.orient, int(self.cax[b] - self.cax[a]), self.nax,
-                    transverse=(int(self.t0[a] - self.t0[b]),
-                                int(self.t1[a] - self.t1[b])))
+        a, b = np.meshgrid(np.arange(self.n), np.arange(self.n),
+                           indexing='ij')
+        a, b = a.ravel(), b.ravel()
+        k = (self.cax[b] - self.cax[a]).astype(np.int64)
+        m0 = np.abs(self.t0[a] - self.t0[b]).astype(np.int64)
+        m1 = np.abs(self.t1[a] - self.t1[b]).astype(np.int64)
+        hi = np.asarray(self.hi, dtype=bool)
+        for key, params in self.kt.items():
+            sel = np.flatnonzero((hi[a] == key[0]) & (hi[b] == key[1]))
+            if sel.size:
+                L[a[sel], b[sel]] = self._kernel(params, k[sel], m0[sel],
+                                                 m1[sel])
         return L
 
     def parallel(self, fil_axis):
@@ -413,13 +419,13 @@ class Terminals:
         kernel index is the SIGNED offset ``j - c``, since with unequal
         bar lengths the coupling is no longer symmetric in it.
         """
-        others = [c for c in range(3) if c != self.axis]
-        kern = self.kf[bool(self.hi[k])]
-        idx = [None, None, None]
-        idx[self.axis] = (jax - self.cax[k]) + self.nax
-        idx[others[0]] = np.abs(self.t0[k] - u0)
-        idx[others[1]] = np.abs(self.t1[k] - u1)
-        return kern[idx[0], idx[1], idx[2]]
+        jax = np.atleast_1d(np.asarray(jax, dtype=np.int64))
+        u0 = np.atleast_1d(np.asarray(u0, dtype=np.int64))
+        u1 = np.atleast_1d(np.asarray(u1, dtype=np.int64))
+        return self._kernel(self.kf[bool(self.hi[k])],
+                            jax - int(self.cax[k]),
+                            np.abs(int(self.t0[k]) - u0),
+                            np.abs(int(self.t1[k]) - u1))
 
     def coupling(self, fil_axis, fil_cell, restrict=None):
         """``Lp`` from each terminal to the parallel filaments.
@@ -1928,8 +1934,10 @@ class EquiTerminalSolver:
                  boundary_only=True, basis='selected', amg_cycles=4,
                  amg_cycle_type='V', amg_smoother=None,
                  amg_strength=None, gram_solver='amg',
-                 corner_modes=False):
+                 corner_modes=False, nsolves=1):
         self.M = M
+        self.nsolves = int(nsolves)
+        self.basis_fallback = None
         self.model = model
         self.verbose = verbose
         self.chol_mode = chol_mode
@@ -1940,9 +1948,9 @@ class EquiTerminalSolver:
         self.amg_smoother = amg_smoother
         self.amg_strength = amg_strength
         self.gram_solver = str(gram_solver)
-        if self.basis not in ('selected', 'overcomplete'):
-            raise ValueError("basis must be 'selected' or 'overcomplete', "
-                             "got %r" % (basis,))
+        if self.basis not in ('auto', 'selected', 'overcomplete'):
+            raise ValueError("basis must be 'auto', 'selected' or "
+                             "'overcomplete', got %r" % (basis,))
         self.efg = (np.size(M.e.struc) + np.size(M.f.struc)
                     + np.size(M.g.struc))
         self.nnode = np.size(M.lv[0].struc)
@@ -2158,6 +2166,41 @@ class EquiTerminalSolver:
         # meaningless) but far better conditioned on its range, and AMG
         # then works where it is useless on the selected basis. See
         # port_impedance.LpRSolver's `basis` docs for the measurements.
+        if self.basis == 'auto':
+            # LpRSolver's rule (2026-08-22), applied here since 2026-08-26
+            # when the RSFQ JTL -- moated superconducting ground planes,
+            # 294 hole generators -- spent 694 s in the MST fundamental-
+            # cycle fallback under the old unconditional 'selected'
+            # (overcomplete: 78 s setup, same L to every printed digit).
+            # The enumerator with fallback=False is a FREE probe of
+            # "do the plaquettes span the cycle space?"; when they do
+            # and the model is under the per-solve filament budget the
+            # exact Cholesky wins, otherwise the over-complete frame.
+            from port_impedance import _auto_selected_fil_budget
+            self.basis = 'overcomplete'
+            if efg < _auto_selected_fil_budget(self.nsolves):
+                probe = mg.getmesh_fortran(
+                    M.adjmats(), np.size(M.e.struc),
+                    np.size(M.e.struc) + np.size(M.f.struc), efg, nn,
+                    fallback=False)
+                if probe is not None:
+                    self.basis = 'selected'
+                else:
+                    self.basis_fallback = (
+                        'selected basis deficient on this topology '
+                        '(the MST fallback is the historic coil stall); '
+                        'using the over-complete frame')
+            else:
+                self.basis_fallback = (
+                    'over the selected-basis filament budget (%d >= %d '
+                    'for %d solves); using the over-complete frame'
+                    % (efg, _auto_selected_fil_budget(self.nsolves),
+                       self.nsolves))
+            if self.verbose and self.basis_fallback:
+                print("  basis auto: %s" % self.basis_fallback)
+            elif self.verbose:
+                print("  basis auto: selected (plaquettes span, %d "
+                      "filaments under budget)" % efg)
         if self.basis == 'overcomplete':
             Y = mg.getmesh_full(M.adjmats(), np.size(M.e.struc),
                                 np.size(M.e.struc) + np.size(M.f.struc),

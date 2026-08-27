@@ -66,7 +66,12 @@ written today still means the same thing after the next refactor.
    residual tail below that moves extracted Z by < 1e-3 %; FEKO
    ships 3e-3), `basis = "auto"` (small cycle spaces get the exact
    Cholesky, large ones the memory-flat overcomplete + BlockAMG
-   path), and the GPU preconditioner apply engages automatically
+   path — on BOTH the LpR and the equipotential solvers since
+   2026-08-26, and either one also takes the frame when the
+   plaquettes cannot span the cycle space, e.g. moated ground
+   planes, detected by a free enumerator probe rather than paid for
+   in the MST fallback: the RSFQ JTL went 694 → 78 s of setup for
+   the same answer), and the GPU preconditioner apply engages automatically
    when the hardware works (`SPPEEC_GPU=0` opts out). Oracle-grade
    comparisons pass `rtol = 1e-10` explicitly — the validators do —
    rather than the defaults carrying validation's burden.
