@@ -2646,8 +2646,20 @@ class EquiTerminalSolver:
     # -- the solve -----------------------------------------------------
 
     def solve(self, freq, current=1.0, rtol=1e-12, maxiter=30, inner_m=None,
-              lsqr_tol=1e-12, method='lgmres', precision='auto'):
+              lsqr_tol=1e-12, method='lgmres', precision='auto',
+              readout='tree'):
         """Solve at one frequency; return ``(Z, i, info)``.
+
+        ``readout`` (added 2026-08-27): ``'tree'`` (default) threads the
+        port current through one + face, the conductor spanning tree
+        and one - face as the particular solution (KCL exact to
+        roundoff, O(N)) and reads the port voltage through the
+        work-conjugate identity ``V I = ihat . (Z i)``; ``'lsqr'`` is the
+        former path -- minimum-norm ``ihat`` and a least-squares node
+        potential solve, ~1600 iterations each on a large model (25 s
+        apiece at 147k cells, the dominant per-frequency cost at 18M
+        filaments). The converged answer is the same to O(rtol); the
+        Krylov right-hand side differs, so iteration counts may move.
 
         ``Z`` is the port impedance ``(phi_P - phi_N)/I``. ``i`` is the
         augmented current vector; ``i[efg:]`` is the SOLVED terminal
@@ -2677,8 +2689,14 @@ class EquiTerminalSolver:
         s = np.zeros(self.nnode + 2, dtype=np.complex128)
         s[self.pnode[+1]] = current
         s[self.pnode[-1]] = -current
-        BT = self.Baug.T.tocsc().astype(np.complex128)
-        ihat = lsqr(BT, s, atol=lsqr_tol, btol=lsqr_tol)[0]
+        if readout == 'lsqr':
+            BT = self.Baug.T.tocsc().astype(np.complex128)
+            ihat = lsqr(BT, s, atol=lsqr_tol, btol=lsqr_tol)[0]
+        elif readout == 'tree':
+            ihat = self._tree_particular(current, s)
+        else:
+            raise ValueError("readout must be 'tree' or 'lsqr', got %r"
+                             % (readout,))
         rhs = -self.YT.dot(self.apply_Z(ihat))
         Aop = LinearOperator((self.meshsize,)*2, matvec=self._mesh_matvec,
                              dtype=np.complex128)
@@ -2695,15 +2713,111 @@ class EquiTerminalSolver:
         # Z i = B phi with phi the PHYSICAL potential (see the module
         # docstring): no sign flip to undo here.
         zi = self.apply_Z(i)
-        phi = lsqr(self.Baug.astype(np.complex128), zi,
-                   atol=lsqr_tol, btol=lsqr_tol)[0]
-        v = (phi[self.pnode[+1]] - phi[self.pnode[-1]])/current
+        if readout == 'lsqr':
+            phi = lsqr(self.Baug.astype(np.complex128), zi,
+                       atol=lsqr_tol, btol=lsqr_tol)[0]
+            v = (phi[self.pnode[+1]] - phi[self.pnode[-1]])/current
+        else:
+            # work-conjugate identity: for ANY ihat with Baug^T ihat = s,
+            # ihat . (Baug phi) = s . phi = current*(phi_P - phi_N), and
+            # Z i == Baug phi exactly when the mesh equations hold
+            # (Y^T Z i = 0) -- LpRSolver's readout since 2026-08-04.
+            # At finite residual d = Y^T Z i != 0 the identity picks up
+            # a . d, where ihat = ihat_perp + Y a splits the particular
+            # solution into the minimum-norm part (orthogonal to the
+            # loop space, which is why the lsqr readout never saw this
+            # term) and a loop-space part -- LARGE for the tree route,
+            # which threads the whole current along one path: measured
+            # 4.0e-3 on the equibar razor gate at rtol 1e-4 against the
+            # 1e-3 it must meet. a = (Y^T Y)^-1 Y^T ihat is one Gram
+            # solve, i.e. one preconditioner apply (exact with the
+            # Cholesky, v-cycle accurate with GeoMG/BlockAMG), so the
+            # readout is corrected by (Y^T ihat) . G^-1 d and its error
+            # drops from O(|r|) to O(|r| x precond defect).
+            d = self.YT.dot(zi)
+            c = self._gram_solve(d)
+            v = (np.dot(ihat, zi) - np.dot(self.YT.dot(ihat), c))/current
         info = dict(matvecs=self.matvecs - n0, flag=flag, residual=resid,
                     time=time.perf_counter() - t0)
         if self.verbose:
             print("    %.4g Hz: %d matvecs, flag %s, resid %.2e, %.2f s"
                   % (freq, info['matvecs'], flag, resid, info['time']))
         return complex(v), i, info
+
+    def _tree_particular(self, current, s):
+        """Particular augmented current with ``Baug^T ihat == s``, O(N).
+
+        The whole port current enters through the FIRST + face, follows
+        the conductor spanning tree (already built for the hole and
+        port cycles) to the FIRST - face and leaves through it; every
+        other face and every non-tree filament carries zero. The
+        equipotential solve redistributes the split across faces
+        through the port cycles, so which face is chosen cannot matter
+        at convergence. KCL is verified to roundoff before returning --
+        the sign conventions are inherited from ``_port_cycles`` and
+        checked rather than trusted.
+        """
+        term = self.term
+        parent, pedge, depth, comp = self._spanning_tree()
+        a = int(np.flatnonzero(term.pol == +1)[0])
+        b = int(np.flatnonzero(term.pol == -1)[0])
+        ca = int(self.node_of_cell[term.faces[a][0]])
+        cb = int(self.node_of_cell[term.faces[b][0]])
+        if comp[ca] != comp[cb]:
+            raise ValueError(
+                "the port's + and - faces sit on galvanically separate "
+                "conductors (components %d and %d): Baug^T i = s has no "
+                "solution, the LpR equipotential problem is not posed "
+                "(a capacitive path needs LpPR)" % (comp[ca], comp[cb]))
+        ihat = np.zeros(self.efg + term.n + self.nu, dtype=np.complex128)
+        ihat[self.efg + a] = (+1.0 if term.sign[a] < 0 else -1.0)*current
+        for f, sg in self._tree_path(ca, cb, parent, pedge, depth):
+            ihat[f] = sg*current
+        ihat[self.efg + b] = (-1.0 if term.sign[b] < 0 else +1.0)*current
+        t = self.Baug.T @ ihat
+        if abs(t[self.pnode[+1]] + current) < abs(t[self.pnode[+1]] - current):
+            ihat = -ihat            # orientation convention flipped
+            t = -t
+        err = np.abs(t - s).max()
+        if err > 1e-9*abs(current):
+            raise RuntimeError("tree particular solution violates KCL "
+                               "(max |Baug^T ihat - s| = %.3g)" % err)
+        return ihat
+
+    def _gram_solve(self, d, tol=1e-8, maxiter=60):
+        """``(Y^T Y)^-1 d`` to ``tol``: preconditioned lgmres on the Gram.
+
+        One preconditioner apply was exact enough at 147k cells
+        (readout within 1.4e-5 of lsqr) but left a 0.5% readout error
+        at 1.1M -- the v-cycle defect times the tree route's loop-space
+        component. Plain iterative refinement with the preconditioner
+        DIVERGED there (L 2.20 -> 3.23 pH, 2026-08-27): a preconditioner
+        is only right up to scaling and the fixed-point map need not
+        contract. CG is monotone on the SPD (semi-definite, consistent
+        rhs) Gram and indifferent to the scaling, and a few dozen
+        applies are negligible next to the Krylov solve. Returns the
+        single-apply answer if CG cannot improve on it.
+        """
+        # NOT cg: the GeoMG/Schur apply is not a symmetric operator (cg
+        # with it went from a Gram residual of 0.035 to 0.27 at 100 nm,
+        # 2026-08-27); the Gram is SPD but the preconditioner only has
+        # to be a good inverse, so right-preconditioned lgmres is the
+        # method that is indifferent to both its scaling and its
+        # asymmetry -- the same solver the mesh system uses.
+        nd = np.linalg.norm(d)
+        c0 = self._precond(d)
+        if nd == 0:
+            return c0
+        n = d.size
+        Gop = LinearOperator((n, n), matvec=lambda x: self.YT.dot(self.Y.dot(x)),
+                             dtype=np.complex128)
+        Pop = LinearOperator((n, n), matvec=self._precond, dtype=np.complex128)
+        c, flag = lgmres(Gop, d, x0=c0, M=Pop, rtol=tol, inner_m=10,
+                         outer_k=3, maxiter=maxiter)
+        r0 = np.linalg.norm(d - Gop.matvec(c0))
+        r1 = np.linalg.norm(d - Gop.matvec(c))
+        self._readout_gram = (r0/nd, r1/nd, int(flag))
+        return c if r1 <= r0 else c0
 
     def _precond(self, vec):
         re = self.chol(np.float32(np.real(vec)))

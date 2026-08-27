@@ -151,9 +151,17 @@ vsd = (np.linalg.norm(xs['circ'][0][:efg] - xs['dense'][0][:efg])
        / np.linalg.norm(xs['dense'][0][:efg]))
 # identical operator, different W/C_cap preconditioning (near-field vs
 # dense) -- both converged solutions agree to their true-residual floors
+# The convergence flags are checked SEPARATELY from the agreement, and
+# the message carries counts + flags: on 2026-08-27 this check failed
+# inside a loaded gate and passed standalone with the SAME rel diff
+# (1.47e-06) -- the only thing that could have moved was a gmres
+# iteration count at the restrt=300 cap, invisible in the old message.
+check("end-to-end LpPR: both gmres runs converged within the cap",
+      xs['circ'][1] == 0 and xs['dense'][1] == 0,
+      "dense %d matvecs flag %d, circulant %d matvecs flag %d"
+      % (xs['dense'][2], xs['dense'][1], xs['circ'][2], xs['circ'][1]))
 check("end-to-end LpPR currents: circulant == dense path",
-      xs['circ'][1] == 0 and xs['dense'][1] == 0 and vsd < 1e-5,
-      "rel diff = %.2e" % vsd)
+      vsd < 1e-5, "rel diff = %.2e" % vsd)
 
 # ---- scale demo: 19^3 (dense n2n would be 1.0 GB + transients -> OOM)
 NT9 = np.array([19, 19, 19])

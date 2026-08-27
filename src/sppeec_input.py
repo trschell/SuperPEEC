@@ -79,7 +79,7 @@ _SCHEMA = {
              'p_faces', 'n_faces', 'name', 'equipotential'},
     'solve': {'freq', 'rtol', 'current', 'foot_model', 'basis',
               'amg_cycles', 'method', 'gram_solver', 'formulation',
-              'skin'},
+              'skin', 'maxiter'},
 }
 
 _FACE = {'+x': (0, 1), '-x': (0, -1), '+y': (1, 1), '-y': (1, -1),
@@ -390,6 +390,18 @@ class Problem:
         # the efficient memory/time point) or 'bicgstab' (leanest at
         # ~8 work vectors, for a hard memory ceiling)
         self.method = str(solve.get('method', 'lgmres'))
+        # outer Krylov cycle cap (matvec budget = maxiter * inner_m);
+        # None keeps each solver's own default (30). Exists for large
+        # runs that hit the cap (2026-08-27: the 6.8M-cell RSFQ JTL
+        # rung stopped at 331 matvecs / resid 6e-2 where the
+        # overcomplete N^0.66 law wants ~560) -- with SPPEEC_CHECKPOINT
+        # a capped run resumes, but the cap itself must be settable.
+        self.maxiter = solve.get('maxiter')
+        if self.maxiter is not None:
+            if isinstance(self.maxiter, bool) or int(self.maxiter) < 1:
+                raise ValueError("solve.maxiter must be an integer >= 1 "
+                                 "(outer Krylov cycles)")
+            self.maxiter = int(self.maxiter)
         if self.method not in ('bicgstab', 'lgmres'):
             raise ValueError("solve.method must be 'bicgstab' or "
                              "'lgmres', got %r" % (self.method,))
@@ -928,9 +940,16 @@ class _LpRSweep:
                 self.sol = self.prob.solver(self.M, freq, model=self.m,
                                             verbose=self.verbose)
             Z, info = self.sol.solve(freq, current=self.prob.current,
-                                     rtol=self.prob.rtol)
+                                     rtol=self.prob.rtol,
+                                     **_maxiter_kw(self.prob))
         _status_result(freq, Z, info)
         return Z, info
+
+
+def _maxiter_kw(prob):
+    """``{'maxiter': n}`` when the file sets one, else ``{}`` so the
+    solver's own default stays in force (and the gate bit-identical)."""
+    return {} if prob.maxiter is None else {'maxiter': prob.maxiter}
 
 
 class _EquiSweep:
@@ -1077,7 +1096,8 @@ class _EquiSweep:
             Z, i, info = self.S.solve(float(freq),
                                       current=self.prob.current,
                                       rtol=self.prob.rtol,
-                                      method=self.prob.method)
+                                      method=self.prob.method,
+                                      **_maxiter_kw(self.prob))
         info['i_f'] = np.asarray(i[:self.efg])
         _status_result(freq, Z, info)
         return Z, info

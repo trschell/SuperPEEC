@@ -74,7 +74,12 @@ written today still means the same thing after the next refactor.
    the same answer), and the GPU preconditioner apply engages automatically
    when the hardware works (`SPPEEC_GPU=0` opts out). Oracle-grade
    comparisons pass `rtol = 1e-10` explicitly — the validators do —
-   rather than the defaults carrying validation's burden.
+   rather than the defaults carrying validation's burden. `maxiter`
+   (outer Krylov cycles; the matvec budget is `maxiter × inner_m`,
+   solver default 30) exists for large runs that hit the cap — the
+   6.8M-cell RSFQ JTL rung stopped at 331 matvecs where the
+   overcomplete N^0.66 iteration law wants ~560; a capped run resumes
+   under `SPPEEC_CHECKPOINT`, but the cap itself must be settable.
 
 7. **Frequency-dependent state is rebuilt, not patched.** Wire skin
    shapes follow the solve frequency (`delta = sqrt(rho/(pi f mu0))`),
@@ -148,7 +153,24 @@ written today still means the same thing after the next refactor.
     `l/(sigma*A)` analytically on the equibar example). LpR-class,
     single-port; combines with `lambda_l` (the validated
     superconductor route) but not with dielectrics (charge needs
-    LpPR, whose port is a prescribed injection) or wires.
+    LpPR, whose port is a prescribed injection) or wires. Since
+    2026-08-27 its particular solution is a spanning-tree route of
+    the port current (KCL exact, O(N)) and the port voltage is read
+    through the work-conjugate identity `V·I = ihat·(Z i)`, corrected
+    for the finite Krylov residual by a Gram solve (right-preconditioned
+    lgmres with the loop preconditioner, to 1e-8; the tree route has a
+    large loop-space component that the minimum-norm lsqr solution
+    never had — uncorrected it read 4e-3 off the equibar razor gate at
+    rtol 1e-4 and 0.12% off at 1.1M cells; corrected, 2.7e-6 on the
+    razor gate and 5.5e-5 off the rtol-1e-6 lsqr reference at 1.1M
+    cells. A single preconditioner apply is not enough at that size,
+    plain refinement diverges, and cg fails because the GeoMG/Schur
+    apply is not symmetric) — the two
+    `lsqr` projections it used before cost 25 s each at 147k cells
+    and dominated the per-frequency time at 18M filaments (the JTL
+    200 nm solve went 117 → 24 s; the readouts agree to 1.8e-8 at
+    rtol 1e-8). `EquiTerminalSolver.solve(readout='lsqr')` keeps the
+    old path for comparison.
 
 13. **The sub-cell skin engine is on by default, where it counts**
     (added 2026-08-17; equipotential path only). `[solve]

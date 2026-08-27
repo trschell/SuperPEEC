@@ -279,6 +279,25 @@ def main():
                             'n_cells = [[7, 1, 1]]']),
                  'face-style port')
 
+    expect_error("maxiter = 0 rejected", eqtxt + '\nmaxiter = 0',
+                 'must be an integer >= 1')
+    expect_error("maxiter = true rejected", eqtxt + '\nmaxiter = true',
+                 'must be an integer >= 1')
+    check("maxiter absent -> solver default kept",
+          pe.maxiter is None
+          and sppeec_input._maxiter_kw(pe) == {})
+    # a 1-cycle cap must bound the matvec count (single-precision
+    # auto: inner_m 30, so <= ~31 matvecs) and be REPORTED, not hidden
+    pcap = sppeec_input.loads(eqtxt.replace(
+        'freq = { from = 1e5, to = 1e9, points = 5 }', 'freq = [1e9]')
+        + '\nmaxiter = 1')
+    mc = pcap.model()
+    Mc = pcap.tree(mc)
+    _, icap = pcap.sweeper(mc, Mc).solve(1e9)
+    check("maxiter = 1 caps the matvec budget",
+          pcap.maxiter == 1 and icap['matvecs'] <= 32,
+          'matvecs %d flag %s' % (icap['matvecs'], icap.get('flag')))
+
     me = pe.model()
     Me = pe.tree(me)
     swe = pe.sweeper(me, Me)
