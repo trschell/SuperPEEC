@@ -91,8 +91,14 @@ class _Stencil0:
     def __init__(self, dtype, tables, tile_of, loc, shape):
         self.jac, self.mv = _STEN[dtype.type]
         (self.nbt, self.nsrc, self.of, self.cf, self.sptr) = tables
-        self.tile_of = tile_of          # plaquette -> tile index
-        self.loc = loc                  # plaquette -> (nrm, lz, ly, lx)
+        # ONE flat intp map replaces tile_of + the four loc arrays
+        # (tier 3 bundle): five int64 vectors measured 549 MB at R4,
+        # the flat index is 92 MB -- and a single fancy index is
+        # faster than a five-array one
+        TL = self.TL
+        self.flat = (((tile_of*3 + loc[0])*TL + loc[1])*TL
+                     + loc[2])*TL + loc[3]
+        self.n = int(self.flat.size)
         self.shape = shape              # (NT, 3, TL, TL, TL)
         self.dtype = dtype
         self._buf = {}
@@ -105,14 +111,11 @@ class _Stencil0:
 
     def pack(self, v, key):
         t = self._tiled(key)
-        t[self.tile_of, self.loc[0], self.loc[1], self.loc[2],
-          self.loc[3]] = v
+        t.reshape(-1)[self.flat] = v
         return t
 
     def unpack(self, t):
-        return np.ascontiguousarray(
-            t[self.tile_of, self.loc[0], self.loc[1], self.loc[2],
-              self.loc[3]])
+        return np.ascontiguousarray(t.reshape(-1)[self.flat])
 
     def matvec(self, x):
         xt = self.pack(x, 'x')
@@ -129,18 +132,35 @@ class _Stencil0:
         return self.unpack(xt)
 
     @staticmethod
-    def build(A, normal, base, dtype, jacobi_probe):
+    def build(A, normal, base, dtype, jacobi_probe, basis=None,
+              omega=None):
         """Extract + certify; returns (_Stencil0, wdi_tiled) or None.
 
-        Certification is two EXACT probe comparisons (matvec and one
-        fused Jacobi sweep) against the csr-path results the caller
-        supplies -- bit-identity or fallback, never tolerance-equal.
+        Two constructions share this body. With ``A`` (a materialised
+        Gram): certification is bitwise in 'exact' mode, reorder
+        tolerance in 'reordered' mode, against ``jacobi_probe``'s
+        csr-path results. With ``basis`` (tier 3, ``A=None``): the
+        Gram is NEVER materialised -- sampled rows come from a thin
+        ``basis[rows] @ basis.T`` product, mode is 'reordered' by
+        construction (a stored Gram and the two-step apply sum rows
+        in different orders), certification runs against
+        ``basis @ (basis.T @ x)`` at reorder tolerance, and the
+        diagonal slots are asserted == 4 (every plaquette has four
+        edges), which licenses the caller's analytic dinv.
         """
         if not _STEN or dtype.type not in _STEN:
             return None
         TL = _Stencil0.TL
-        A = A.tocsr()
-        n = A.shape[0]
+        if basis is None:
+            A = A.tocsr()
+            n = A.shape[0]
+        else:
+            n = basis.shape[0]
+        rows = None
+        if n > 500_000:
+            rows = np.random.default_rng(7).choice(n, 500_000,
+                                                   replace=False)
+            rows.sort()
         # extraction can run on a row SAMPLE: the exact probes below
         # certify the FULL reconstruction, so an offset the sample
         # missed or a coefficient it got wrong fails the probe and
@@ -152,17 +172,22 @@ class _Stencil0:
         # probes certify the full reconstruction either way, so the
         # sample only needs to SEE every slot, and 500k rows of a
         # 36-slot stencil oversamples that by orders of magnitude
-        if n > 500_000:
-            rows = np.random.default_rng(7).choice(
-                n, 500_000, replace=False)
-            rows.sort()
+        if basis is not None:
+            # TIER 3: the Gram is never materialised. Sampled rows
+            # come from a THIN product basis[rows] @ basis.T (~tens
+            # of MB where the full Gram is a GB); certification below
+            # runs against the matrix-free two-step apply.
+            src = basis[rows] if rows is not None else basis
+            coo = (src @ basis.T).tocoo()
+            if rows is not None:
+                del src
+        elif rows is not None:
             As = A[rows]
             coo = As.tocoo()
-            di = rows[coo.row]
             del As
         else:
             coo = A.tocoo()
-            di = coo.row
+        di = rows[coo.row] if rows is not None else coo.row
         dj, dv = coo.col, coo.data.astype(np.float64)
         del coo
         # slot key per nnz: (ni, nj, dx+1, dy+1, dz+1); diagonal is
@@ -197,9 +222,17 @@ class _Stencil0:
                          + inv[1:][same])
         prec = {(int(p)//64, int(p) % 64) for p in pair}
         conf = {(a_, b_) for (a_, b_) in prec if (b_, a_) in prec}
-        mode = 'exact' if not conf else 'reordered'
+        mode = 'exact' if not conf and basis is None else 'reordered'
         prec -= conf
         del di, dj, dv, dvec, key, inv, same, pair
+        if basis is not None:
+            # every plaquette has exactly 4 edges: its diagonal Gram
+            # entry is 4, or the analytic dinv upstream would be wrong
+            for nn in range(3):
+                u_diag = nn*81 + nn*27 + 13
+                s = np.flatnonzero(uk == u_diag)
+                if s.size != 1 or vmin[int(s[0])] != 4.0:
+                    return None
         # toposort per output normal. Key decode (see encode above):
         #   u = ni*81 + nj*27 + (dx+1)*9 + (dy+1)*3 + (dz+1)
         onrm = uk//81
@@ -276,14 +309,27 @@ class _Stencil0:
             nr = float(np.linalg.norm(ref))
             return nr == 0.0 or \
                 float(np.linalg.norm(got - ref)) <= tol*nr
+
+        if basis is None:
+            def _ref_mv(x):
+                return _spmv(A, x)
+        else:
+            def _ref_mv(x):
+                return np.asarray(basis @ (basis.T @ x), dtype=dtype)
         rng = np.random.default_rng(17)
         for _ in range(2):
             x = rng.standard_normal(n).astype(dtype)
-            if not _agree(s2.matvec(x), _spmv(A, x)):
+            if not _agree(s2.matvec(x), _ref_mv(x)):
                 return None
         x = rng.standard_normal(n).astype(dtype)
         b = rng.standard_normal(n).astype(dtype)
-        ref, wdi = jacobi_probe(x, b)
+        if basis is None:
+            ref, wdi = jacobi_probe(x, b)
+        else:
+            dinv0 = np.full(n, 0.25, dtype=dtype)
+            wdi = (omega*dinv0).astype(dtype)
+            ref = np.asarray(x + omega*dinv0*(b - _ref_mv(x)),
+                             dtype=dtype)
         wdi_t = s2.pack(np.asarray(wdi, dtype), 'w').copy()
         got = s2.jacobi(x, b, wdi_t, 1)
         if not _agree(got, ref):
@@ -374,19 +420,63 @@ class GeoMG:
     """
 
     def __init__(self, A, normal, base, nu=2, omega=2.0/3.0,
-                 max_coarse=400, max_levels=12):
+                 max_coarse=400, max_levels=12, basis=None):
         self.nu = int(nu)
         self.omega = float(omega)
         self.levels = []
         self.Ps = []
-        # The hierarchy is stored and applied in A's OWN dtype (fp32
-        # under the phase-1 precision policy -- see
+        self._sten0 = None
+        self._wdi0_t = None
+        self._nnz0_est = 0
+        # TIER 3 (2026-08-27): with ``basis`` (the plaquette rows Yp,
+        # A=None) the level-0 Gram is NEVER materialised -- its
+        # stencil is extracted from a thin sampled product and
+        # certified matrix-free, and level 1 is the Gram of the
+        # AGGREGATED basis, A1 = (Yp^T P)^T (Yp^T P), a pair of thin
+        # SpGEMMs. The full-Gram SpGEMM was the measured R4 build
+        # peak-setter. Any certification failure (or a stalled first
+        # coarsening) falls back to materialising A classically.
+        use_basis = False
+        P0 = nrm1 = bs1 = None
+        if A is None:
+            got = None
+            if _STEN:
+                try:
+                    got = _Stencil0.build(
+                        None, normal, base, np.dtype(basis.dtype),
+                        None, basis=basis, omega=self.omega)
+                except Exception:       # never break a solve
+                    got = None
+            if got is not None:
+                P0, nrm1, bs1 = self._aggregate(normal.copy(),
+                                                base.copy())
+                if P0.shape[1] < basis.shape[0]:
+                    use_basis = True
+            if not use_basis:
+                got = None
+                A = (basis @ basis.T).tocsr()
+        # The hierarchy is stored and applied in the operator's OWN
+        # dtype (fp32 under the phase-1 precision policy -- see
         # port_impedance._PRECOND_DT). P must be cast BEFORE the
         # Galerkin product or scipy silently upcasts every coarse
         # operator back to float64.
-        A = A.tocsr()
-        self.dtype = A.dtype
-        nrm, bs = normal.copy(), base.copy()
+        if use_basis:
+            self._sten0, self._wdi0_t = got
+            self.dtype = basis.dtype
+            n0 = basis.shape[0]
+            self.levels.append(None)     # level 0 lives in the stencil
+            P0 = P0.tocsr().astype(self.dtype)
+            self.Ps.append(P0)
+            A = self._probe_coarse(P0, nrm1, bs1)
+            nrm, bs = nrm1, bs1
+            # level-0 nnz never counted exactly (no matrix); ~10.7
+            # entries/row measured across the geometry family --
+            # DIAGNOSTIC only (nnz/nnz_ratio reporting)
+            self._nnz0_est = int(n0*10.7)
+        else:
+            A = A.tocsr()
+            self.dtype = A.dtype
+            nrm, bs = normal.copy(), base.copy()
         for _ in range(max_levels):
             self.levels.append(A)
             if A.shape[0] <= max_coarse:
@@ -397,8 +487,10 @@ class GeoMG:
             P = P.tocsr().astype(self.dtype)
             self.Ps.append(P)
             A = (P.T @ A @ P).tocsr()
-        self.dinv = [(1.0/np.where(np.abs(L.diagonal()) > 0,
-                                   L.diagonal(), 1.0)).astype(self.dtype)
+        self.dinv = [np.full(n0, 0.25, dtype=self.dtype) if L is None
+                     else (1.0/np.where(np.abs(L.diagonal()) > 0,
+                                        L.diagonal(), 1.0)
+                           ).astype(self.dtype)
                      for L in self.levels]
         # CSR transposes of the prolongators, so the restriction
         # P.T @ r runs through the row-parallel threaded kernel too
@@ -420,7 +512,7 @@ class GeoMG:
         # loaded (an int8-data csr must never reach plain scipy `@`).
         if _CSRMV8:
             for L in self.levels[:-1]:
-                if _int8_ok(L.data):
+                if L is not None and _int8_ok(L.data):
                     L.data = L.data.astype(np.int8)
             for P in list(self.Ps) + list(self.PTs):
                 if _int8_ok(P.data):
@@ -430,9 +522,7 @@ class GeoMG:
         # (matvec and one fused sweep), so any geometry that breaks a
         # stencil assumption silently keeps the csr. The probe below
         # reproduces exactly what _smooth would compute.
-        self._sten0 = None
-        self._wdi0_t = None
-        if len(self.levels) > 1 and _STEN:
+        if self._sten0 is None and len(self.levels) > 1 and _STEN:
             def _probe(x, b):
                 A0 = self.levels[0]
                 wdi = self._wdi[0]
@@ -458,9 +548,13 @@ class GeoMG:
         self.coarse_pinv = np.linalg.pinv(
             Ac.toarray().astype(np.float64)).astype(self.dtype) \
             if Ac.shape[0] <= 2000 else None
-        self.nnz = sum(L.nnz for L in self.levels)
-        self.nnz_ratio = self.nnz/max(self.levels[0].nnz, 1)
-        self.sizes = [L.shape[0] for L in self.levels]
+        self.nnz = self._nnz0_est + sum(L.nnz for L in self.levels
+                                        if L is not None)
+        self.nnz_ratio = self.nnz/max(
+            self._nnz0_est or (self.levels[0].nnz
+                               if self.levels[0] is not None else 1), 1)
+        self.sizes = [self.dinv[i].size if L is None else L.shape[0]
+                      for i, L in enumerate(self.levels)]
         if self._sten0 is not None and \
                 os.environ.get('SPPEEC_GPU') == '0':
             # CPU-only run with the stencil certified: the level-0
@@ -470,18 +564,110 @@ class GeoMG:
             # loudly rather than silently slowly.
             self.levels[0] = None
 
+    def _probe_coarse(self, P0, nrm1, bs1):
+        """A1 = P0^T A P0 by COLOUR PROBING through the level-0
+        stencil -- no Gram-sized SpGEMM anywhere (the W1 = Yp^T P0
+        route measured a peak-neutral 1.8 GB at R4, replacing the
+        Gram spike 1:1).
+
+        The coarse operator's reach is one coarse cell (fine offsets
+        are +-1, aggregates 2x2x2), so colouring coarse columns by
+        (normal, base mod 3) makes same-colour columns non-
+        interacting: 81 probes u = P0 @ 1_colour, w = A u (the
+        certified stencil), z = P0^T w, and each nonzero z[r]
+        IS the single entry A1[r, d] whose column d is the unique
+        same-colour neighbour of r -- decoded arithmetically. The
+        probes are 0/1 vectors, so every sum is an exact integer:
+        the assembled values equal the SpGEMM's exactly (verified),
+        only the storage order differs. Transient: two fine vectors
+        per probe (~100 MB at R4 vs ~1.8 GB)."""
+        nc = P0.shape[1]
+        m1 = int(bs1[:, 1].max()) + 2
+        m2 = int(bs1[:, 2].max()) + 2
+        ckey = ((nrm1*(int(bs1[:, 0].max()) + 2)
+                 + bs1[:, 0])*m1 + bs1[:, 1])*m2 + bs1[:, 2]
+        order = np.argsort(ckey, kind='stable')
+        skey = ckey[order]
+        P0T = P0.T.tocsr()
+        rows_i, cols_i, vals_i = [], [], []
+        mod = bs1 % 3
+        for cn in range(3):
+            base_sel = nrm1 == cn
+            for mx in range(3):
+                for my in range(3):
+                    for mz in range(3):
+                        sel = np.flatnonzero(
+                            base_sel & (mod[:, 0] == mx)
+                            & (mod[:, 1] == my) & (mod[:, 2] == mz))
+                        if sel.size == 0:
+                            continue
+                        e = np.zeros(nc, dtype=self.dtype)
+                        e[sel] = 1.0
+                        w = self._sten0.matvec(
+                            np.ascontiguousarray(P0 @ e))
+                        z = P0T @ w
+                        r = np.flatnonzero(z)
+                        if r.size == 0:
+                            continue
+                        # unique same-colour column in r's 3^3
+                        # neighbourhood: per axis the one offset in
+                        # {-1,0,1} congruent to the colour mod 3
+                        off = np.stack(
+                            [(m - bs1[r, k]) % 3
+                             for k, m in enumerate((mx, my, mz))],
+                            axis=1).astype(np.int64)
+                        off[off == 2] = -1
+                        pos = bs1[r] + off
+                        # a negative or overflowing coordinate could
+                        # ALIAS a valid key through the mixed-radix
+                        # encoding -- mask before looking up
+                        inb = ((pos >= 0).all(axis=1)
+                               & (pos[:, 1] < m1 - 1)
+                               & (pos[:, 2] < m2 - 1))
+                        r, pos = r[inb], pos[inb]
+                        if r.size == 0:
+                            continue
+                        pk = ((np.full(r.size, cn, np.int64)
+                               * (int(bs1[:, 0].max()) + 2)
+                               + pos[:, 0])*m1 + pos[:, 1])*m2 \
+                            + pos[:, 2]
+                        i = np.searchsorted(skey, pk)
+                        i = np.minimum(i, skey.size - 1)
+                        ok = skey[i] == pk
+                        rows_i.append(r[ok])
+                        cols_i.append(order[i[ok]])
+                        vals_i.append(z[r[ok]].astype(self.dtype))
+        A1 = sp.csr_matrix(
+            (np.concatenate(vals_i), (np.concatenate(rows_i),
+                                      np.concatenate(cols_i))),
+            shape=(nc, nc))
+        A1.sum_duplicates()
+        return A1
+
     def _aggregate(self, normal, base):
         """2x2x2 geometric agglomeration, per face orientation."""
         span = base.max(axis=0) - base.min(axis=0) + 1
         div = np.where(span > 2, 2, 1)            # semi-coarsening
         cb = base//div[None, :]
-        key = np.stack([normal, cb[:, 0], cb[:, 1], cb[:, 2]], axis=1)
+        # ENCODED scalar key instead of np.unique(..., axis=0): the
+        # axis-0 unique views rows as void records and copies its way
+        # through the sort (~1.5 GB at R4, and it runs on EVERY
+        # hierarchy build -- the transient every Gram-formation route
+        # kept hitting). The mixed-radix encode is order-preserving
+        # (components are bounded non-negatives), so unique/first/inv
+        # are BIT-IDENTICAL to the axis-0 version.
         # np.unique returns (unique, index, inverse) IN THAT ORDER when
         # both flags are set -- binding them the other way round gives a
         # P with the coarse count as its ROW dimension and a dimension
         # mismatch two levels later.
-        _, first, inv = np.unique(key, axis=0, return_index=True,
+        r0 = np.int64(cb[:, 0].max()) + 1
+        r1 = np.int64(cb[:, 1].max()) + 1
+        r2 = np.int64(cb[:, 2].max()) + 1
+        key = ((normal.astype(np.int64)*r0 + cb[:, 0])*r1
+               + cb[:, 1])*r2 + cb[:, 2]
+        _, first, inv = np.unique(key, return_index=True,
                                   return_inverse=True)
+        del key
         inv = np.asarray(inv).ravel()
         nc = int(inv.max()) + 1
         P = sp.coo_matrix((np.ones(inv.size), (np.arange(inv.size), inv)),

@@ -676,24 +676,63 @@ class _GeoMGFactor:
         from scipy.linalg import lu_factor, lu_solve
         import loopmg
         self._lu_solve = lu_solve
-        G = (YT @ YT.T).tocsr().astype(_PRECOND_DT)
-        self._dt = G.dtype
-        n = G.shape[0]
-        gnnz = G.nnz
+        # BLOCKWISE Gram (2026-08-27). Forming the full G and slicing
+        # it held the Gram TWICE -- the SpGEMM product plus an astype
+        # copy of an already-float32 matrix -- alongside the sliced
+        # plaquette block, and that stack SET the R4 build peak
+        # (+2.1 GB, measured by pre/post brackets after the
+        # forest/incidence fixes exposed it). The three blocks of
+        #     G = [[A, B], [B^T, C]]
+        # are computed directly from row slices of YT instead: the
+        # same per-entry sums (verified array-identical against the
+        # slice construction on both solver paths), with never more
+        # than one big block live beyond its operands.
+        # ... but ONLY for csr input (the wire path, where the rung
+        # peaks live): a csc product stores SORTED indices where the
+        # csr product does not, so blockwise-from-csr would reorder
+        # the equi path's downstream summations. Verified: blockwise
+        # == slice construction array-for-array on csr input; csc
+        # input keeps the historical full-G construction.
+        n = YT.shape[0]
         self.loc = np.arange(min(nplaq, n))
         self.mac = np.arange(self.loc.size, n)
         self.nmac = self.mac.size
-        A = G[self.loc][:, self.loc].tocsr()
-        self.B = G[self.loc][:, self.mac].tocsr()
-        C = G[self.mac][:, self.mac].toarray()
-        # G is fully consumed by the three slices above; at rung
-        # scale it is GBs of setup transient sitting under the whole
-        # hierarchy build -- free it before, not after (HWM is what
-        # OOM-kills a run, and everything below runs beneath it)
-        del G
+        if YT.format == 'csr':
+            if YT.dtype != _PRECOND_DT:
+                YT = YT.astype(_PRECOND_DT)
+            self._dt = YT.dtype
+            Yp = YT[:self.loc.size]
+            Ym = YT[self.loc.size:]
+            del YT
+            self.B = (Yp @ Ym.T).tocsr()
+            C = (Ym @ Ym.T).toarray()
+            del Ym
+            if os.environ.get('SPPEEC_GPU') == '0':
+                # TIER 3: hand the plaquette basis in; the level-0
+                # Gram -- the measured build peak-setter -- is only
+                # materialised if stencil certification falls back
+                # inside GeoMG. CPU-only for now: the GPU geo path
+                # still uploads level-0 as csr (the parked GPU
+                # stencil lifts this).
+                A, basis = None, Yp
+            else:
+                A, basis = (Yp @ Yp.T).tocsr(), None
+                del Yp
+            gnnz = ((A.nnz if A is not None else int(nplaq*10.7))
+                    + 2*self.B.nnz + int(np.count_nonzero(C)))
+        else:
+            G = (YT @ YT.T).tocsr().astype(_PRECOND_DT, copy=False)
+            self._dt = G.dtype
+            gnnz = G.nnz
+            A = G[self.loc][:, self.loc].tocsr()
+            self.B = G[self.loc][:, self.mac].tocsr()
+            C = G[self.mac][:, self.mac].toarray()
+            del G
+            basis = None
         self.mg = loopmg.GeoMG(A, geom_normal, geom_base, nu=nu,
-                               omega=omega, max_coarse=max_coarse)
-        del A                      # alive inside mg (or dropped by
+                               omega=omega, max_coarse=max_coarse,
+                               basis=basis)
+        del A, basis               # alive inside mg (or dropped by
         self.cycles = int(cycles)  # the stencil); not needed here
         self.nnz = self.mg.nnz
         self.nnz_ratio = self.nnz/max(gnnz, 1)

@@ -183,12 +183,12 @@ def main():
             "sw = pr.sweeper(m, M)\n"
             "st = sw.S.chol.mg._sten0\n"
             "x = np.random.default_rng(4).standard_normal("
-            "st.tile_of.size).astype(np.float32)\n"
+            "st.n).astype(np.float32)\n"
             "print('HASH', hashlib.sha256("
             "st.matvec(x).tobytes()).hexdigest())\n"
             % (os.path.join(HERE, '..', 'src'), HERE,
                os.path.join(HERE, '..')))
-        hs = []
+        hs, errs = [], []
         for t in ('1', '4'):
             r = subprocess.run(
                 [sys.executable, '-c', st_probe],
@@ -198,6 +198,14 @@ def main():
             for ln in r.stdout.splitlines():
                 if ln.startswith('HASH'):
                     hs.append(ln.split()[1])
+            if r.returncode:
+                errs.append(r.stderr.strip().splitlines()[-1]
+                            if r.stderr.strip() else 'rc %d' % r.returncode)
+        # a probe that DIES must read as a broken probe, not as a
+        # kernel mismatch (2026-08-26: a renamed attribute produced
+        # hs == [] and the check text blamed the threads)
+        check('F: threaded/serial probes ran', not errs and len(hs) == 2,
+              '; '.join(errs) or repr(hs))
         check('F: tiled kernels threaded == serial',
               len(hs) == 2 and hs[0] == hs[1], repr(hs))
         check('F: single-block Gram engages in exact mode',

@@ -17,7 +17,7 @@ reproducible:
 Headline numbers (before → after the 2026-08-26/27 transient fixes;
 "after" is the shipped state):
 
-    peak (HWM, build phase)         11.73 -> 10.46 GB  <- what OOM-kills
+    peak (HWM, build phase)  11.73 -> 10.46 -> 10.13 -> 9.45 GB  <- what OOM-kills
     post-build resident (RSS)        7.97 ->  6.79 GB
     census-reachable arrays          6.40 GB
     unattributed resident      1.5 -> ~0.6 GB  (FFTW plan buffers x18,
@@ -177,9 +177,32 @@ owners, with the shipped fixes:
 | stencil extraction | +0.6 GB | +0.6 GB | already trimmed (500k-row sample) |
 | `getmesh_full`, `sp.bmat`, coupler quadrature | fit under peak | — | innocent / no action |
 
-Remaining peak-over-resident after the fixes: ~3.7 GB, spread across
-the Gram/hierarchy formation and `Bmat` assembly — flatter, with no
-single dominant owner left.
+**Tier 3 (2026-08-27) closed the plateau's three faces at once**, and
+the investigation exposed a fourth hidden one:
+
+* level-0 Gram **never materialised** — its stencil is extracted from
+  a thin sampled product and certified matrix-free
+  (`basis @ (basisᵀ x)` probes);
+* level 1 assembled by **colour probing** (81 exact-integer probe
+  vectors through the certified stencil; entries verified EQUAL to
+  the SpGEMM's, ~150 MB transient where the `W1 = Yᵀ P` route
+  measured a peak-neutral 1.8 GB — the first tier-3 attempt that
+  taught us replacement ≠ reduction);
+* the flat-intp pack maps (−0.36 GB resident);
+* `_aggregate`'s `np.unique(axis=0)` — **~1.5 GB of void-record sort
+  copies on every hierarchy build, the shared transient every
+  Gram-formation variant kept hitting** (three different level-1
+  constructions all peaked at ~10.13 GB before this was found) —
+  replaced by an order-preserving scalar-key unique, bit-identical.
+
+Post-tier-3 peak: **9.45 GB** (resident 6.60), the factor phase
++1.1 GB (probe assembly, P0 construction, Schur columns). The
+trade-off bought with RAM: the probing assembly costs ~55 s more
+build time at R4 than the SpGEMM it replaces (~+4 min at R5,
+~+20 min at R6); batching the 81 probes into multi-vector stencil
+applies is the recorded follow-up if that matters. Tier 3 is
+CPU-path only (`SPPEEC_GPU=0`) until the GPU stencil (stage B)
+uploads tiles instead of the level-0 csr.
 
 ## Scaling notes
 
@@ -199,7 +222,7 @@ count × tree depth, not cells). The build-peak overhang
 | wc retune-cache release | resident | ~130 MB (measured — not the hoped 2.3 GB; `_far` is hot) | deprioritised |
 | ~~chunk `getmesh_full`~~ | — | — | **withdrawn** (acquitted by measurement) |
 | shrink `_far` layout (dedup/pack per-leaf lists) | resident | unscoped | open |
-| Gram/Galerkin live-set | peak | ~1 GB | open, medium |
+| blockwise Gram + astype copy=False | peak | 0.33 GB measured (hoped ~1.5: the SpGEMM's own internals and the level-1 Galerkin products immediately claim the lowered ceiling) | **done** — csr/wire path blockwise (bit-identical, verified); csc/equi path keeps the historical construction because a csc product stores sorted indices where a csr product does not |
 | flat-intp stencil pack maps | resident | ~450 MB | open, easy |
 | Bmat Y/ST block split (f32/f64) | resident | ~300 MB | open, medium |
 | int8 hierarchy, level-0 stencil drop, B/Y/YT/Baug f32, fp32 Krylov, eager G frees | — | shipped | done |
