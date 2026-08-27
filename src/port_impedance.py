@@ -598,11 +598,26 @@ class _BlockAMGFactor:
         self.cycle_type = str(cycle_type)
         self.nnz = sum(l.A.nnz for l in self.ml.levels)
         self.nnz_ratio = self.nnz/max(G.nnz, 1)
-        AiB = np.column_stack([self._A(self.B[:, j].toarray().ravel())
-                               for j in range(self.nmac)]) \
-            if self.nmac else np.zeros((self.loc.size, 0))
-        self.S = lu_factor(np.float64(C - self.B.T @ AiB)) \
-            if self.nmac else None
+        # Schur complement of the macro block, C - B^T A^-1 B. The
+        # dense A^-1 B is never held: each column's v-cycle result is
+        # contracted against B^T immediately (2026-08-26). Holding all
+        # nmac columns -- twice, list + column_stack -- was a
+        # 2 * nmac * nloc * 4 B setup transient: +6.3 GB on the
+        # 1.1M-cell RSFQ JTL (390 macro columns x 2.2M loops) against a
+        # 1.3 GB resident solver, and ~1 TB at hero scale. Column-wise
+        # csc @ 1-D is the same arithmetic in the same order as the
+        # 2-D product (gated bit-identical).
+        if self.nmac:
+            BT = self.B.T
+            BtAiB = None
+            for j in range(self.nmac):
+                col = BT @ self._A(self.B[:, j].toarray().ravel())
+                if BtAiB is None:
+                    BtAiB = np.empty((self.nmac, self.nmac), dtype=col.dtype)
+                BtAiB[:, j] = col
+            self.S = lu_factor(np.float64(C - BtAiB))
+        else:
+            self.S = None
         self.n = n
         # Opt-in GPU apply (SPPEEC_GPU=1): device-resident hierarchy,
         # damped-Jacobi smoother in place of Gauss-Seidel -- a DIFFERENT
@@ -736,11 +751,26 @@ class _GeoMGFactor:
         self.cycles = int(cycles)  # the stencil); not needed here
         self.nnz = self.mg.nnz
         self.nnz_ratio = self.nnz/max(gnnz, 1)
-        AiB = np.column_stack([self._A(self.B[:, j].toarray().ravel())
-                               for j in range(self.nmac)]) \
-            if self.nmac else np.zeros((self.loc.size, 0))
-        self.S = lu_factor(np.float64(C - self.B.T @ AiB)) \
-            if self.nmac else None
+        # Schur complement of the macro block, C - B^T A^-1 B. The
+        # dense A^-1 B is never held: each column's v-cycle result is
+        # contracted against B^T immediately (2026-08-26). Holding all
+        # nmac columns -- twice, list + column_stack -- was a
+        # 2 * nmac * nloc * 4 B setup transient: +6.3 GB on the
+        # 1.1M-cell RSFQ JTL (390 macro columns x 2.2M loops) against a
+        # 1.3 GB resident solver, and ~1 TB at hero scale. Column-wise
+        # csc @ 1-D is the same arithmetic in the same order as the
+        # 2-D product (gated bit-identical).
+        if self.nmac:
+            BT = self.B.T
+            BtAiB = None
+            for j in range(self.nmac):
+                col = BT @ self._A(self.B[:, j].toarray().ravel())
+                if BtAiB is None:
+                    BtAiB = np.empty((self.nmac, self.nmac), dtype=col.dtype)
+                BtAiB[:, j] = col
+            self.S = lu_factor(np.float64(C - BtAiB))
+        else:
+            self.S = None
         self.n = n
         # GPU apply, same auto policy as the AMG factors (the
         # remedy the GeoMG adoption was conditioned on, 2026-08-12).
