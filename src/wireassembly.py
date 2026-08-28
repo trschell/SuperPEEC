@@ -600,6 +600,10 @@ class WireBondSolver:
                 "resample" % list(l))
         self.foot_cell = []
         self.foot_patch = []      # per wire: per end: (nodes, weights)
+        self.foot_r0 = np.zeros(len(wires))   # contact disc radius as
+        # RESOLVED here -- the default is 2x the wire radius, and
+        # consumers (blendout draws the flared foot) must read the
+        # value actually used rather than re-derive the default rule
         self.Rfoot = np.zeros(len(wires))
         for j, w in enumerate(wires):
             f0 = w.segments[0][0]
@@ -607,6 +611,7 @@ class WireBondSolver:
             ends = [f0.p0, fN.p0 + fN.length*fN.u]
             r0 = (2.0*w.radius if foot_r0 is None
                   else (foot_r0[j] if np.ndim(foot_r0) else foot_r0))
+            self.foot_r0[j] = r0
             cells, patches = [], []
             for p in ends:
                 anchor = self._find_foot(p, struc, l, r0)

@@ -761,6 +761,30 @@ class Problem:
             out.append(r)
         return out
 
+    def block_cells(self, m):
+        """``[(name, lo, hi)]`` cell ranges of the declared blocks.
+
+        The VoxelModel keeps only a painted ``sigma`` grid -- block
+        identity does not survive ``model()``, because nothing in the
+        solve needs it. Visualisation does: a 40 x 50 mm ground plane
+        and a 3 mm die are one undifferentiated shell otherwise, and
+        the plane hides the module. This re-derives the ranges from
+        the same document and the same ``_snap`` the painting used,
+        so the labels cannot drift from the geometry.
+        """
+        out = []
+        for k, b in enumerate(self._doc.get('block', [])):
+            if ('from_m' in b) or ('to_m' in b):
+                lo = self._snap(b['from_m'], m.d, b.get('name', '?'))
+                hi = self._snap(b['to_m'], m.d, b.get('name', '?'))
+            else:
+                lo = [int(v) for v in b['from']]
+                hi = [int(v) for v in b['to']]
+            out.append((str(b.get('name', 'block%d' % k)),
+                        tuple(int(v) for v in lo),
+                        tuple(int(v) for v in hi)))
+        return out
+
     def _box_cells(self, box, m):
         """Occupied cells whose centres lie inside a physical box."""
         lo = np.asarray(box[0], dtype=float)

@@ -61,6 +61,12 @@ solver's `.vti`/`.vtp` exports.*
 * ParaView export: volume current density as `.vti` (with a
   slab-streamed writer whose memory stays O(one slab) at any grid
   size) and bond wires as `.vtp` polylines carrying solved currents.
+* Blender export: the conductor *surface* as glTF 2.0 (`.glb`) —
+  exposed voxel faces carrying tangential |J|, one object per named
+  block, with bond wires as swept tubes coloured by chain current and
+  their contacts flared into the model's own feet.
+  Opens natively in Blender with no addon; `studies/blender_view.py`
+  builds the shaded scene and renders it headlessly.
 * Adapters for VoxHenry `.vhr` and PyPEEC input files.
 * A 36-script validation suite gated on analytic identities, closed
   forms and dense oracles — not just regression tolerances.
@@ -106,6 +112,8 @@ only — nothing on the command line can change converged numbers.
 | `--freq HZ [HZ ...]` | run only these points of the declared sweep (each must match a declared frequency — the CLI narrows the file, it never extends it) |
 | `--export-vti` | write the volume current density per frequency (streaming `.vti` plus a binned quick-look companion) |
 | `--export-wires` | write bond wires per frequency (`.vtp` polylines with solved chain currents) |
+| `--export-glb` | write the conductor surface and bond wires per frequency as glTF 2.0 (`.glb`) for Blender |
+| `--wire-scale F` | draw `.glb` wire tubes and feet at F x the physical radius (default 1.0; recorded in the legend and the render stamp) |
 | `--export-dir DIR` | directory for exported files (default `results/`) |
 | `--quicklook N` | bin factor for the quick-look `.vti` (default 4; 0 disables) |
 | `-v`, `--verbose` | solver diagnostics: setup timings, preconditioner engagement, residuals |
@@ -126,6 +134,134 @@ and a checkpoint from a different system is recognised and ignored.
 
 Exports pair in ParaView: load the `.vti` under the `.vtp` wires and
 apply a Tube filter (radius from the `radius` cell array).
+
+### Blender
+
+`--export-glb` answers a different question from the ParaView export.
+`.vti` is the volume field, for interrogating what the current does
+*inside* the metal; `.glb` is the conductor **surface**, for seeing
+what the module looks like and where the current crowds on the parts
+you can see — lit, shaded and renderable to a figure or a turntable
+without a VTK stack.
+
+**Write the file:**
+
+```
+python src/sppeec_cli.py examples/dbc_halfbridge_r3.toml --export-glb
+```
+
+which writes, per solved frequency, into `--export-dir` (default
+`results/`):
+
+```
+results/dbc_halfbridge_r3_1e06Hz.glb           geometry + field
+results/dbc_halfbridge_r3_1e06Hz_legend.json   the colour scale
+```
+
+Open the `.glb` in Blender with **File ▸ Import ▸ glTF 2.0** — no
+addon, default import settings, and the model arrives in the solver's
+own axes at one Blender unit per millimetre. glTF 2.0 is a published
+Khronos standard rather than a Blender format, so the same file is
+readable by other tooling that accepts glTF, and it does not rot
+against Blender releases the way a `.blend` would.
+
+| Export option | Meaning |
+|---|---|
+| `--export-glb` | write the surface and bond wires as `.glb` per frequency |
+| `--wire-scale F` | draw wire tubes and feet at F × the physical radius (default 1.0) |
+| `--export-dir DIR` | where the files land (default `results/`) |
+| `--freq HZ` | narrow the declared sweep, so you export one frequency instead of all |
+
+A 0.13 mm bond wire on a 40 mm module is a quarter of a percent of
+the frame — correct, and invisible beside lit copper. `--wire-scale`
+exaggerates it the way ParaView's Tube filter does; **1.5 is a good
+value** for this module, and much above that the feet of a bonded
+pair start to collide (at 3.0 they are 1.56 mm across on a 1.5 mm
+pair pitch). Any value other than 1.0 is recorded in the legend and
+burned into the render stamp, because an unlabelled exaggeration is
+just a wrong picture.
+
+**Render it** (optional — this is the only step that needs Blender
+installed, and it never touches the numbers):
+
+```
+blender -b --python studies/blender_view.py -- \
+    results/dbc_halfbridge_r3_1e06Hz.glb \
+    --view iso --hide bottom_metal --render
+```
+
+writing `<stem>_iso.blend` (open it and orbit) and, with `--render`,
+`<stem>_iso.png`. Drop `-b` to land straight in the Blender GUI with
+the scene already built.
+
+| `blender_view.py` option | Meaning |
+|---|---|
+| `--view iso\|plan\|front` | camera placement (default `iso`) |
+| `--hide A,B` | drop objects whose names contain these — almost always `--hide bottom_metal` |
+| `--render` | also write a PNG |
+| `--res N` | long edge in pixels (default 1600) |
+| `--emit F` | how much of the image is the field rather than the lighting (default 0.92; 1.0 makes the rendered pixel exactly the colourmap value) |
+
+**From Python**, if you are post-processing a solve you already have:
+
+```python
+import blendout
+
+blendout.export_scene(
+    m, M, info['i_f'], 'module.glb',
+    parts=prob.block_cells(m),               # one object per [[block]]
+    wires=sw.sol.wires, i_w=info['i_w'],
+    seg0=sw.sol.wc.seg0, wire_of_seg=sw.sol.wire_of_seg,
+    foot_cell=sw.sol.foot_cell, foot_r0=sw.sol.foot_r0,
+    freq=freq)
+```
+
+Every argument after `path` is optional: without `parts` the skin is
+one object, and without the wire arguments there are no wires.
+
+#### What is in the file
+
+Only the voxel faces where metal meets air are written, so a
+10-million-cell module is ~10⁶ quads rather than 10⁷ boxes. Each
+face carries the *tangential* current density of the cell behind it
+(the normal component through an exposed face is zero by
+construction). The skin is split into one object per declared
+`[[block]]`, which is what makes the file usable: a power module's
+ground plane is a 40 × 50 mm sheet that occludes the top copper from
+above and out-glows it from every other angle, and split it is one
+click — or `--hide bottom_metal` — to remove.
+
+Every vertex carries the colour *and* the number. `COLOR_0` is a
+baked logarithmic ramp so the file is right the moment it opens;
+`_JMAG` is the raw scalar in A/m² (A on the wires), which Blender
+imports as a mesh attribute so the ramp can be rebuilt in shader
+nodes against true values without re-exporting. The colour range is
+global across every object — per-object normalisation would give a
+dead signal trace the same ramp as the commutation loop — and is
+written alongside as `<stem>_legend.json` and burned into the render
+as stamp metadata, because an image of a current density with no
+scale on it is decoration rather than a measurement.
+
+Bond-wire contacts are drawn as the **feet** the solver actually
+models: each flares from the wire radius out to the contact radius
+`foot_r0` (default twice the wire radius) and seats on a filled disc
+lying on the outward face of the solver's own anchor cell. This is
+not dressing — the foot constriction in the answer is
+`R_disc(r0, rho) * h(r0/dx)` from `footcal`, computed *for that disc*,
+so a wire drawn as a bare cylinder ending in mid-air would omit a term
+that is in the extracted R. The disc also shows where each wire was
+landed. Only the taper between the two radii is a reading rather than
+a modelled surface: the solver has a wire of one radius and a contact
+disc of another, and nothing in between.
+
+Geometry is metres, scaled by 1000 on the way out so one Blender unit
+is one millimetre (a 40 mm module at 1 unit = 1 m sits inside the
+default near clip and is invisible), and written Y-up so Blender's
+importer lands it in the solver's own axes with default settings.
+`validation/validate_blendout.py` gates that orientation by
+round-tripping an asymmetric marker through a real Blender import; it
+skips cleanly where Blender is not installed, which is why Blender is
+not a dependency of the solve.
 
 ## The TOML input file
 

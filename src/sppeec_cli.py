@@ -85,6 +85,16 @@ class CliOptions:
             help='write bond wires per frequency (.vtp polylines '
                  'with solved chain currents)')
         exp.add_argument(
+            '--export-glb', action='store_true',
+            help='write the conductor SURFACE and bond wires per '
+                 'frequency as glTF 2.0 (.glb) for Blender')
+        exp.add_argument(
+            '--wire-scale', type=float, metavar='F', default=1.0,
+            help='draw .glb bond-wire tubes and feet at F x the '
+                 'physical radius (default 1.0; a 0.13 mm wire is '
+                 'invisible beside lit copper, and any F is recorded '
+                 'in the legend and the render stamp)')
+        exp.add_argument(
             '--export-dir', metavar='DIR', default='results',
             help='directory for exported files (default: results/)')
         exp.add_argument(
@@ -121,9 +131,12 @@ class CliOptions:
     # -- sanitizers (alphabetical execution; keep them independent) --
 
     def _sanitize_export(self, ns):
-        ns.exporting = ns.export_vti or ns.export_wires
+        ns.exporting = (ns.export_vti or ns.export_wires
+                        or ns.export_glb)
         if ns.quicklook < 0:
             self.parser.error('--quicklook must be >= 0')
+        if ns.wire_scale <= 0:
+            self.parser.error('--wire-scale must be > 0')
         if not ns.exporting:
             return
         try:
@@ -160,7 +173,7 @@ class CliOptions:
         return picked
 
     def export_paths(self, freq):
-        """(vti_path, vtp_path) for one frequency, or Nones."""
+        """(vti, vtp, glb) paths for one frequency, or Nones."""
         tag = ('%g' % freq).replace('+', '')
         stem = os.path.join(
             self.export_dir,
@@ -168,6 +181,8 @@ class CliOptions:
         return (('%s_%sHz.vti' % (stem, tag)) if self.export_vti
                 else None,
                 ('%s_%sHz_wires.vtp' % (stem, tag)) if self.export_wires
+                else None,
+                ('%s_%sHz.glb' % (stem, tag)) if self.export_glb
                 else None)
 
 
@@ -252,7 +267,7 @@ def _run(opts, status):
             print('%12g %12.6g %12.6g  %s   (%d mv, resid %.1e)'
                   % (f, Z.real, abs(Z.imag)/w, sh,
                      info['matvecs'], info['residual']), flush=True)
-        vti, vtp = opts.export_paths(f)
+        vti, vtp, glb = opts.export_paths(f)
         if vti:
             written += vtkout.export_currents_streaming(
                 m, M, info['i_f'], vti, quicklook=opts.quicklook)
@@ -261,6 +276,20 @@ def _run(opts, status):
                                 sw.sol.wc.seg0, sw.sol.wire_of_seg,
                                 vtp)
             written.append(vtp)
+        if glb:
+            import blendout
+            wkw = {}
+            if getattr(sw, 'sol', None) is not None and 'i_w' in info:
+                wkw = dict(wires=sw.sol.wires, i_w=info['i_w'],
+                           seg0=sw.sol.wc.seg0,
+                           wire_of_seg=sw.sol.wire_of_seg,
+                           foot_cell=getattr(sw.sol, 'foot_cell', None),
+                           foot_r0=getattr(sw.sol, 'foot_r0', None))
+            written += blendout.export_scene(
+                m, M, info['i_f'], glb, freq=f,
+                parts=prob.block_cells(m),
+                wire_radius_scale=opts.wire_scale,
+                verbose=opts.verbose, **wkw)
     for path in written:
         print('wrote %s' % path)
     return 0
