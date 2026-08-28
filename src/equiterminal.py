@@ -2373,6 +2373,8 @@ class EquiTerminalSolver:
         """
         if getattr(self, '_forest', None) is not None:
             return self._forest
+        import os
+        from collections import deque
         B = self.B.tocoo()
         order = np.argsort(B.row, kind='stable')
         r, c, v = B.row[order], B.col[order], B.data[order]
@@ -2392,9 +2394,20 @@ class EquiTerminalSolver:
                 continue
             depth[seed] = 0
             comp[seed] = ncomp
-            stack = [seed]
+            # BREADTH-first, not depth-first. A DFS forest is long and
+            # snaky, so its fundamental cycles are long, so the local
+            # 4-filament plaquettes in _hole_cycles cannot match them and
+            # the collapse stalls spuriously -- declaring generators that
+            # no hole asked for. The path length grows with refinement,
+            # which is exactly why that surplus grew 2 -> 53 going from
+            # 200 nm to 100 nm. BFS gives shortest-path trees and the
+            # shortest fundamental cycles, which is what a plaquette can
+            # actually explain. Set SPPEEC_TREE_DFS=1 to get the old
+            # order back for an A/B.
+            bfs = not os.environ.get('SPPEEC_TREE_DFS')
+            stack = deque([seed])
             while stack:
-                u = stack.pop()
+                u = stack.popleft() if bfs else stack.pop()
                 for v_, f in adj[u]:
                     if depth[v_] < 0:
                         depth[v_] = depth[u] + 1
@@ -2424,6 +2437,92 @@ class EquiTerminalSolver:
                 out.append((f, s))
                 v = parent[v]
         return out
+
+    def _betti1(self):
+        """Independent tunnels through the conductor: the EXACT number of
+        generators the plaquette basis is missing.
+
+        The tree-cotree collapse in ``_hole_cycles`` is a MATCHING, not
+        an elimination, so it can declare more generators than the
+        topology needs -- and the surplus is not a fixed overhead, it
+        GROWS as the mesh refines (measured on the RSFQ JTL: 294
+        declared against 292 needed at 200 nm, 345 against the same 292
+        at 100 nm). Those surplus columns are linearly dependent, they
+        land in the macro Schur block, and its LU then inverts v-cycle
+        noise along the dependent directions -- the 50 nm stall.
+
+        The true count is a topological invariant, so it can be had
+        without any linear algebra at all, from the Euler
+        characteristic of the cubical complex the occupied voxels
+        generate:
+
+            chi = V - E + F - C  =  b0 - b1 + b2
+            b1  = b0 + b2 - chi
+
+        V/E/F/C are counted by OR-ing the occupancy over the neighbour
+        shifts that share each cell; b0 is the conductor's component
+        count (26-connected, because two voxels meeting at a corner
+        share that vertex and so ARE connected in the cubical complex)
+        and b2 the enclosed cavities (background components that never
+        reach the border). Costs seconds and no solver.
+
+        Returns None if the occupancy grid is unavailable, in which case
+        the caller keeps the greedy count rather than guessing.
+        """
+        try:
+            occ = np.asarray(self.model.struc()) != 0
+        except Exception:
+            return None
+        if occ.ndim != 3 or not occ.any():
+            return None
+        try:
+            from scipy import ndimage
+        except ImportError:
+            return None
+        nx, ny, nz = occ.shape
+
+        def or_over(offsets, shape):
+            acc = np.zeros(shape, dtype=bool)
+            for dx, dy, dz in offsets:
+                acc[dx:dx + nx, dy:dy + ny, dz:dz + nz] |= occ
+            return int(acc.sum())
+
+        # a vertex lives where any of the 8 voxels around it is occupied
+        V = or_over([(a, b, c) for a in (0, 1) for b in (0, 1)
+                     for c in (0, 1)], (nx + 1, ny + 1, nz + 1))
+        # an edge along axis a: any of the 4 voxels ringing it
+        E = 0
+        for a in range(3):
+            offs = []
+            for d0 in (0, 1):
+                for d1 in (0, 1):
+                    o = [0, 0, 0]
+                    o[(a + 1) % 3] = d0
+                    o[(a + 2) % 3] = d1
+                    offs.append(tuple(o))
+            shp = [nx + 1, ny + 1, nz + 1]
+            shp[a] = occ.shape[a]
+            E += or_over(offs, tuple(shp))
+        # a face normal to axis a: either of the 2 voxels sharing it
+        F = 0
+        for a in range(3):
+            o1 = [0, 0, 0]
+            o1[a] = 1
+            shp = [nx, ny, nz]
+            shp[a] = occ.shape[a] + 1
+            F += or_over([(0, 0, 0), tuple(o1)], tuple(shp))
+        C = int(occ.sum())
+        chi = V - E + F - C
+        _, b0 = ndimage.label(occ, structure=np.ones((3, 3, 3)))
+        st6 = ndimage.generate_binary_structure(3, 1)
+        labb, _ = ndimage.label(np.pad(~occ, 1, constant_values=True),
+                                structure=st6)
+        border = np.unique(np.concatenate([
+            labb[0].ravel(), labb[-1].ravel(),
+            labb[:, 0].ravel(), labb[:, -1].ravel(),
+            labb[:, :, 0].ravel(), labb[:, :, -1].ravel()]))
+        b2 = int(labb.max()) - int((border > 0).sum())
+        return int(b0 + b2 - chi)
 
     def _hole_cycles(self, Y):
         """Hole-encircling generators completing the plaquette span.
@@ -2473,6 +2572,10 @@ class EquiTerminalSolver:
             free[j] = len(mem)
             for f in mem:
                 edge_plaq.setdefault(f, []).append(j)
+        # the pristine per-plaquette unmatched count, so the dedup pass
+        # below can replay the collapse without rebuilding `members`
+        # (which is the memory-heavy part of this routine)
+        free0 = free.copy()
         # a plaquette's 4 filaments cannot all be tree edges (they
         # would close a cycle in the tree), so free >= 1 initially
         queue = deque(np.flatnonzero(free == 1).tolist())
@@ -2513,6 +2616,84 @@ class EquiTerminalSolver:
             loose = [int(f) for f in np.flatnonzero(nontree & ~matched)]
         if not gens:
             return None
+
+        # DEDUP to the topological truth. The collapse above is a
+        # matching, so `gens` can overshoot -- and the overshoot grows
+        # with refinement, which is what degrades the macro Schur block
+        # (see _betti1). Drop a generator, replay the collapse, and keep
+        # the drop only if the collapse still completes: completion
+        # IMPLIES spanning by the induction above, so a kept drop can
+        # never cost correctness. b1 supplies the stopping criterion the
+        # greedy lacks; without it we would not know when to stop and
+        # would pay a replay per generator for nothing.
+        def replay(declared):
+            """Collapse with `declared` pre-matched; True if it completes."""
+            mt = np.zeros(self.efg, dtype=bool)
+            fr = free0.copy()
+            q = deque()
+
+            def fire(f):
+                mt[f] = True
+                for j2 in edge_plaq.get(f, ()):
+                    fr[j2] -= 1
+                    if fr[j2] == 1:
+                        q.append(j2)
+
+            for f in declared:
+                if not mt[f]:
+                    fire(f)
+            q.extend(np.flatnonzero(fr == 1).tolist())
+            while q:
+                j = q.popleft()
+                if fr[j] != 1:
+                    continue
+                nxt = next((f for f in members[j] if not mt[f]), None)
+                if nxt is None:
+                    continue
+                fire(nxt)
+            return not bool((nontree & ~mt).any())
+
+        target = self._betti1()
+        if target is not None and len(gens) > target:
+            surplus = len(gens) - target
+            # Test the LAST-declared first: by then the collapse has
+            # already covered the genuine holes, so late declarations
+            # are the likely passengers. One replay per generator is the
+            # natural budget -- there is nothing to learn from a second.
+            kept = list(gens)
+            dropped = 0
+            # Repeat to a FIXED POINT. The replay test is sufficient but
+            # not necessary, so a generator can fail while a passenger
+            # is still in the set and pass once that passenger is gone
+            # (measured: pass 1 caught 1 of the 2 surplus at 200 nm).
+            # Each pass strictly shrinks `kept` or ends the loop, so
+            # this terminates in at most `surplus` passes.
+            while dropped < surplus:
+                before = dropped
+                for f in reversed(list(kept)):
+                    if dropped == surplus:
+                        break
+                    cand = [g for g in kept if g != f]
+                    if len(cand) == len(kept):
+                        continue
+                    if replay(cand):
+                        kept = cand
+                        dropped += 1
+                if dropped == before:
+                    break
+            if self.verbose:
+                print('  hole generators: %d declared, b1 = %d, '
+                      '%d dropped -> %d' % (len(gens), target, dropped,
+                                            len(kept)))
+                if dropped < surplus:
+                    print('    NOTE %d surplus generator(s) survived the '
+                          'replay test (it is sufficient, not necessary) '
+                          '-- macro block may still be singular'
+                          % (surplus - dropped))
+            gens = kept
+        elif self.verbose and target is not None:
+            print('  hole generators: %d declared, b1 = %d (no surplus)'
+                  % (len(gens), target))
         rows, cols, vals = [], [], []
         for k, f in enumerate(gens):
             rows.append(int(f))
