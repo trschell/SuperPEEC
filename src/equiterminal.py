@@ -2817,6 +2817,13 @@ class EquiTerminalSolver:
         r0 = np.linalg.norm(d - Gop.matvec(c0))
         r1 = np.linalg.norm(d - Gop.matvec(c))
         self._readout_gram = (r0/nd, r1/nd, int(flag))
+        if min(r0, r1) > 1e-4*nd:
+            import warnings
+            warnings.warn("port-voltage readout: Gram solve reached only "
+                          "%.1e relative (target %g) -- the extracted Z "
+                          "carries that much readout error on top of the "
+                          "Krylov residual" % (min(r0, r1)/nd, tol),
+                          RuntimeWarning, stacklevel=3)
         return c if r1 <= r0 else c0
 
     def _precond(self, vec):

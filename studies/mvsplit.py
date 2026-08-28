@@ -59,6 +59,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument('toml')
     ap.add_argument('--freq', type=float, default=None)
+    ap.add_argument('--lsqr', action='store_true',
+                    help='also time the former lsqr projections')
     args = ap.parse_args(argv)
     os.chdir(ROOT)
     T = {}
@@ -88,21 +90,29 @@ def main(argv=None):
         S.term.set_frequency(freq)
         n = S.meshsize
         op, pc = S._mesh_matvec, S._precond
-        # the solve prologue: two lsqr projections per frequency
-        from scipy.sparse.linalg import lsqr
+        # the particular solution + readout: tree route since aa4ebbe;
+        # --lsqr times the two former projections instead (hours at 18M
+        # filaments -- that is the measurement, not a mistake)
         s = np.zeros(S.nnode + 2, dtype=np.complex128)
         s[S.pnode[+1]] = 1.0
         s[S.pnode[-1]] = -1.0
         t0 = time.perf_counter()
-        BT = S.Baug.T.tocsc().astype(np.complex128)
-        ihat = lsqr(BT, s, atol=1e-12, btol=1e-12)[0]
-        T['lsqr ihat (prologue)'] = time.perf_counter() - t0
-        t0 = time.perf_counter()
-        zi = S.apply_Z(ihat)
-        lsqr(S.Baug.astype(np.complex128), zi, atol=1e-12, btol=1e-12)
-        T['lsqr phi (epilogue)'] = time.perf_counter() - t0
-        for k in ('lsqr ihat (prologue)', 'lsqr phi (epilogue)'):
-            print('  solve  %-22s %8.1f s' % (k, T[k]))
+        ihat = S._tree_particular(1.0, s)
+        T['tree ihat (prologue)'] = time.perf_counter() - t0
+        print('  solve  %-22s %8.1f s' % ('tree ihat (prologue)',
+                                          T['tree ihat (prologue)']))
+        if args.lsqr:
+            from scipy.sparse.linalg import lsqr
+            t0 = time.perf_counter()
+            BT = S.Baug.T.tocsc().astype(np.complex128)
+            lsqr(BT, s, atol=1e-12, btol=1e-12)
+            T['lsqr ihat (prologue)'] = time.perf_counter() - t0
+            t0 = time.perf_counter()
+            zi = S.apply_Z(ihat)
+            lsqr(S.Baug.astype(np.complex128), zi, atol=1e-12, btol=1e-12)
+            T['lsqr phi (epilogue)'] = time.perf_counter() - t0
+            for k in ('lsqr ihat (prologue)', 'lsqr phi (epilogue)'):
+                print('  solve  %-22s %8.1f s' % (k, T[k]))
         print('  unknowns %d  (efg %d, terminals %d, macro %d)'
               % (n, S.efg, S.term.n,
                  getattr(S.chol, 'nmac', 0)))
