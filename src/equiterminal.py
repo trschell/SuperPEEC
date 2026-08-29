@@ -542,6 +542,48 @@ def london_rate(model):
     return 1.0/float(vals[0])
 
 
+def material_response(model, freq):
+    """``(p, z)`` -- the ONLY two things the mode engine asks of a material.
+
+    ``p`` is the decay rate of the Helmholtz equation the interior
+    current obeys, which sets the conduction palette's face/corner
+    exponentials. ``z`` is the series impedance DENSITY in ohm*m, which
+    sets the sub-bar impedance in ``Ru``.
+
+        normal conductor   grad^2 J = j w mu sigma J   p = (1+j)/delta
+                                                       z = 1/sigma
+        London supercond.  grad^2 J = J/lambda^2       p = 1/lambda
+                                                       z = j w mu lambda^2
+
+    Two slots, one material law each. Expressing it this way is what
+    keeps the engine below free of any superconductor branch: the mode
+    shapes are ``conduction_weights(p=p)`` and the sub-bar impedance is
+    ``z*k/dx``, for BOTH -- and ``1/sigma * k/dx`` is exactly the old
+    ``k/(sigma*dx)``, so the normal path is unchanged arithmetic.
+
+    ``p`` is frequency dependent for a normal conductor and not for a
+    superconductor; ``z`` is the other way round. ``set_frequency``
+    therefore just recomputes both and rebuilds what moved, with no
+    special case for either.
+    """
+    lam_inv = london_rate(model)
+    if lam_inv is not None:
+        if not freq or float(freq) <= 0.0:
+            raise ValueError(
+                "a London material's impedance density is "
+                "j w mu lambda^2 and needs freq > 0 (got %r)" % (freq,))
+        w = 2.0*np.pi*float(freq)
+        return lam_inv, 1j*w*MU0/lam_inv**2
+    sigma = model.uniform_sigma()
+    # z is frequency independent for a normal conductor, so it is
+    # available even where the RATE is not -- which is what the
+    # 'diff'/'linear' palettes need: they want no shapes, but Ru still
+    # wants the material.
+    p = (None if not freq or float(freq) <= 0.0
+         else (1.0 + 1.0j)/skin_depth(sigma, freq))
+    return p, 1.0/sigma
+
+
 def conduction_weights(kk, dx, delta, p=None):
     """Net-zero CONDUCTION-MODE weights on the ``kk[0] x kk[1]`` sub-bar grid.
 
@@ -705,20 +747,16 @@ class Redistribution:
         self.kk = kk
         self.k = kk[0]*kk[1]
         self.dx = model.dx
-        # A LONDON model's Helmholtz rate is 1/lambda, not (1+j)/delta,
-        # and a lossless one has sigma = 0 with no skin depth to speak
-        # of -- so the rate is resolved here and sigma is allowed to be
-        # absent when it is.
-        self._london_p = london_rate(model)
-        # mu*lambda^2: the London analogue of 1/sigma. A sub-bar's
-        # series impedance is z*len/area, and for a superconductor
-        # z = j w mu lambda^2 (voxmodel.zdensity) instead of 1/sigma.
-        self._london_muL2 = (None if self._london_p is None
-                             else MU0/self._london_p**2)
+        # The material enters through material_response() alone -- see
+        # there for why that leaves no superconductor branch below. A
+        # lossless London model legitimately has sigma = 0 and no skin
+        # depth, so sigma is kept only for reporting.
+        self._model = model
+        self._london = london_rate(model) is not None
         try:
             self.sigma = model.uniform_sigma()
         except ValueError:
-            if self._london_p is None:
+            if not self._london:
                 raise
             self.sigma = 0.0
         self.sel = np.flatnonzero(fil_axis == self.axis)
@@ -803,21 +841,18 @@ class Redistribution:
         #                skin depth. ``set_frequency`` retunes W per solve
         #                point, so skin_freq only seeds the initial state.
         self.skin_freq = None if skin_freq is None else float(skin_freq)
+        if self.mode_basis == 'conduction' and (self.skin_freq is None
+                                                or self.skin_freq <= 0):
+            raise ValueError(
+                "mode_basis='conduction' needs skin_freq > 0: the mode "
+                "shapes are exponentials in the material's Helmholtz "
+                "rate (got %r)" % (skin_freq,))
+        # z is wanted by EVERY palette (it is what Ru is made of); the
+        # rate p only by 'conduction'. Resolving both here keeps the
+        # material in one place regardless of which shapes are chosen.
+        self._p, self._z = material_response(model, self.skin_freq)
         if self.mode_basis == 'conduction':
-            if self._london_p is not None:
-                # London: real rate, no skin_freq needed, and the
-                # imaginary columns prune themselves away (8 real
-                # shapes instead of 16 mixed ones)
-                W = conduction_weights(kk, self.dx, None,
-                                       p=self._london_p)
-            else:
-                if self.skin_freq is None or self.skin_freq <= 0:
-                    raise ValueError(
-                        "mode_basis='conduction' needs skin_freq "
-                        "> 0: the mode shapes are exponentials in "
-                        "the skin depth (got %r)" % (skin_freq,))
-                delta = skin_depth(self.sigma, self.skin_freq)
-                W = conduction_weights(kk, self.dx, delta)
+            W = conduction_weights(kk, self.dx, None, p=self._p)
         elif self.mode_basis == 'linear':
             k0, k1 = kk
             u = (np.arange(k0) + 0.5)/k0 - 0.5
@@ -926,27 +961,23 @@ class Redistribution:
         """
         if self.mode_basis != 'conduction':
             return False
-        if self._london_p is not None:
-            # The SHAPES are frequency independent (the rate is
-            # 1/lambda, not sqrt(j w mu sigma)) -- but Ru carries
-            # j w mu lambda^2 and so does scale with w. Re-assemble
-            # without recomputing W. The mode currents are unchanged
-            # in the end, since jw*Zuu scales identically; this keeps
-            # the assembled blocks self-consistent at the solve point.
-            freq = float(freq)
-            if freq <= 0 or freq == self.skin_freq:
-                return False
-            self.skin_freq = freq
-            self._assemble()
-            return False
         freq = float(freq)
         if freq <= 0 or freq == self.skin_freq:
             return False
         self.skin_freq = freq
-        delta = skin_depth(self.sigma, freq)
-        self._set_W(conduction_weights(self.kk, self.dx, delta))
+        p, self._z = material_response(self._model, freq)
+        # Whether the SHAPES moved is a property of the material, not a
+        # branch to write: a normal conductor's rate is (1+j)/delta and
+        # does move, a London rate is 1/lambda and does not. z moves
+        # either way (it carries j w mu lambda^2 for the superconductor),
+        # so the blocks are always re-assembled; only W is conditional,
+        # and only because rebuilding it can re-prune and change km.
+        moved = (p != self._p)
+        self._p = p
+        if moved:
+            self._set_W(conduction_weights(self.kk, self.dx, None, p=p))
         self._assemble()
-        return True
+        return bool(moved)
 
     def mode_precond(self, jw):
         """Per-filament block-Jacobi inverse of ``Ru + jw*Zuu_self``.
@@ -976,18 +1007,16 @@ class Redistribution:
     def _sub_impedance(self):
         """Series impedance of ONE sub-bar, projected later onto W.
 
-        Normal conductor: the resistance k/(sigma*dx), real and
-        frequency independent. LONDON superconductor: the same
-        geometry against the two-fluid impedance density
-        j w mu lambda^2 rather than 1/sigma, so the value is imaginary
-        and proportional to w. Both callers -- _assemble and
-        mode_precond -- must use the SAME value or the preconditioner
-        stops approximating the operator it preconditions.
+        ONE formula for both materials: ``z * k / dx``, where z is the
+        series impedance density from material_response(). For a normal
+        conductor z = 1/sigma and this is exactly the old
+        ``k/(sigma*dx)``; for a London superconductor z = j w mu
+        lambda^2 and the same expression gives a reactance proportional
+        to w. Both callers -- _assemble and mode_precond -- must use the
+        SAME value or the preconditioner stops approximating the
+        operator it preconditions.
         """
-        if self._london_p is not None:
-            w = 2.0*np.pi*float(self.skin_freq or 0.0)
-            return 1j*w*self._london_muL2*self.k/self.dx
-        return self.k/(self.sigma*self.dx)
+        return self._z*self.k/self.dx
 
     def _sub_boxes(self, cells):
         """The parallel sub-bars of each filament: the cross-section cut

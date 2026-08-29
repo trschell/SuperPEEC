@@ -217,12 +217,17 @@ def part_e():
     try:
         S = eq.EquiTerminalSolver(m, M, 0, subdivide=3,
                                   mode_basis='conduction', skin_freq=f)
-        p_used = S.redist._london_p if hasattr(S, 'redist') else None
+        p_used = getattr(S.redist, '_p', None)
         check("conduction basis is ALLOWED on uniform lambda",
-              True, "rate 1/lambda = %.4g" % (p_used or 0.0))
+              True, "rate = %.4g" % (abs(p_used) if p_used else 0.0))
+        # material_response returns the Helmholtz rate: REAL 1/lambda
+        # for a superconductor, complex (1+j)/delta for a normal metal.
+        # Both facts matter -- a complex rate here would mean the skin
+        # palette had been installed on a London conductor.
         check("the London rate, not a skin depth, sets the shapes",
-              p_used is not None and abs(p_used - 1.0/5e-8) < 1e-6*p_used,
-              "%.6g vs %.6g" % (p_used or 0.0, 1.0/5e-8))
+              p_used is not None and np.imag(p_used) == 0.0
+              and abs(np.real(p_used) - 1.0/5e-8) < 1e-6/5e-8,
+              "p = %r, want %.6g + 0j" % (p_used, 1.0/5e-8))
     except NotImplementedError as e:
         check("conduction basis is ALLOWED on uniform lambda", False,
               str(e)[:60])
