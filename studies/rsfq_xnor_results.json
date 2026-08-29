@@ -53,7 +53,8 @@
    "mst_fallback": false,
    "ref": 1.9326e-12,
    "ratio": 0.8990789609852012,
-   "basis": "auto"
+   "basis": "auto",
+   "pz": 6.75e-08
   },
   {
    "config": "B",
@@ -67,7 +68,8 @@
    "mst_fallback": false,
    "ref": 1.8642e-12,
    "ratio": 0.9235328827379037,
-   "basis": "auto"
+   "basis": "auto",
+   "pz": 6.75e-08
   },
   {
    "config": "C",
@@ -81,7 +83,8 @@
    "mst_fallback": false,
    "ref": 1.9634e-12,
    "ratio": 0.9403636548843843,
-   "basis": "auto"
+   "basis": "auto",
+   "pz": 6.75e-08
   },
   {
    "config": "D",
@@ -95,7 +98,8 @@
    "mst_fallback": false,
    "ref": 1.9436e-12,
    "ratio": 0.9741459147972833,
-   "basis": "auto"
+   "basis": "auto",
+   "pz": 6.75e-08
   },
   {
    "config": "A",
@@ -109,6 +113,22 @@
    "mst_fallback": false,
    "ref": 1.9326e-12,
    "ratio": 0.8824692124598986,
+   "basis": "auto",
+   "pz": 6.75e-08
+  },
+  {
+   "config": "A",
+   "pitch": 2e-07,
+   "pz": 4e-08,
+   "R": 6.81589e-09,
+   "L": 1.72747e-12,
+   "matvecs": 137,
+   "setup_s": 398.37,
+   "wall_s": 2070.9672667980194,
+   "cells": 2022248,
+   "mst_fallback": false,
+   "ref": 1.9326e-12,
+   "ratio": 0.8938580151091793,
    "basis": "auto"
   }
  ]

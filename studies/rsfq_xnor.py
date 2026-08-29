@@ -98,7 +98,8 @@ def run(cfg, pitch, basis, workdir, python, freq, pz=None,
                   txt, re.M)
     setup = re.search(r'setup ([0-9.]+) s', txt)
     cells = re.search(r'(\d+) occupied cells', open(toml).read())
-    return dict(config=cfg, pitch=pitch, R=float(m.group(2)),
+    return dict(config=cfg, pitch=pitch, pz=pz or pitch,
+                R=float(m.group(2)),
                 L=float(m.group(3)), matvecs=int(m.group(4)),
                 setup_s=float(setup.group(1)) if setup else None,
                 wall_s=time.time() - t0, cells=int(cells.group(1)),
@@ -127,9 +128,9 @@ def main(argv=None):
         rows = json.load(open(args.out)).get('rows', [])
     print('InductEx partials (pH): %s' % ', '.join(
         '%s=%.3f' % (k, v*1e12) for k, v in sorted(ref.items())))
-    print('%-3s %-4s %8s %9s %10s %10s %7s %6s %8s' % (
-        'cfg', 'net', 'pitch', 'cells', 'L_pH', 'ref_pH', 'ratio', 'mv',
-        'setup_s'))
+    print('%-3s %-4s %7s %7s %9s %10s %10s %7s %6s %8s' % (
+        'cfg', 'net', 'pitch', 'pz', 'cells', 'L_pH', 'ref_pH', 'ratio',
+        'mv', 'setup_s'))
     for pitch in args.pitch:
         for cfg in args.configs:
             r = run(cfg, pitch, args.basis, args.workdir, sys.executable,
@@ -137,14 +138,20 @@ def main(argv=None):
             r['ref'] = sum(ref[t] for t in CONFIGS[cfg]['terms'])
             r['ratio'] = r['L']/r['ref']
             r['basis'] = args.basis or 'auto'
-            rows = [x for x in rows if not (x['config'] == cfg and
-                                            x['pitch'] == pitch and
-                                            x['basis'] == r['basis'])]
+            # pz is part of the identity: a z-refinement at the same
+            # xy pitch is a DIFFERENT rung, not a re-run of the same
+            # one, and keying without it silently overwrites the row
+            # you are trying to compare against
+            rows = [x for x in rows
+                    if not (x['config'] == cfg and x['pitch'] == pitch
+                            and x.get('pz', x['pitch']) == r['pz']
+                            and x['basis'] == r['basis'])]
             rows.append(r)
-            print('%-3s %-4s %8.0f %9d %10.4f %10.4f %7.3f %6d %8.0f%s' % (
-                cfg, CONFIGS[cfg]['net'], pitch*1e9, r['cells'],
-                r['L']*1e12, r['ref']*1e12, r['ratio'], r['matvecs'],
-                r['setup_s'] or 0,
+            print('%-3s %-4s %7.0f %7.4g %9d %10.4f %10.4f %7.3f %6d '
+                  '%8.0f%s' % (
+                cfg, CONFIGS[cfg]['net'], pitch*1e9, r['pz']*1e9,
+                r['cells'], r['L']*1e12, r['ref']*1e12, r['ratio'],
+                r['matvecs'], r['setup_s'] or 0,
                 '  (MST fallback)' if r['mst_fallback'] else ''))
             json.dump(dict(reference=ref, rows=rows), open(args.out, 'w'),
                       indent=1)
