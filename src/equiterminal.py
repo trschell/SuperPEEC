@@ -996,21 +996,30 @@ class Redistribution:
         k0, k1 = self.kk
         h0, h1 = dx/k0, dx/k1
         cells = np.atleast_2d(np.asarray(cells))
-        lo = np.zeros((len(cells)*self.k, 3))
-        hi = np.zeros((len(cells)*self.k, 3))
-        for f, c in enumerate(cells):
-            for p in range(k0):
-                for q in range(k1):
-                    a = [c[0]*dx, c[1]*dx, c[2]*dx]
-                    b = [(c[0]+1)*dx, (c[1]+1)*dx, (c[2]+1)*dx]
-                    a[d] = (c[d] + 0.5)*dx      # centre to centre
-                    b[d] = (c[d] + 1.5)*dx
-                    a[s0] = c[s0]*dx + p*h0
-                    b[s0] = c[s0]*dx + (p + 1)*h0
-                    a[s1] = c[s1]*dx + q*h1
-                    b[s1] = c[s1]*dx + (q + 1)*h1
-                    lo[f*self.k + p*k1 + q] = a
-                    hi[f*self.k + p*k1 + q] = b
+        # VECTORISED (2026-08-29). This was a Python triple loop over
+        # cells x k0 x k1 building two 3-lists per sub-bar. It is pure
+        # index arithmetic with no cross-iteration dependence, and the
+        # engine calls it once over EVERY mode-carrying filament -- on
+        # a thin-film model, where boundary_only prunes almost nothing
+        # (94.7% of the RSFQ XNOR's cells are boundary cells), that is
+        # 3.1M x 36 = 111M iterations on one core, and it dominated
+        # the mode build. Same values, same sub-bar order
+        # (p*k1 + q within a filament).
+        c = cells.astype(float)
+        n = len(c)
+        pq = np.arange(self.k)
+        P = (pq//k1).astype(float)
+        Q = (pq % k1).astype(float)
+        lo = np.repeat((c*dx)[:, None, :], self.k, axis=1)
+        hi = np.repeat(((c + 1.0)*dx)[:, None, :], self.k, axis=1)
+        lo[:, :, d] = ((c[:, d] + 0.5)*dx)[:, None]   # centre to centre
+        hi[:, :, d] = ((c[:, d] + 1.5)*dx)[:, None]
+        lo[:, :, s0] = (c[:, s0]*dx)[:, None] + P[None, :]*h0
+        hi[:, :, s0] = (c[:, s0]*dx)[:, None] + (P[None, :] + 1.0)*h0
+        lo[:, :, s1] = (c[:, s1]*dx)[:, None] + Q[None, :]*h1
+        hi[:, :, s1] = (c[:, s1]*dx)[:, None] + (Q[None, :] + 1.0)*h1
+        lo = lo.reshape(n*self.k, 3)
+        hi = hi.reshape(n*self.k, 3)
         return lo, hi
 
     def _full_boxes(self, cells):

@@ -1036,8 +1036,23 @@ class _EquiSweep:
         if not np.allclose(d, d[0]):
             return 'anisotropic cells'
         if getattr(m, 'superconductor', False):
-            return ('superconductor -- the two-fluid z(w) already '
-                    'carries the current profile')
+            # AUTO stays off here on purpose. The conduction palette can
+            # now serve a uniform-lambda superconductor (it takes the
+            # London rate 1/lambda directly, since 2026-08-29), but
+            # engaging it by DEFAULT would change every existing
+            # superconductor solve, so it is opt-in: an explicit
+            # skin = { mode = "on", basis = "conduction" } passes this
+            # reason by and lets the engine's own guards decide.
+            #
+            # The reason this used to give -- "the two-fluid z(w)
+            # already carries the current profile" -- was only true
+            # where the mesh resolves it. At two cells across a film
+            # z(w) delivers the BULK kinetic value and nothing else:
+            # studies/london_crowding.py measures 0.9999 of bulk at two
+            # cells against 1.44 at twelve.
+            return ('superconductor -- sub-cell London modes are '
+                    'opt-in; set skin = { mode = "on", basis = '
+                    '"conduction" }')
         if getattr(m, 'subpixel', None) is not None:
             # fill models have mixed sigma_eff by construction, but the
             # surface-anchored SubpixelModes engine handles exactly
