@@ -460,6 +460,9 @@ class Terminals:
                              shape=(self.n, sel.size)), sel
 
 
+MU0 = 4e-7*np.pi
+
+
 def skin_depth(sigma, freq, mu=4e-7*np.pi):
     """Classical skin depth ``sqrt(2/(w mu sigma))`` (metres)."""
     if freq <= 0:
@@ -521,14 +524,47 @@ def recommend_subdivision(dx, sigma, freq, cap=3):
     return 3 if k == 2 else k
 
 
-def conduction_weights(kk, dx, delta):
+def london_rate(model):
+    """``1/lambda`` for a uniform London model, else None.
+
+    The mode palette needs the conductor's Helmholtz decay rate. For a
+    superconductor that is ``1/lambda`` -- real, and frequency
+    independent, which is why the London path never retunes.
+    """
+    lam = getattr(model, 'lambdaL', None)
+    if lam is None or not getattr(model, 'superconductor', False):
+        return None
+    lam = np.asarray(lam, dtype=float)
+    vals = np.unique(lam[lam > 0.0])
+    if vals.size != 1:
+        return None                  # mixed or absent: caller decides
+    return 1.0/float(vals[0])
+
+
+def conduction_weights(kk, dx, delta, p=None):
     """Net-zero CONDUCTION-MODE weights on the ``kk[0] x kk[1]`` sub-bar grid.
 
     Daniel, Sangiovanni-Vincentelli & White (EPEP 2000): inside a good
     conductor the current solves a Helmholtz equation whose solutions
     are exponentials anchored to the cross-section's faces and corners
     -- face decay rate ``p = (1+j)/delta``, corner rate ``(1+j)/
-    (delta*sqrt(2))``. Those are the shapes the piecewise-constant basis
+    (delta*sqrt(2))``.
+
+    ``p`` OVERRIDES that rate, which is what lets the same palette
+    serve a LONDON SUPERCONDUCTOR. The governing equation is the same
+    Helmholtz form with a different constant -- a normal conductor has
+    ``grad^2 J = j w mu sigma J`` (so ``p = (1+j)/delta``), a London
+    superconductor ``grad^2 J = J/lambda^2`` (so ``p = 1/lambda``,
+    REAL and frequency independent) -- and the corner rate follows for
+    any ``p`` by the same algebra, since ``exp(-a(x+y))`` has
+    ``grad^2 = 2a^2`` and therefore ``a = p/sqrt(2)``.
+
+    Passing ``delta = lambda`` instead of the real rate does NOT work
+    and is the trap worth naming: it gives ``p = (1+j)/lambda``, whose
+    real and imaginary parts are ``exp(-x/lam)cos(x/lam)`` and
+    ``exp(-x/lam)sin(x/lam)``. Their span does not contain the London
+    profile ``cosh((x-t/2)/lambda)`` -- measured residual 1.2e-2 with
+    four columns, against 2.2e-15 with the two real-rate columns. Those are the shapes the piecewise-constant basis
     approximates badly (measured in ``studies/modebasis2d.py``: at
     matched mode count the conduction basis misses 6.6x less of the
     skin-effect correction than 'diff', the recorded 201%% failure's
@@ -566,10 +602,10 @@ def conduction_weights(kk, dx, delta):
     U, V = np.meshgrid(u, v, indexing='ij')       # matches _sub_boxes
     x = U.ravel()*dx                              # distance from the low
     y = V.ravel()*dx                              # face, per split axis
-    p = (1.0 + 1.0j)/delta
+    p = (1.0 + 1.0j)/delta if p is None else complex(p)
     ex0, ex1 = np.exp(-p*x), np.exp(-p*(dx - x))
     ey0, ey1 = np.exp(-p*y), np.exp(-p*(dx - y))
-    pc = (1.0 + 1.0j)/(delta*np.sqrt(2.0))
+    pc = p/np.sqrt(2.0)
     # INDIVIDUAL faces and corners (2026-08-20, studies/
     # palette_ablation.py + xsection_tabulated.py). The original
     # palette carried the four corner exponentials only as their fully
@@ -668,7 +704,22 @@ class Redistribution:
         self.kk = kk
         self.k = kk[0]*kk[1]
         self.dx = model.dx
-        self.sigma = model.uniform_sigma()
+        # A LONDON model's Helmholtz rate is 1/lambda, not (1+j)/delta,
+        # and a lossless one has sigma = 0 with no skin depth to speak
+        # of -- so the rate is resolved here and sigma is allowed to be
+        # absent when it is.
+        self._london_p = london_rate(model)
+        # mu*lambda^2: the London analogue of 1/sigma. A sub-bar's
+        # series impedance is z*len/area, and for a superconductor
+        # z = j w mu lambda^2 (voxmodel.zdensity) instead of 1/sigma.
+        self._london_muL2 = (None if self._london_p is None
+                             else MU0/self._london_p**2)
+        try:
+            self.sigma = model.uniform_sigma()
+        except ValueError:
+            if self._london_p is None:
+                raise
+            self.sigma = 0.0
         self.sel = np.flatnonzero(fil_axis == self.axis)
         self.mode_basis = str(mode_basis)
         self.boundary_only = bool(boundary_only)
@@ -752,12 +803,20 @@ class Redistribution:
         #                point, so skin_freq only seeds the initial state.
         self.skin_freq = None if skin_freq is None else float(skin_freq)
         if self.mode_basis == 'conduction':
-            if self.skin_freq is None or self.skin_freq <= 0:
-                raise ValueError("mode_basis='conduction' needs skin_freq "
-                                 "> 0: the mode shapes are exponentials in "
-                                 "the skin depth (got %r)" % (skin_freq,))
-            delta = skin_depth(self.sigma, self.skin_freq)
-            W = conduction_weights(kk, self.dx, delta)
+            if self._london_p is not None:
+                # London: real rate, no skin_freq needed, and the
+                # imaginary columns prune themselves away (8 real
+                # shapes instead of 16 mixed ones)
+                W = conduction_weights(kk, self.dx, None,
+                                       p=self._london_p)
+            else:
+                if self.skin_freq is None or self.skin_freq <= 0:
+                    raise ValueError(
+                        "mode_basis='conduction' needs skin_freq "
+                        "> 0: the mode shapes are exponentials in "
+                        "the skin depth (got %r)" % (skin_freq,))
+                delta = skin_depth(self.sigma, self.skin_freq)
+                W = conduction_weights(kk, self.dx, delta)
         elif self.mode_basis == 'linear':
             k0, k1 = kk
             u = (np.arange(k0) + 0.5)/k0 - 0.5
@@ -813,7 +872,19 @@ class Redistribution:
         self.nnz = (0, 0)
         if not self.use_fft:
             self._build_truncated(self._rc_uu, self._rc_cross)
-        r_sub = self.k/(self.sigma*self.dx)          # k x a full filament's
+        # THE SUB-BAR SERIES IMPEDANCE. For a normal conductor this is
+        # a resistance, k/(sigma*dx), real and frequency independent.
+        # For a LONDON superconductor the per-cell impedance density is
+        # j w mu lambda^2, not 1/sigma, so the same projection carries
+        # a reactance: Ru becomes complex and proportional to w.
+        #
+        # That w-proportionality is the physics, not a nuisance: the
+        # mode equation is (Ru + jw*Zuu) u = drive, so with Ru itself
+        # linear in w the frequency cancels and the current profile is
+        # FREQUENCY INDEPENDENT -- which is exactly what distinguishes
+        # London screening from skin effect, and what
+        # validate_superconductor PART C measures as flat L(f).
+        r_sub = self._sub_impedance()
         # resistance couples only sub-bars of the SAME filament, so Ru is
         # block diagonal with one identical block
         self.Ru = sp.kron(sp.identity(self.nfil, format='csr'),
@@ -854,6 +925,19 @@ class Redistribution:
         """
         if self.mode_basis != 'conduction':
             return False
+        if self._london_p is not None:
+            # The SHAPES are frequency independent (the rate is
+            # 1/lambda, not sqrt(j w mu sigma)) -- but Ru carries
+            # j w mu lambda^2 and so does scale with w. Re-assemble
+            # without recomputing W. The mode currents are unchanged
+            # in the end, since jw*Zuu scales identically; this keeps
+            # the assembled blocks self-consistent at the solve point.
+            freq = float(freq)
+            if freq <= 0 or freq == self.skin_freq:
+                return False
+            self.skin_freq = freq
+            self._assemble()
+            return False
         freq = float(freq)
         if freq <= 0 or freq == self.skin_freq:
             return False
@@ -881,12 +965,28 @@ class Redistribution:
         from terminal import box_mutual_matrix
         lo, hi = self._sub_boxes(self.cells[:1])
         Ls = box_mutual_matrix(lo, hi, self.axis)
-        r_sub = self.k/(self.sigma*self.dx)
+        r_sub = self._sub_impedance()
         A = r_sub*(self.W.T @ self.W) + jw*(self.W.T @ (Ls @ self.W))
         Ainv = np.linalg.inv(A)
         nf = int(self._bnd.sum())
         return sp.kron(sp.identity(nf, format='csr'),
                        sp.csr_matrix(Ainv), format='csr')
+
+    def _sub_impedance(self):
+        """Series impedance of ONE sub-bar, projected later onto W.
+
+        Normal conductor: the resistance k/(sigma*dx), real and
+        frequency independent. LONDON superconductor: the same
+        geometry against the two-fluid impedance density
+        j w mu lambda^2 rather than 1/sigma, so the value is imaginary
+        and proportional to w. Both callers -- _assemble and
+        mode_precond -- must use the SAME value or the preconditioner
+        stops approximating the operator it preconditions.
+        """
+        if self._london_p is not None:
+            w = 2.0*np.pi*float(self.skin_freq or 0.0)
+            return 1j*w*self._london_muL2*self.k/self.dx
+        return self.k/(self.sigma*self.dx)
 
     def _sub_boxes(self, cells):
         """The parallel sub-bars of each filament: the cross-section cut
@@ -2030,13 +2130,34 @@ class EquiTerminalSolver:
                 "Solve with subdivide=False, or resample the model to "
                 "cubic voxels first.")
         if getattr(model, 'superconductor', False) and not skin_off:
-            raise NotImplementedError(
-                "skin-effect subdivision on a superconductor: the mode "
-                "engine's Ru and the classical skin depth both assume a "
-                "REAL sigma, and the London screening length (not delta) "
-                "sets the current profile. Solve with subdivide=False -- "
-                "the per-cell complex z(w) already carries the "
-                "two-fluid physics at the filament level.")
+            # The two objections this guard used to raise are both
+            # answered for a UNIFORM London model, and only for one:
+            #   * the mode SHAPES now take the Helmholtz rate directly
+            #     (conduction_weights(p=1/lambda)), so the screening
+            #     length sets the profile rather than a skin depth;
+            #   * Ru now carries the sub-bar impedance j w mu lambda^2
+            #     rather than a real k/(sigma dx).
+            # The modes remain net-zero, so they redistribute current
+            # inside a cell and add none: the cell mean still carries
+            # the bulk kinetic term and there is no double count. What
+            # is NOT answered is a model with several lambdas -- one
+            # rate cannot serve them -- so that still raises.
+            if london_rate(model) is None:
+                raise NotImplementedError(
+                    "skin-effect subdivision on a superconductor with "
+                    "no single London depth: the mode palette is "
+                    "exponentials at ONE rate 1/lambda, and a mixed- "
+                    "or zero-lambda model has no such rate. Solve with "
+                    "subdivide=False.")
+            if mode_basis != 'conduction':
+                raise NotImplementedError(
+                    "skin-effect subdivision on a superconductor needs "
+                    "mode_basis='conduction': that palette's shapes are "
+                    "the exponentials the London Helmholtz equation "
+                    "actually solves, at rate 1/lambda. 'diff' and "
+                    "'linear' are generic net-zero shapes with no "
+                    "London content and are not validated here; got "
+                    "%r." % (mode_basis,))
         fref = skin_freq
         if fref is None:
             fref = float(np.max(model.freq)) if len(model.freq) else 0.0
@@ -2044,11 +2165,26 @@ class EquiTerminalSolver:
         self.skin_k = 1
         spx = getattr(model, 'subpixel', None)
         if subdivide is True or subdivide == 'auto':
-            # fill models have no uniform sigma, but the base METAL
-            # sigma (what the skin depth is made of) is well defined
-            sig0 = (next(iter(spx['geom'].values()))[3] if spx
-                    else model.uniform_sigma())
-            self.skin_k = recommend_subdivision(model.dx, sig0, fref)
+            lp = london_rate(model)
+            if lp is not None:
+                # A London conductor's screening length is lambda, and
+                # it does not depend on frequency, so the skin-depth
+                # rule does not apply: ask the same question of the
+                # right length. recommend_subdivision's rule is
+                # k >= 2*dx/length, and it is fed a sigma, so invert
+                # lambda into the sigma that would give delta = lambda
+                # at this frequency rather than duplicate the rule.
+                lam = 1.0/lp
+                sig0 = 2.0/(2.0*np.pi*fref*4e-7*np.pi*lam**2) if fref > 0 \
+                    else 0.0
+                self.skin_k = (recommend_subdivision(model.dx, sig0, fref)
+                               if sig0 > 0 else 1)
+            else:
+                # fill models have no uniform sigma, but the base METAL
+                # sigma (what the skin depth is made of) is well defined
+                sig0 = (next(iter(spx['geom'].values()))[3] if spx
+                        else model.uniform_sigma())
+                self.skin_k = recommend_subdivision(model.dx, sig0, fref)
         elif subdivide in (False, None):
             self.skin_k = 1
         else:

@@ -82,9 +82,14 @@ def bar(tag, lam, freq, nx, nt, dx):
     return m, M
 
 
-def imz(lam, freq, nx, nt, dx):
-    m, M = bar('%g_%d' % (lam, nt), lam, freq, nx, nt, dx)
-    Z, _, _ = eq.EquiTerminalSolver(m, M, 0).solve(freq)
+def imz(lam, freq, nx, nt, dx, modes=0):
+    m, M = bar('%g_%d_%d' % (lam, nt, modes), lam, freq, nx, nt, dx)
+    kw = {}
+    if modes:
+        kw = dict(subdivide=int(modes), mode_basis='conduction',
+                  skin_freq=freq)
+    S = eq.EquiTerminalSolver(m, M, 0, **kw)
+    Z, _, _ = S.solve(freq)
     return Z.imag
 
 
@@ -105,6 +110,9 @@ def main(argv=None):
     ap.add_argument('--nt', type=int, nargs='+',
                     default=[2, 4, 6, 8, 12])
     ap.add_argument('--freq', type=float, default=2.5e9)
+    ap.add_argument('--modes', type=int, default=0,
+                    help='sub-bar quadrature k for the conduction '
+                         'basis (0 = engine off, the plain mesh)')
     a = ap.parse_args(argv)
 
     w = 2*np.pi*a.freq
@@ -121,8 +129,8 @@ def main(argv=None):
     for nt in a.nt:
         dx = a.side/nt
         nx = int(round(a.length/dx))
-        lk = (imz(a.lam, a.freq, nx, nt, dx)
-              - imz(a.lam_tiny, a.freq, nx, nt, dx))/w
+        lk = (imz(a.lam, a.freq, nx, nt, dx, a.modes)
+              - imz(a.lam_tiny, a.freq, nx, nt, dx, a.modes))/w
         l_eff = nx*dx
         bulk = MU0*a.lam**2*l_eff/A
         print("%4d %8.1f %8d %12.6g %12.6g %9.4f"

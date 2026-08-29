@@ -202,12 +202,30 @@ def part_e():
         check("DC raises", False, "prepare(freq=0) went through")
     except ValueError as e:
         check("DC raises", 'freq > 0' in str(e), str(e)[:50])
+    # The generic net-zero bases carry no London content, so they are
+    # still refused on a superconductor; the CONDUCTION palette is not,
+    # since 2026-08-29 its shapes take the Helmholtz rate 1/lambda
+    # directly (studies/london_crowding.py measures what that buys).
     for sub in (3, True):
         try:
             eq.EquiTerminalSolver(m, M, 0, subdivide=sub)
-            check("subdivide=%r raises" % sub, False, "went through")
+            check("subdivide=%r raises on the generic basis" % sub,
+                  False, "went through")
         except NotImplementedError:
-            check("subdivide=%r raises" % sub, True, "")
+            check("subdivide=%r raises on the generic basis" % sub,
+                  True, "")
+    try:
+        S = eq.EquiTerminalSolver(m, M, 0, subdivide=3,
+                                  mode_basis='conduction', skin_freq=f)
+        p_used = S.redist._london_p if hasattr(S, 'redist') else None
+        check("conduction basis is ALLOWED on uniform lambda",
+              True, "rate 1/lambda = %.4g" % (p_used or 0.0))
+        check("the London rate, not a skin depth, sets the shapes",
+              p_used is not None and abs(p_used - 1.0/5e-8) < 1e-6*p_used,
+              "%.6g vs %.6g" % (p_used or 0.0, 1.0/5e-8))
+    except NotImplementedError as e:
+        check("conduction basis is ALLOWED on uniform lambda", False,
+              str(e)[:60])
 
 
 def main():
