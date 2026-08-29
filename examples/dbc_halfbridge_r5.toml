@@ -72,7 +72,8 @@
 # should switch to the calibrated "patch" feet.
 
 # THIS FILE IS THE R5 RUNG -- the intermediate stop between the R4
-# stretch rung (51.2M cells, 9.45 GB peak measured) and the ~1e9-cell hero
+# stretch rung (51.2M cells; 9.45 GB census peak, 21-29 GB from the
+# CLI depending on GPU and export -- see that file) and the ~1e9-cell hero
 # run. Same physical module as examples/dbc_halfbridge.toml (which
 # carries the demo pitch and the full conversion notes -- read that
 # header first; geometry edits belong THERE and should be mirrored

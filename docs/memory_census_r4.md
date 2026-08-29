@@ -32,6 +32,59 @@ inside it. Solve-phase additions (Krylov basis) fit under that peak.
 1% of peak = 117 MB; every resident item above it is documented
 below.
 
+> **CORRECTION (2026-08-28): the sentence above is wrong, and this
+> census structurally could not see why.** It walks the BUILT solver,
+> before any matvec. The FMM leaf gather buffers are allocated
+> LAZILY on first use (`levels.py`, `_ynmr_g` / `_mfil_g`:
+> `np.ascontiguousarray(self.ynmr[self.idx, :])`, a contiguous
+> gather that makes the P2M/L2P products BLAS-friendly), so at census
+> time they do not exist yet. Measured on this file, CPU-only, via
+> the CLI's own build path:
+>
+>     tree + prepare                rss  0.97   hwm  1.38 GB
+>     solver build DONE             rss  6.60   hwm  9.38 GB   <- census sees this
+>     after ONE matvec              rss 17.05   hwm 18.15 GB   <- true peak
+>
+> The build reproduces this census (9.38 vs 9.45 GB HWM). The first
+> matvec then adds **10.45 GB resident**, all of it census-reachable
+> once it exists — six complex128 buffers, one pair per leaf
+> direction, 25 harmonics per filament:
+>
+>     M.e._ynmr_g / _mfil_g   1840.9 MB each
+>     M.f._ynmr_g / _mfil_g   1840.4 MB each
+>     M.g._ynmr_g / _mfil_g   1487.3 MB each   = 10.09 GB
+>
+> So the honest R4 peak is **~18 GB CPU-only, not 9.45**, and a
+> figure taken from this document alone understates it about 2x.
+> Full-run peaks measured the same day, `/usr/bin/time -v`:
+> >=21.0 GB (CPU-only CLI, no export), 29.3 GB (GPU + `--export-glb`;
+> the export is +3.97 GB of that, and is the non-streaming
+> `current_density` in `blendout`), 30.6 GB (same, spline wires).
+>
+> **DONE (2026-08-29), fp32 campaign phase 4.** The six buffers are
+> now stored complex64 with the magnitude factored into an fp64
+> scalar, and built chunkwise straight into the single-precision
+> output (`levels._gather_single`; `SPPEEC_LEAF_FP64=1` restores
+> fp64). Measured on this file, CPU-only:
+>
+>     leaf gather buffers   10.34 -> 5.17 GB
+>     peak after one matvec 18.16 -> 13.34 GB   (-4.81 GB, -27%)
+>     steady matvec         11.84 -> 11.58 s    (unchanged)
+>
+> A plain `.astype(complex64)` would have been WRONG: these tables
+> carry `r**n` in SI metres and `ynmr` also `m0 = mu0/(4 pi) l**2`,
+> leaving the smallest non-zero entry only 7.6 decades above float32's
+> smallest normal at R4, 4.6 at R6, and UNDERFLOWING at a 1 um pitch —
+> silently zeroing the high-order harmonics. Normalising removes the
+> scale dependence entirely. Building the fp64 gather first would
+> also have handed most of the saving back in transients (measured
+> 3.8x the final buffer before the chunking was sized by elements
+> rather than rows). Gated in `validation/validate_leaf_fp32.py`;
+> R3 reproduces the fp64 answer to every printed digit (R 0.00504333,
+> L 2.0089e-08, 143 matvecs, identical wire shares).
+>
+> **Re-census after a matvec, not before.**
+
 ## Resident items (largest first)
 
 ### 1. Wire coupler blocks and tables — 2574 MB (27% of the

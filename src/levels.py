@@ -21,6 +21,81 @@ A_n^m normalization come from :mod:`special`. Split out of multipole.py.
 from multipole_common import *  # noqa: F401,F403  shared imports/guards
 import os as _os
 
+# fp32 campaign PHASE 4 (2026-08-28): the LEAF GATHER BUFFERS in
+# single precision. These are the group-contiguous copies of the P2M
+# and L2P operators, built lazily on the FIRST MATVEC -- which is why
+# docs/memory_census_r4.md missed them: it walks the BUILT solver,
+# before any matvec exists. Measured at R4 they are the single largest
+# store in the whole run, 10.09 GB in six complex128 arrays (e/f/g x
+# _mfil_g/_ynmr_g, 25 harmonics per filament), taking the true peak
+# from the census's 9.45 GB to 18.15.
+#
+# THE DYNAMIC-RANGE TRAP -- the same one validate_mid_fp32 documents
+# for the mid tables, and the reason a plain .astype(complex64) here
+# would be WRONG. These tables carry r**n in SI metres, and ynmr also
+# carries m0 = mu0/(4 pi) * l**2. Headroom of the smallest non-zero
+# ynmr entry above float32's smallest normal, computed per rung:
+#
+#     demo 0.5 mm   12.4 decades      R4 0.0625 mm   7.6 decades
+#     R3   0.125 mm  8.8 decades      R6 0.02   mm   4.6 decades
+#     ... and at a 1 um pitch, -3.2 decades: it UNDERFLOWS.
+#
+# Underflow here is silent, and would zero the high-order harmonics at
+# fine pitch -- the class of bug that survives every residual check
+# because the far field merely gets quietly less accurate. So the
+# magnitude is factored into an fp64 scalar and only the NORMALISED
+# table is stored single. The dot is linear in the table, so
+# scale*dot(table/scale, x) is the same contraction with fp32 rounding
+# on entries that now span 1.0 down to ~1e-15 at R4 -- scale-free by
+# construction, at any pitch.
+#
+# SPPEEC_LEAF_FP64=1 restores fp64 storage for A/B measurement.
+_LEAF_FP64 = _os.environ.get('SPPEEC_LEAF_FP64') == '1'
+
+
+def _gather_single(src, idx, axis, chunk_elems=1 << 22):
+    """Gather ``src`` along ``axis`` by ``idx``, stored complex64 with
+    an fp64 scale. Returns ``(buffer, scale)``.
+
+    Built CHUNKWISE and straight into the single-precision output. The
+    source tables are tiny -- (nnmax, cells-per-leaf-box), a few tens
+    of kB -- and it is the per-filament gather that is gigabytes, so
+    materialising the fp64 gather first (and then a scaled copy of it)
+    would spend 3x the final buffer in transients and hand most of the
+    saving straight back. The scale is taken over the FULL source,
+    which bounds the gathered subset by construction and needs no
+    extra pass.
+
+    Falls back to a plain fp64 gather (scale 1.0) under
+    SPPEEC_LEAF_FP64, and for an all-zero or non-finite table, where
+    there is no magnitude to factor out.
+    """
+    idx = np.asarray(idx)
+    if _LEAF_FP64:
+        return (np.ascontiguousarray(src[:, idx]) if axis == 1
+                else np.ascontiguousarray(src[idx, :])), 1.0
+    scale = float(np.abs(src).max())
+    if not (scale > 0.0) or not np.isfinite(scale):
+        return (np.ascontiguousarray(src[:, idx]) if axis == 1
+                else np.ascontiguousarray(src[idx, :])), 1.0
+    n = idx.size
+    out = np.empty((src.shape[0], n) if axis == 1
+                   else (n, src.shape[1]), dtype=np.complex64)
+    # size the chunk by ELEMENTS, not rows: each gathered row carries
+    # nnmax harmonics, so a chunk counted in rows silently builds an
+    # fp64 temporary nnmax times bigger than intended (the first cut
+    # here peaked at 3.8x the final buffer, caught by the gate)
+    per = max(1, src.shape[0] if axis == 1 else src.shape[1])
+    chunk = max(1, int(chunk_elems)//per)
+    for a in range(0, n, chunk):
+        b = min(a + chunk, n)
+        if axis == 1:
+            out[:, a:b] = src[:, idx[a:b]]/scale
+        else:
+            out[a:b, :] = src[idx[a:b], :]/scale
+    return out, scale
+
+
 # GPU path for the top-level M2L (and nothing else yet): opt-in via
 # SPPEEC_GPU=1, because not every machine has one and the CPU results
 # are the bit-anchored reference. Falls back to the CPU path loudly on
@@ -314,13 +389,15 @@ class LeafLevel(Level):
         # copy so the loop body is a pure slice + gemv, bit-identical
         # to the old arithmetic (same per-group columns, same dot).
         if getattr(self, '_mfil_g', None) is None:
-            self._mfil_g = np.ascontiguousarray(self.mfil[:, self.idx])
+            self._mfil_g, self._mfil_s = _gather_single(
+                self.mfil, self.idx, 1)
         i0 = self.idx0
+        sc = self._mfil_s
         for group in range(msize):
             a, b = i0[group], i0[group+1]
             if b > a:
-                self.above.data[group, :] += \
-                    np.dot(self._mfil_g[:, a:b], self.data[a:b])
+                self.above.data[group, :] += sc*np.dot(
+                    self._mfil_g[:, a:b], self.data[a:b])
 
     def l2p(self):
         """Local-to-particle: evaluate each box's local expansion at sources.
@@ -334,13 +411,15 @@ class LeafLevel(Level):
         # Same slice + pre-gathered-operator rewrite as p2m -- see the
         # comment there. Bit-identical.
         if getattr(self, '_ynmr_g', None) is None:
-            self._ynmr_g = np.ascontiguousarray(self.ynmr[self.idx, :])
+            self._ynmr_g, self._ynmr_s = _gather_single(
+                self.ynmr, self.idx, 0)
         i0 = self.idx0
+        sc = self._ynmr_s
         for group in range(msize):
             a, b = i0[group], i0[group+1]
             if b > a:
-                self.data[a:b] += np.dot(self._ynmr_g[a:b, :],
-                                         self.above.data[group, :])
+                self.data[a:b] += sc*np.dot(
+                    self._ynmr_g[a:b, :], self.above.data[group, :])
 
     def traverse(self):
         """Apply one full FMM matvec over the whole tree.
