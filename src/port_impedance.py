@@ -687,7 +687,7 @@ class _GeoMGFactor:
     """
 
     def __init__(self, YT, geom_normal, geom_base, nplaq, cycles=2,
-                 nu=2, omega=2.0/3.0, max_coarse=400):
+                 nu=2, omega=2.0/3.0, max_coarse=400, macro_idx=None):
         from scipy.linalg import lu_factor, lu_solve
         import loopmg
         self._lu_solve = lu_solve
@@ -708,16 +708,50 @@ class _GeoMGFactor:
         # the equi path's downstream summations. Verified: blockwise
         # == slice construction array-for-array on csr input; csc
         # input keeps the historical full-G construction.
+        # MACRO SET, explicitly. _BlockAMGFactor has always taken a
+        # macro_idx and derived loc as its complement; this class
+        # derived BOTH positionally -- loc = the first nplaq rows,
+        # mac = everything after them -- which silently swept in any
+        # basis column that happened to sit past the plaquettes.
+        # Redistribution modes do, and there can be tens of millions of
+        # them: on a thin film 94.7% of cells carry modes, giving 24M
+        # macro columns, a dense C of 2.06 PiB and one v-cycle per
+        # column. They do not belong there -- the mode-mode Gram is
+        # exactly block diagonal (8x8 per filament, measured) so there
+        # is no coupling for a dense block to carry, and
+        # EquiTerminalSolver._precond overwrites those rows with
+        # mode_precond regardless.
+        #
+        # Unlike _BlockAMGFactor this needs THREE sets, because its
+        # local solver is GEOMETRIC and its local set must be the
+        # lattice faces: loc (plaquettes -> GeoMG), mac (the given
+        # macro columns -> exact Schur), and REST (everything else ->
+        # identity, for a caller that preconditions them itself).
+        # macro_idx=None keeps the historical positional split exactly,
+        # including its contiguous slices.
         n = YT.shape[0]
         self.loc = np.arange(min(nplaq, n))
-        self.mac = np.arange(self.loc.size, n)
+        if macro_idx is None:
+            self.mac = np.arange(self.loc.size, n)
+            self.rest = np.empty(0, dtype=np.intp)
+            contiguous = True
+        else:
+            self.mac = np.asarray(macro_idx, dtype=np.intp)
+            keep = np.zeros(n, dtype=bool)
+            keep[self.loc] = True
+            keep[self.mac] = True
+            self.rest = np.flatnonzero(~keep)
+            contiguous = False
         self.nmac = self.mac.size
         if YT.format == 'csr':
             if YT.dtype != _PRECOND_DT:
                 YT = YT.astype(_PRECOND_DT)
             self._dt = YT.dtype
-            Yp = YT[:self.loc.size]
-            Ym = YT[self.loc.size:]
+            # slices where the split is the historical contiguous one
+            # (the comment above about csr index order applies to those);
+            # row-gather only when a caller supplied its own macro set
+            Yp = YT[:self.loc.size] if contiguous else YT[self.loc]
+            Ym = YT[self.loc.size:] if contiguous else YT[self.mac]
             del YT
             self.B = (Yp @ Ym.T).tocsr()
             C = (Ym @ Ym.T).toarray()
@@ -779,7 +813,11 @@ class _GeoMGFactor:
         # CPU fallback is otherwise invisible in production runs.
         self._gpu = None
         self.gpu_state = 'cpu (SPPEEC_GPU=0)'
-        if _gpu_amg_wanted():
+        if self.rest.size:
+            # GPUGeoBlock mirrors loc/mac only; the identity set is not
+            # part of its contract
+            self.gpu_state = 'cpu (explicit macro set)'
+        elif _gpu_amg_wanted():
             try:
                 from gpu_amg import GPUGeoBlock
                 self._gpu = GPUGeoBlock(self)
@@ -808,6 +846,8 @@ class _GeoMGFactor:
             out[self.mac] = ym
         else:
             out[self.loc] = yp
+        if self.rest.size:
+            out[self.rest] = b[self.rest]     # identity; caller owns it
         return np.float32(out)
 
 

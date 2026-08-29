@@ -2529,8 +2529,22 @@ class EquiTerminalSolver:
                 nrm, bse = loopmg.plaquette_geometry(
                     self.Y[:efg, :self.nplaq].tocsc(), self.fil_axis,
                     self.fil_cell, self.nplaq)
-                self.chol = _GeoMGFactor(YT32, nrm, bse, self.nplaq,
-                                         cycles=self.amg_cycles)
+                # The basis runs [plaquettes | holes + port cycles |
+                # redistribution modes]. Only the middle group belongs
+                # in the exact Schur block: the modes are an identity
+                # block in the cycle basis whose rows _precond
+                # overwrites with mode_precond, and there are far too
+                # many of them on a thin film to densify. Name the
+                # macro set rather than let it be "everything past the
+                # plaquettes".
+                # SPPEEC_GEO_POSITIONAL=1 restores the old split for
+                # A/B (it cannot run at thin-film mode counts).
+                nmac = YT32.shape[0] - self.nplaq - self.nu
+                mac = (None if os.environ.get('SPPEEC_GEO_POSITIONAL') == '1'
+                       else np.arange(self.nplaq, self.nplaq + nmac))
+                self.chol = _GeoMGFactor(
+                    YT32, nrm, bse, self.nplaq, cycles=self.amg_cycles,
+                    macro_idx=mac)
                 if self.verbose:
                     print("GeoMG precond apply: %s"
                           % self.chol.gpu_state, flush=True)
