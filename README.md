@@ -49,7 +49,8 @@ solver's `.vti`/`.vtp` exports.*
   wire) and a sparse exact-integral correction does the same for
   the near-field inductance, leaving the FFT/FMM structure
   untouched.
-* Bond wires as polylines: validated round-wire cross-section model,
+* Bond wires as polylines or splines: validated round-wire
+  cross-section model,
   wire–wire and wire–plane proximity, and a lattice-Green's-function
   calibrated foot (contact) resistance.
 * Ports: prescribed current strips, solved-split equipotential
@@ -134,6 +135,69 @@ and a checkpoint from a different system is recognised and ignored.
 
 Exports pair in ParaView: load the `.vti` under the `.vtp` wires and
 apply a Tube filter (radius from the `radius` cell array).
+
+### Curved bond wires
+
+A `[[wire]]` is a polyline by default. `shape = "spline"` fits a
+clamped cubic through the same points, which is what a real bond loop
+looks like:
+
+```toml
+[[wire]]
+name      = "BW1a_D1_T7"
+points    = [[15.77e-3, 16.27e-3, 1.26e-3],    # the two feet
+             [20.27e-3, 16.27e-3, 1.06e-3]]
+shape     = "spline"
+start_vec = [0.0, 0.0, 2.45333e-3]             # takeoff at each foot,
+end_vec   = [0.0, 0.0, 2.45333e-3]             # pointing AWAY from it
+radius    = 0.13e-3
+sigma     = 3.77e7
+```
+
+`start_vec` and `end_vec` both point **away from their own pad** — for
+an ordinary bond both are simply `+z` — so a mirrored pair reads as
+mirrored in the file. Their **magnitude is read, not just their
+direction**: each is the cubic's control handle, and a plain two-foot
+loop passes `0.75*|v|` above the midpoint of its feet. The handle
+above puts a 3.00 mm loop on feet at 1.26 and 1.06 mm.
+
+Middle points are optional and unlimited — **zero is normal**, since
+two feet plus two takeoff vectors already determine the loop. Give
+them when the wire has to clear something; every declared point is
+pinned as an actual vertex of the sampled centreline, not merely
+interpolated.
+
+Sampling is curvature-adaptive: the chord length is whatever holds the
+sagitta under `sagitta` (default 0.1) times the wire radius, capped by
+`max_seglen` and the tree's leaf box.
+
+**This is not free, and it changes the answer.** A square
+rise-span-descend bond detours through two right angles: 8.18 mm where
+the spline through the same feet at the same apex is 6.50 mm. On the
+flagship module at R3:
+
+| | R (mΩ) | L (nH) | wire elements | wire setup |
+|---|---|---|---|---|
+| square polyline | 5.043 | 20.089 | 5400 | 30.5 s |
+| spline | 4.579 | 19.565 | 4300 | 97.0 s |
+
+The square path was overstating both, because it is 26% longer than
+the wire it stands for. The segment count *falls* (the spline is
+shorter, and a real loop's 1–2 mm bend radii are gentle against the
+segment cap), but setup still triples: an axis-aligned segment couples
+into one lattice orientation, a slanted one into two or three
+(measured 1.00 → 2.00 coupling entries per segment). Everything in the
+wire path is linear in segment count, so budget roughly **2–3× the
+wire coupler** — at R4 that is the largest single store, 2574 MB of a
+9.45 GB peak, so expect a peak nearer 12 GB. Nothing changes
+asymptotically, and the iteration count does not move (143 → 145
+matvecs).
+
+A spline tight enough to run away is refused rather than silently
+inflating the far-field cache. `examples/dbc_halfbridge_r3_spline.toml`
+is the flagship with all eight bonds as splines;
+`validation/validate_spline.py` gates the handle identity, the
+interpolation, the direction sense, the sagitta and the cost claim.
 
 ### Blender
 

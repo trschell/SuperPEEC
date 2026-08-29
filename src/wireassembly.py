@@ -185,6 +185,122 @@ def _tree_path(parent, pedge, psign, comp, u, v):
     return path
 
 
+# Sagitta tolerance for chord-sampling a spline centreline, as a
+# fraction of the wire RADIUS. A chord across a curve of radius R
+# departs from it by L^2/(8R); holding that below a tenth of the wire
+# radius keeps the discrete path inside the wire it represents, which
+# is the only scale the model has to compare against. 0.1 costs ~0.15%
+# in path length at the bend radii a real bond loop has (1-2 mm); the
+# error falls as L^2, so halving this quarters it.
+SPLINE_SAGITTA = 0.1
+
+
+def spline_points(points, start_vec, end_vec, radius, max_seglen=None,
+                  sagitta=SPLINE_SAGITTA, max_points=4096):
+    """Sample a clamped cubic spline bond loop into a chord polyline.
+
+    ``points`` is the centreline's fixed points: the two feet, plus any
+    number of middle points (ZERO is allowed and normal -- a plain
+    rise-and-fall loop is fully determined by its two feet and the two
+    end vectors).
+
+    ``start_vec`` and ``end_vec`` are the takeoff vectors AT THE FEET,
+    both pointing AWAY from their own pad -- for an ordinary bond both
+    are simply +z. The end vector is negated internally to become the
+    curve's travelling tangent; describing both feet the same way is
+    what makes a mirrored pair read as mirrored in the input file.
+
+    Their MAGNITUDE is read, not just their direction: each is the
+    cubic's control handle at that foot, so |start_vec| sets how far
+    the wire runs before it starts to turn. For a plain two-foot loop
+    the curve passes exactly ``0.75*|v|`` above the MIDPOINT of the
+    chord between the feet, so a handle of 2.45 mm on feet at
+    z = 1.26 and 1.06 mm puts the loop through 3.00 mm. (That
+    identity is exact at the chord midpoint; when the two feet sit at
+    different heights the curve's true maximum is a few microns
+    higher, since the crest shifts off centre.)
+
+    SAMPLING IS CURVATURE-ADAPTIVE, not uniform: the chord length is
+    whatever keeps the sagitta under ``sagitta`` * ``radius``, capped
+    by ``max_seglen``. A gentle loop therefore costs FEWER segments
+    than the square polyline it replaces (the square path detours
+    through two right angles and is longer), which is why splines are
+    cheaper here rather than more expensive.
+
+    Returns the sampled centreline as an (n, 3) array; feed it to
+    :class:`Wire` as an ordinary polyline.
+    """
+    from scipy.interpolate import CubicSpline
+    P = np.asarray(points, dtype=float)
+    if P.ndim != 2 or P.shape[0] < 2:
+        raise ValueError("a spline wire needs at least the two feet")
+    v0 = np.asarray(start_vec, dtype=float)
+    v1 = np.asarray(end_vec, dtype=float)
+    for nm, v in (('start_vec', v0), ('end_vec', v1)):
+        if v.shape != (3,) or not np.linalg.norm(v) > 0:
+            raise ValueError("%s must be a non-zero (x, y, z) vector"
+                             % nm)
+    chord = np.linalg.norm(np.diff(P, axis=0), axis=1)
+    if not np.all(chord > 0):
+        raise ValueError("spline points must be distinct")
+    t = np.concatenate([[0.0], np.cumsum(chord)])
+    # Chord-length parameter, so dP/dt is a velocity. The cubic's
+    # Bezier handle at the first span is dP/dt * chord[0]/3; setting
+    # dP/dt = 3*v/chord makes that handle exactly v, which is what
+    # gives the magnitude its stated meaning at any number of points.
+    # end_vec points out of its pad, so travelling tangent is -v1.
+    cs = CubicSpline(t, P, bc_type=((1, 3.0*v0/chord[0]),
+                                    (1, -3.0*v1/chord[-1])))
+
+    # curvature-adaptive chord length from a dense probe of the curve
+    tt = np.linspace(t[0], t[-1], 4001)
+    D, DD = cs(tt, 1), cs(tt, 2)
+    sp = np.linalg.norm(D, axis=1)
+    kappa = (np.linalg.norm(np.cross(D, DD), axis=1)
+             / np.maximum(sp**3, 1e-300))
+    kmax = float(kappa.max())
+    lmax = (np.sqrt(8.0*sagitta*radius/kmax) if kmax > 0
+            else np.inf)
+    if max_seglen is not None:
+        lmax = min(lmax, float(max_seglen))
+    C = cs(tt)
+    arc = float(np.linalg.norm(np.diff(C, axis=0), axis=1).sum())
+    n = max(2, int(np.ceil(arc/lmax - 1e-9)) + 1)
+    if n > max_points:
+        raise ValueError(
+            "spline wire needs %d sample points (min bend radius "
+            "%.3g m, chord limit %.3g m) -- over the %d cap. The "
+            "coupler cost and the far-field cache are linear in "
+            "segment count, so this would inflate them silently; "
+            "relax the loop (larger handle vectors or gentler middle "
+            "points) or raise max_points deliberately"
+            % (n, 1.0/kmax if kmax > 0 else np.inf, lmax, max_points))
+    # resample at equal ARC length, so segments are uniform along the
+    # curve rather than bunched where the parameter happens to run slow
+    cum = np.concatenate([[0.0], np.cumsum(
+        np.linalg.norm(np.diff(C, axis=0), axis=1))])
+    want = np.interp(np.linspace(0.0, arc, n), cum, tt)
+    # PIN the declared points as vertices. A middle point is a
+    # statement about where the wire goes -- most often a clearance
+    # the loop has to make -- and a chord that merely passes near it
+    # cuts inside by up to half a segment, which is far more than the
+    # sagitta budget. Interpolating the curve is not enough; the
+    # POLYLINE has to hit them, because the polyline is what is
+    # solved. Feet are already exact as the parameter endpoints.
+    want = np.unique(np.concatenate([want, t]))
+    # merging can put two samples very close together; drop a sample
+    # that crowds a pinned point rather than emit a degenerate chord
+    keep = np.ones(want.size, dtype=bool)
+    tol = 0.25*(arc/max(n - 1, 1))
+    for k in range(1, want.size - 1):
+        if not keep[k] or np.min(np.abs(want[k] - t)) < 1e-15:
+            continue                      # never drop a declared point
+        prev = want[:k][keep[:k]][-1]
+        if (np.interp(want[k], tt, cum) - np.interp(prev, tt, cum)) < tol:
+            keep[k] = False
+    return cs(want[keep])
+
+
 class Wire:
     """A bond wire: polyline -> chain of straight segments, each with
     the settled 1-4-8-12 cross-section (25 elements).

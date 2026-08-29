@@ -34,7 +34,9 @@ below.
 
 ## Resident items (largest first)
 
-### 1. Wire coupler blocks and tables — 2574 MB (22% of peak, 32% of resident)
+### 1. Wire coupler blocks and tables — 2574 MB (27% of the
+shipped 9.45 GB peak, 22% of the 11.73 GB peak this census
+started from, 32% of resident)
 
 `sol.wc` (`wirecoupler.WireCoupler`): complex64 2266 MB, float32
 142 MB, int64 92 MB, sparse 70 MB.

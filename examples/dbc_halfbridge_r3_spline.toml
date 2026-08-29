@@ -71,25 +71,27 @@
 # foot_model = "point"; cubic rungs (e.g. 0.2 or 0.1 mm uniform)
 # should switch to the calibrated "patch" feet.
 
-# THIS FILE IS THE R4 RUNG of the refinement ladder: the same
+# SPLINE VARIANT: the same module with the eight bonds as
+# shape="spline" loops instead of square rise-span-descend
+# polylines. Same feet, same 3 mm apex (handle |v| set to
+# (apex - mid_z)/0.75), so this is a like-for-like compare.
+#
+# THIS FILE IS THE R3 RUNG of the refinement ladder: the same
 # physical module as examples/dbc_halfbridge.toml (which carries the
 # demo pitch and the full conversion notes -- read that header first;
 # edits to the geometry belong THERE and should be mirrored here),
-# with [grid] set to the stretch resolution from studies/
-# dbc_ladder.py: 1/16 mm in-plane (divides every 1 mm feature),
-# 0.04 mm vertical (divides the 0.2 mm layers) over the fixed
-# 40 x 50 x 4 mm envelope. 51.2 million cells; measured peak (build
-# high-water) is 9.45 GB and post-build resident 6.79 GB at current
-# defaults -- see docs/memory_census_r4.md, measured 2026-08-26. (An
-# earlier "~29 GB" here was a 2026-08-14 study-driver figure, from
-# before the build-transient and GeoMG basis-mode work; it survived
-# as a stale comment long enough to be quoted back as fact.)
-# The pitch is still anisotropic (aspect 1.56), so foot_model stays
-# "point" per the ladder policy.
+# with [grid] set to the R3 resolution from studies/dbc_ladder.py:
+# 0.125 mm in-plane, 0.05 mm vertical over the fixed 40 x 50 x 4 mm
+# envelope. 10.2 million cells, ~12 GB, ~18 min end to end on a
+# 12-core/62 GB desktop -- the rung that is fine enough to resolve
+# the skin transition and the pad-edge crowding while still turning
+# round in a coffee break, which is why it is the working rung for
+# visualisation (see --export-glb and studies/blender_view.py).
+# Aspect stays 2.5, so foot_model stays "point" per the ladder policy.
 
 [grid]
-dims  = [640, 800, 100]
-pitch = [0.0625e-3, 0.0625e-3, 0.04e-3]
+dims  = [320, 400, 80]
+pitch = [0.125e-3, 0.125e-3, 0.05e-3]
 
 # -- bottom metal (eddy/image plane; Electrical 'G' in the source) --
 [[block]]
@@ -187,32 +189,44 @@ sigma  = 5.8e7
 # -- bond wires: high side, D1/D2 source -> T7 (BW1, BW3: 2 each) ---
 [[wire]]
 name   = "BW1a_D1_T7"
-points = [[15.77e-3, 16.27e-3, 1.26e-3], [15.77e-3, 16.27e-3, 3.0e-3],
-          [20.27e-3, 16.27e-3, 3.0e-3], [20.27e-3, 16.27e-3, 1.06e-3]]
+points = [[15.77000e-3, 16.27000e-3, 1.26000e-3],
+          [20.27000e-3, 16.27000e-3, 1.06000e-3]]
+shape     = "spline"
+start_vec = [0.0, 0.0, 2.45333e-3]
+end_vec   = [0.0, 0.0, 2.45333e-3]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3
 
 [[wire]]
 name   = "BW1b_D1_T7"
-points = [[15.77e-3, 17.77e-3, 1.26e-3], [15.77e-3, 17.77e-3, 3.0e-3],
-          [20.27e-3, 17.77e-3, 3.0e-3], [20.27e-3, 17.77e-3, 1.06e-3]]
+points = [[15.77000e-3, 17.77000e-3, 1.26000e-3],
+          [20.27000e-3, 17.77000e-3, 1.06000e-3]]
+shape     = "spline"
+start_vec = [0.0, 0.0, 2.45333e-3]
+end_vec   = [0.0, 0.0, 2.45333e-3]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3
 
 [[wire]]
 name   = "BW3a_D2_T7"
-points = [[15.77e-3, 26.27e-3, 1.26e-3], [15.77e-3, 26.27e-3, 3.0e-3],
-          [20.27e-3, 26.27e-3, 3.0e-3], [20.27e-3, 26.27e-3, 1.06e-3]]
+points = [[15.77000e-3, 26.27000e-3, 1.26000e-3],
+          [20.27000e-3, 26.27000e-3, 1.06000e-3]]
+shape     = "spline"
+start_vec = [0.0, 0.0, 2.45333e-3]
+end_vec   = [0.0, 0.0, 2.45333e-3]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3
 
 [[wire]]
 name   = "BW3b_D2_T7"
-points = [[15.77e-3, 27.77e-3, 1.26e-3], [15.77e-3, 27.77e-3, 3.0e-3],
-          [20.27e-3, 27.77e-3, 3.0e-3], [20.27e-3, 27.77e-3, 1.06e-3]]
+points = [[15.77000e-3, 27.77000e-3, 1.26000e-3],
+          [20.27000e-3, 27.77000e-3, 1.06000e-3]]
+shape     = "spline"
+start_vec = [0.0, 0.0, 2.45333e-3]
+end_vec   = [0.0, 0.0, 2.45333e-3]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3
@@ -220,32 +234,44 @@ max_seglen = 1.0e-3
 # -- bond wires: low side, D3/D4 source -> T1 (BW5, BW7: 2 each) ----
 [[wire]]
 name   = "BW5a_D3_T1"
-points = [[26.27e-3, 13.27e-3, 1.26e-3], [26.27e-3, 13.27e-3, 3.0e-3],
-          [26.27e-3, 6.77e-3, 3.0e-3], [26.27e-3, 6.77e-3, 1.06e-3]]
+points = [[26.27000e-3, 13.27000e-3, 1.26000e-3],
+          [26.27000e-3, 6.77000e-3, 1.06000e-3]]
+shape     = "spline"
+start_vec = [0.0, 0.0, 2.45333e-3]
+end_vec   = [0.0, 0.0, 2.45333e-3]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3
 
 [[wire]]
 name   = "BW5b_D3_T1"
-points = [[27.77e-3, 13.27e-3, 1.26e-3], [27.77e-3, 13.27e-3, 3.0e-3],
-          [27.77e-3, 6.77e-3, 3.0e-3], [27.77e-3, 6.77e-3, 1.06e-3]]
+points = [[27.77000e-3, 13.27000e-3, 1.26000e-3],
+          [27.77000e-3, 6.77000e-3, 1.06000e-3]]
+shape     = "spline"
+start_vec = [0.0, 0.0, 2.45333e-3]
+end_vec   = [0.0, 0.0, 2.45333e-3]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3
 
 [[wire]]
 name   = "BW7a_D4_T1"
-points = [[33.27e-3, 13.27e-3, 1.26e-3], [33.27e-3, 13.27e-3, 3.0e-3],
-          [33.27e-3, 6.77e-3, 3.0e-3], [33.27e-3, 6.77e-3, 1.06e-3]]
+points = [[33.27000e-3, 13.27000e-3, 1.26000e-3],
+          [33.27000e-3, 6.77000e-3, 1.06000e-3]]
+shape     = "spline"
+start_vec = [0.0, 0.0, 2.45333e-3]
+end_vec   = [0.0, 0.0, 2.45333e-3]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3
 
 [[wire]]
 name   = "BW7b_D4_T1"
-points = [[34.77e-3, 13.27e-3, 1.26e-3], [34.77e-3, 13.27e-3, 3.0e-3],
-          [34.77e-3, 6.77e-3, 3.0e-3], [34.77e-3, 6.77e-3, 1.06e-3]]
+points = [[34.77000e-3, 13.27000e-3, 1.26000e-3],
+          [34.77000e-3, 6.77000e-3, 1.06000e-3]]
+shape     = "spline"
+start_vec = [0.0, 0.0, 2.45333e-3]
+end_vec   = [0.0, 0.0, 2.45333e-3]
 radius = 0.13e-3
 sigma  = 3.77e7
 max_seglen = 1.0e-3

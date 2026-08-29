@@ -30,12 +30,35 @@ written today still means the same thing after the next refactor.
    `wirecoupler`, `vtkout` and the kernels already share — the
    doctrine just names it.)
 
-3. **Wires are polylines.** A `[[wire]]` is the physical centreline:
-   a list of 3-D points, a radius, a conductivity. Discretisation
-   (segment subdivision, ring/sector counts) is solver policy with
-   file-level overrides, not geometry. The validated defaults are the
-   1-4-8-12 cross-section and `max_seglen` at or below the tree's
-   leaf-box extent.
+3. **Wires are centrelines.** A `[[wire]]` is the physical
+   centreline: a list of 3-D points, a radius, a conductivity.
+   Discretisation (segment subdivision, ring/sector counts) is solver
+   policy with file-level overrides, not geometry. The validated
+   defaults are the 1-4-8-12 cross-section and `max_seglen` at or
+   below the tree's leaf-box extent.
+
+   The default `shape = "polyline"` joins the points with straight
+   runs. `shape = "spline"` instead fits a clamped cubic through
+   them and requires `start_vec` and `end_vec`: the takeoff vectors
+   at the two feet, each pointing AWAY from its own pad (both `+z`
+   for an ordinary bond), so a mirrored pair reads as mirrored in the
+   file. Their MAGNITUDE is read as well as their direction — each is
+   the cubic's control handle, and a plain two-foot loop passes
+   `0.75*|v|` above the midpoint of its feet. Middle points are
+   optional (zero is normal and fully determined) and unlimited; the
+   sampler pins every declared point as an actual vertex, because a
+   middle point is usually a clearance the loop has to make and a
+   chord that merely passes near it cuts inside.
+
+   Sampling is curvature-adaptive: chord length is whatever holds the
+   sagitta under `sagitta` (default 0.1) times the wire radius,
+   capped by `max_seglen` and the leaf box. THIS IS A COST KNOB, not
+   only an accuracy one — every wire-path store is linear in segment
+   count, and a slanted segment couples into two or three lattice
+   orientations where an axis-aligned one couples into a single one
+   (measured: ~2x the coupling entries and ~3x the wire setup on the
+   flagship bonds). A spline tight enough to run away is refused
+   rather than silently inflating the far-field cache.
 
 4. **Feet are found, not stated.** The first and last polyline points
    are the bond contacts. The attachment is a coverage-weighted PATCH

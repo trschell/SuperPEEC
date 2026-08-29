@@ -74,7 +74,8 @@ _SCHEMA = {
               'dispersion', 'f_ref', 'f1', 'f2'},
     'model': {'vhr'},
     'wire': {'name', 'points', 'radius', 'sigma', 'max_seglen',
-             'nring', 'nsect', 'foot_r0'},
+             'nring', 'nsect', 'foot_r0', 'shape', 'start_vec',
+             'end_vec', 'sagitta'},
     'port': {'p_cells', 'n_cells', 'p_box', 'n_box',
              'p_faces', 'n_faces', 'name', 'equipotential'},
     'solve': {'freq', 'rtol', 'current', 'foot_model', 'basis',
@@ -200,6 +201,41 @@ class Problem:
                 if req not in w:
                     raise ValueError("wire %d is missing %r"
                                      % (k, req))
+            nm = w.get('name', k)
+            shape = str(w.get('shape', 'polyline'))
+            if shape not in ('polyline', 'spline'):
+                raise ValueError("wire %r: shape must be 'polyline' "
+                                 "(default) or 'spline', not %r"
+                                 % (nm, shape))
+            ends = [key for key in ('start_vec', 'end_vec') if key in w]
+            if shape == 'spline':
+                # a spline is UNDER-determined without both takeoff
+                # vectors: with no middle points the two feet alone
+                # fix nothing but a straight line
+                missing = sorted({'start_vec', 'end_vec'} - set(ends))
+                if missing:
+                    raise ValueError(
+                        "wire %r: shape='spline' needs %s -- the "
+                        "takeoff vector at each foot, pointing AWAY "
+                        "from its own pad (both +z for an ordinary "
+                        "bond); its magnitude is the control handle "
+                        "and sets the loop height"
+                        % (nm, " and ".join(repr(v) for v in missing)))
+                for key in ends:
+                    v = np.asarray(w[key], dtype=float)
+                    if v.shape != (3,) or not np.linalg.norm(v) > 0:
+                        raise ValueError(
+                            "wire %r: %s must be a non-zero [x, y, z] "
+                            "vector in metres" % (nm, key))
+                if float(w.get('sagitta', 0.1)) <= 0:
+                    raise ValueError("wire %r: sagitta must be > 0"
+                                     % (nm,))
+            elif ends:
+                # silently ignoring these would let a typo'd shape key
+                # produce square wires that look deliberate
+                raise ValueError(
+                    "wire %r: %s only apply to shape='spline' (this "
+                    "wire is a %s)" % (nm, " and ".join(ends), shape))
         # [port] (one) or [[port]] (many, Z-matrix order = declaration
         # order). Each is face-style (p_faces/n_faces -- the LpPR
         # injection port, entries [ix, iy, iz, "+z"] naming a conductor
@@ -808,7 +844,7 @@ class Problem:
         refinement, so the cap is a per-rung property the solver
         derives from the tree -- wire discretisation refines with the
         mesh, by design."""
-        from wireassembly import Wire
+        from wireassembly import Wire, spline_points
         out = []
         for w in self.wire_specs:
             sigma = float(w['sigma'])
@@ -817,7 +853,16 @@ class Problem:
             ms = float(w['max_seglen']) if 'max_seglen' in w else None
             if seg_cap is not None:
                 ms = seg_cap if ms is None else min(ms, seg_cap)
-            out.append(Wire(np.asarray(w['points'], dtype=float),
+            pts = np.asarray(w['points'], dtype=float)
+            if str(w.get('shape', 'polyline')) == 'spline':
+                # sample the curve to chords the coupler will accept:
+                # curvature-adaptive, and never longer than the leaf
+                # box cap the tree just handed us
+                pts = spline_points(
+                    pts, w['start_vec'], w['end_vec'],
+                    float(w['radius']), max_seglen=ms,
+                    sagitta=float(w.get('sagitta', 0.1)))
+            out.append(Wire(pts,
                             float(w['radius']), sigma,
                             nring=int(w.get('nring', 3)),
                             nsect=tuple(w.get('nsect', (4, 8, 12))),
