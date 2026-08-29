@@ -64,6 +64,7 @@ correctness first, against the oracle.
 Run inside the toolbox.
 """
 
+import os
 import time
 
 import numpy as np
@@ -1268,16 +1269,46 @@ class Redistribution:
         idx = self.cells - self.org
         self.gidx = ((idx[:, 0]*self.grid[1] + idx[:, 1])*self.grid[2]
                      + idx[:, 2])
-        # Delta = 0 at the origin, negative offsets wrapped to the end
-        Ku = np.zeros((km, km) + self.pad)
-        Kc = np.zeros((km,) + self.pad)
+        # Delta = 0 at the origin, negative offsets wrapped to the end.
+        #
+        # BUILT ONE KERNEL AT A TIME. The batched form materialised the
+        # whole real table Ku (km^2 x pad) and then its whole spectrum
+        # Fu (km^2 x pad, complex) with BOTH alive across the transform.
+        # This transform is whole-bounding-box, so on a large sparse
+        # layout that is the dominant allocation in the entire solver:
+        # measured on the RSFQ XNOR at 100 nm cubic (box 621x721x34,
+        # pad 630x729x42 = 19.3M, km = 8) it is 9.9 GB of table plus
+        # 19.8 GB of spectrum, and the run was OOM-killed at 35.4 GB.
+        # One (m, n2) at a time keeps a single pad-sized real slab
+        # (154 MB here) instead, for the same spectra: the transform is
+        # independent per kernel pair, so this is a loop order change,
+        # not an approximation.
+        # STORED SINGLE (fp32 campaign, phase 5). After chunking, the
+        # spectra ARE the allocation: km^2 x pad complex, 19.8 GB on
+        # the XNOR against 154 MB for the working slab. They are
+        # spectra of mutual inductances -- smooth, O(1e-12..1e-7) in
+        # SI, nowhere near float32's 1e-38 floor, so unlike the leaf
+        # gather tables they need no scale factored out. Built in fp64
+        # by the transform and stored single; every consumer in
+        # apply_fft multiplies against complex128 data and so
+        # accumulates in double through numpy promotion, exactly as
+        # the wire coupling caches do. SPPEEC_MODE_FP64=1 restores
+        # double storage for A/B.
+        dt = (np.complex128 if os.environ.get('SPPEEC_MODE_FP64') == '1'
+              else np.complex64)
+        self.Fu = np.empty((km, km) + self.pad, dtype=dt)
+        self.Fc = np.empty((km,) + self.pad, dtype=dt)
         wrap = tuple(np.mod(D[:, a], self.pad[a]) for a in range(3))
+        slab = np.zeros(self.pad)
         for m in range(km):
-            Kc[(m,) + wrap] = Bc[:, m]
+            slab[...] = 0.0
+            slab[wrap] = Bc[:, m]
+            self.Fc[m] = sfft.fftn(slab)
             for n2 in range(km):
-                Ku[(m, n2) + wrap] = Bu[:, m, n2]
-        self.Fu = sfft.fftn(Ku, axes=(2, 3, 4))
-        self.Fc = sfft.fftn(Kc, axes=(1, 2, 3))
+                slab[...] = 0.0
+                slab[wrap] = Bu[:, m, n2]
+                self.Fu[m, n2] = sfft.fftn(slab)
+        del slab
         self._sfft = sfft
 
     def _scatter(self, v):
