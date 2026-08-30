@@ -3118,6 +3118,13 @@ class EquiTerminalSolver:
             nrhs = np.linalg.norm(rhs)
             resid = (np.linalg.norm(rhs - Aop*w)/nrhs if nrhs > 0
                      else 0.0)
+        # The solved mesh vector, kept for diagnostics: its tail is the
+        # redistribution-mode amplitudes, and comparing their norm to
+        # the loop part is what showed the modes are barely EXCITED on
+        # the RSFQ XNOR (modes/loops 1.7e-01 against equibar 1.2e+03)
+        # -- the reason sub-cell London modes buy nothing there. One
+        # reference to an array the caller already holds.
+        self._last_w = w
         with _spstatus.task('readout: expand basis'):
             i = self.Y.dot(w) + ihat
         # Z i = B phi with phi the PHYSICAL potential (see the module
