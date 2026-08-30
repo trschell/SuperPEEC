@@ -3107,16 +3107,28 @@ class EquiTerminalSolver:
         w, flag = krylov_solve(Aop, rhs, Pop, method=method, rtol=rtol,
                                maxiter=maxiter, inner_m=inner_m,
                                precision=precision)
-        nrhs = np.linalg.norm(rhs)
-        resid = np.linalg.norm(rhs - Aop*w)/nrhs if nrhs > 0 else 0.0
-        i = self.Y.dot(w) + ihat
+        # READOUT, phase by phase. This tail is a handful of operations
+        # and ought to cost about one matvec -- but on the RSFQ XNOR
+        # with sub-cell modes it ran ~40 minutes against the same-scale
+        # mode-free baseline's ~15 seconds, at the highest memory
+        # watermark of the whole run and only 183% CPU. It was invisible
+        # because the entire tail sat inside one 'solve f=...' task, so
+        # the status file could not say which line it was in. Name them.
+        with _spstatus.task('readout: residual'):
+            nrhs = np.linalg.norm(rhs)
+            resid = (np.linalg.norm(rhs - Aop*w)/nrhs if nrhs > 0
+                     else 0.0)
+        with _spstatus.task('readout: expand basis'):
+            i = self.Y.dot(w) + ihat
         # Z i = B phi with phi the PHYSICAL potential (see the module
         # docstring): no sign flip to undo here.
-        zi = self.apply_Z(i)
+        with _spstatus.task('readout: apply_Z'):
+            zi = self.apply_Z(i)
         if readout == 'lsqr':
-            phi = lsqr(self.Baug.astype(np.complex128), zi,
-                       atol=lsqr_tol, btol=lsqr_tol)[0]
-            v = (phi[self.pnode[+1]] - phi[self.pnode[-1]])/current
+            with _spstatus.task('readout: lsqr potential'):
+                phi = lsqr(self.Baug.astype(np.complex128), zi,
+                           atol=lsqr_tol, btol=lsqr_tol)[0]
+                v = (phi[self.pnode[+1]] - phi[self.pnode[-1]])/current
         else:
             # work-conjugate identity: for ANY ihat with Baug^T ihat = s,
             # ihat . (Baug phi) = s . phi = current*(phi_P - phi_N), and
@@ -3134,9 +3146,11 @@ class EquiTerminalSolver:
             # Cholesky, v-cycle accurate with GeoMG/BlockAMG), so the
             # readout is corrected by (Y^T ihat) . G^-1 d and its error
             # drops from O(|r|) to O(|r| x precond defect).
-            d = self.YT.dot(zi)
-            c = self._gram_solve(d)
-            v = (np.dot(ihat, zi) - np.dot(self.YT.dot(ihat), c))/current
+            with _spstatus.task('readout: gram correction'):
+                d = self.YT.dot(zi)
+                c = self._gram_solve(d, rtol=rtol)
+                v = ((np.dot(ihat, zi)
+                      - np.dot(self.YT.dot(ihat), c))/current)
         info = dict(matvecs=self.matvecs - n0, flag=flag, residual=resid,
                     time=time.perf_counter() - t0)
         if self.verbose:
@@ -3184,8 +3198,25 @@ class EquiTerminalSolver:
                                "(max |Baug^T ihat - s| = %.3g)" % err)
         return ihat
 
-    def _gram_solve(self, d, tol=1e-8, maxiter=60):
+    def _gram_solve(self, d, tol=None, maxiter=20, rtol=None):
         """``(Y^T Y)^-1 d`` to ``tol``: preconditioned lgmres on the Gram.
+
+        TOLERANCE FOLLOWS THE SOLVE (2026-08-29). This used to target a
+        hard-coded 1e-8 with a 60x10 = 600 iteration budget -- twice the
+        mesh solve's own budget, at a tolerance four decades tighter
+        than the rtol of the very solution it corrects. Each iteration
+        is ``YT.(Y.x)`` over the whole basis plus a full preconditioner
+        apply, so on a large basis this readout can cost more than the
+        solve: measured on the RSFQ XNOR with sub-cell modes (24M mode
+        columns on top of 8M plaquettes) it was 2400 s of a 2527 s
+        solve -- 95%, with the Krylov loop deliberately capped at 12
+        matvecs -- and it set the run's memory high-water mark.
+        It was invisible until the readout was split into named status
+        tasks, because the whole tail sat inside one 'solve f=...' task.
+        The correction's job is to take the readout error from O(|r|)
+        to O(|r| x gram defect), so a gram defect two decades below the
+        mesh rtol already contributes nothing next to |r| itself;
+        chasing 1e-8 buys accuracy the solution does not have.
 
         One preconditioner apply was exact enough at 147k cells
         (readout within 1.4e-5 of lsqr) but left a 0.5% readout error
@@ -3204,6 +3235,12 @@ class EquiTerminalSolver:
         # to be a good inverse, so right-preconditioned lgmres is the
         # method that is indifferent to both its scaling and its
         # asymmetry -- the same solver the mesh system uses.
+        if tol is None:
+            # two decades below the mesh solve's own tolerance, floored
+            # so a very loose rtol cannot make the correction useless
+            # and clamped so a very tight one cannot out-solve the old
+            # hard-coded value
+            tol = min(1e-4, max(1e-8, 1e-2*float(rtol or 1e-4)))
         nd = np.linalg.norm(d)
         c0 = self._precond(d)
         if nd == 0:
@@ -3216,7 +3253,7 @@ class EquiTerminalSolver:
                          outer_k=3, maxiter=maxiter)
         r0 = np.linalg.norm(d - Gop.matvec(c0))
         r1 = np.linalg.norm(d - Gop.matvec(c))
-        self._readout_gram = (r0/nd, r1/nd, int(flag))
+        self._readout_gram = (r0/nd, r1/nd, int(flag), float(tol))
         if min(r0, r1) > 1e-4*nd:
             import warnings
             warnings.warn("port-voltage readout: Gram solve reached only "
