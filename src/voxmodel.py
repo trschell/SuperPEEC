@@ -459,10 +459,39 @@ class VoxelModel:
         if len(vals) > 1:
             raise ValueError(
                 "%s: port %s spans %d conductivities [%s] -- the terminal "
-                "half-filament resistance is ambiguous there"
+                "half-filament resistance is ambiguous there. Use "
+                "port_sigma_faces() for the per-face array instead."
                 % (self.name, port, len(vals),
                    ", ".join("%g" % v for v in vals)))
         return vals[0]
+
+    def port_sigma_faces(self, port=0):
+        """Conductivity at EACH of a port's faces, in face order.
+
+        The scalar :meth:`port_sigma` cannot describe a port whose faces
+        sit in different metals -- or, once boundary cells carry
+        ``sigma_eff = sigma*fill``, a port that touches a PARTIAL CELL,
+        which on real layout geometry it routinely will. Each terminal
+        half-filament sits in exactly one cell, so there is no ambiguity
+        to resolve: the scalar was simply the wrong shape. This is the
+        same move ``resistances()`` already makes for interior filaments
+        on a mixed model, and the superconductor branch of
+        ``Terminals.set_frequency`` already indexes ``z`` per face.
+
+        Order matches ``Terminals.faces`` (pos entries then neg), so the
+        result can be used directly as a per-face ``R``.
+        """
+        p = self.port(port)
+        out = []
+        for arr in (p.pos, p.neg):
+            for e in arr:
+                out.append(float(self.sigma[int(e[0]), int(e[1]),
+                                            int(e[2])]))
+        out = np.asarray(out, dtype=float)
+        if not np.all(out > 0.0):
+            raise ValueError("%s: port %s has a face on a cell with zero "
+                             "conductivity" % (self.name, port))
+        return out
 
     # -- octree tree construction -----------------------------------
 

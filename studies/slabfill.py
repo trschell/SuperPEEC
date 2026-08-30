@@ -83,16 +83,18 @@ def run(nfull, frac=0.0, lam=None):
             sig[:, :, z0 + nfull] = SIG*frac
         else:
             lm[:, :, z0 + nfull] = lam/np.sqrt(frac)
-    # THE PORT DRIVES ONLY FULL CELLS. Terminals refuses a port face
-    # on a partial cell -- "port 0 spans 2 conductivities ... the
-    # terminal half-filament resistance is ambiguous there" -- which is
-    # a real obstacle for option 2 on production geometry, where a
-    # port lands wherever the layout puts it. Here the partial cell is
-    # fed through the lattice instead, which is a modelling choice the
-    # measurement below has to be read against.
+    # THE PORT DRIVES EVERY CELL OF THE SLAB, partial one included.
+    # That used to be refused ("port 0 spans 2 conductivities ... the
+    # terminal half-filament resistance is ambiguous there") because
+    # Terminals took ONE scalar sigma for the whole port; its R is now
+    # per-face, read from the cell each half-filament sits in. Nothing
+    # prescribes how much current the partial face takes: on the
+    # equipotential path the split across faces is SOLVED
+    # (terminal_split), so a partial cell draws less because it has
+    # more impedance.
     ports = []
     for j in range(NY):
-        for k in range(z0, z0 + nfull):
+        for k in range(z0, z0 + nfull + npart):
             ports.append(('p1', 'P', 0, j, k, '-x'))
             ports.append(('p1', 'N', NX - 1, j, k, '+x'))
     p = os.path.join(HERE, 'slabfill.vhr')

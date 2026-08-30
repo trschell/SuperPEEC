@@ -302,7 +302,20 @@ class Terminals:
         # nothing changes there. Superconductors have no meaningful
         # sigma at all (it may be 0 everywhere); their R is z(w)-based
         # and installed per frequency by set_frequency instead.
-        self.sigma = None if self.superconductor else model.port_sigma(port)
+        # Per-face, so a port may touch cells of different materials --
+        # or, with subpixel fills, a PARTIAL cell. The superconductor
+        # branch of set_frequency has always indexed z per face; this
+        # makes the normal-metal branch agree. `sigma` stays the scalar
+        # where one exists (terminal_impedance and reporting want it).
+        try:
+            self.sigma = (None if self.superconductor
+                          else model.port_sigma(port))
+        except ValueError:
+            # a port spanning materials (or touching a partial cell) is
+            # fine here: R below is per-face. Keep the scalar unset so
+            # anything that still wants one fails loudly rather than
+            # silently picking a material.
+            self.sigma = None
         others = [c for c in range(3) if c != self.axis]
         self.faces = []                     # (cell, sign, polarity)
         for arr, pol in ((p.pos, +1), (p.neg, -1)):
@@ -336,9 +349,17 @@ class Terminals:
             # the real thing before any apply
             self.R = np.zeros(self.n, dtype=np.complex128)
         else:
-            self.R = np.full(self.n,
-                             tm.terminal_resistance(l, self.orient,
-                                                    self.sigma, self.t_l))
+            # per-face sigma, read from the cell each terminal
+            # half-filament actually sits in (self.faces is already in
+            # that order) -- the same indexing the superconductor
+            # branch of set_frequency has always used for z
+            cells = np.array([c for c, _, _ in self.faces],
+                             dtype=np.int64)
+            sig = np.asarray(self._model.sigma, dtype=float)[
+                cells[:, 0], cells[:, 1], cells[:, 2]]
+            self.R = np.array([tm.terminal_resistance(l, self.orient,
+                                                      sv, self.t_l)
+                               for sv in sig])
         self._build_kernel(M)
 
     def set_frequency(self, freq):
