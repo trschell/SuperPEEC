@@ -66,7 +66,7 @@ import sppeec_status as _status
 MU0 = 4e-7*np.pi
 
 _SCHEMA = {
-    'grid': {'dims', 'pitch'},
+    'grid': {'dims', 'pitch', 'subpixel'},
     'cylinder': {'axis', 'center', 'radius', 'from', 'to',
                  'from_m', 'to_m', 'sigma', 'name'},
     'block': {'from', 'to', 'from_m', 'to_m', 'sigma', 'name',
@@ -541,6 +541,17 @@ class Problem:
         m.sigma = np.zeros(m.dims, dtype=np.float32)
         eps_blocks = []
         disp_blocks = []
+        # SUBPIXEL BLOCKS. `[grid] subpixel = true` stops rounding a
+        # block's physical bounds to the nearest cell boundary and
+        # represents the boundary cells for what they are: partial. A
+        # cell cut by an axis-aligned plane is a LAMINATE, whose exact
+        # effective conductivity is anisotropic (arithmetic along the
+        # layers, harmonic across), so this is not an approximation of
+        # the material law -- it is the material law the staircase was
+        # approximating. See VoxelModel.laminate_sigma.
+        subpix = bool(g.get('subpixel', False))
+        cover = np.ones(m.dims, dtype=np.float64) if subpix else None
+        cut_axis = None
         for b in self._doc.get('block', []):
             has_cells = ('from' in b) or ('to' in b)
             has_m = ('from_m' in b) or ('to_m' in b)
@@ -548,7 +559,46 @@ class Problem:
                 raise ValueError("block %r: give from/to (cells) OR "
                                  "from_m/to_m (metres)"
                                  % b.get('name', '?'))
-            if has_m:
+            frac_axis = None
+            if has_m and subpix:
+                # which axes are NOT commensurate with the pitch?
+                nm = b.get('name', '?')
+                bad = []
+                for k in range(3):
+                    for v in (b['from_m'][k], b['to_m'][k]):
+                        c = float(v)/float(m.d[k])
+                        if abs(c - round(c)) > 1e-9:
+                            bad.append(k)
+                            break
+                bad = sorted(set(bad))
+                if len(bad) > 1:
+                    raise ValueError(
+                        "block %r is off-grid on axes %s. Subpixel v1 "
+                        "cuts ONE axis per model: a cell cut on two "
+                        "axes at once is not a laminate, and neither "
+                        "the arithmetic nor the harmonic mean applies "
+                        "to it. Make the other axis commensurate, or "
+                        "set [grid] subpixel = false to snap."
+                        % (nm, bad))
+                if bad:
+                    frac_axis = bad[0]
+                    if cut_axis is not None and cut_axis != frac_axis:
+                        raise ValueError(
+                            "block %r is off-grid on axis %d but an "
+                            "earlier block cut axis %d. Subpixel v1 "
+                            "carries ONE cut axis per model (the same "
+                            "restriction the [[cylinder]] path has)."
+                            % (nm, frac_axis, cut_axis))
+                    cut_axis = frac_axis
+                # the CELL RANGE is the outer hull of the coverage, so
+                # a partial cell is included and then weighted below
+                lo, hi = [], []
+                for k in range(3):
+                    a = float(b['from_m'][k])/float(m.d[k])
+                    z = float(b['to_m'][k])/float(m.d[k])
+                    lo.append(int(np.floor(a + 1e-9)))
+                    hi.append(int(np.ceil(z - 1e-9)))
+            elif has_m:
                 lo = self._snap(b['from_m'], m.d, b.get('name', '?'))
                 hi = self._snap(b['to_m'], m.d, b.get('name', '?'))
             else:
@@ -575,6 +625,21 @@ class Problem:
                     raise ValueError("block %r: %s only means "
                                      "something under dispersion"
                                      % (b.get('name', '?'), k))
+            if subpix and frac_axis is not None:
+                # per-cell coverage along the cut axis, clipped to this
+                # block's cell range; other axes are commensurate so
+                # their coverage is exactly 1
+                cv = self._cover(b['from_m'][frac_axis],
+                                 b['to_m'][frac_axis],
+                                 m.d[frac_axis], m.dims[frac_axis])
+                shape = [1, 1, 1]
+                shape[frac_axis] = m.dims[frac_axis]
+                blk = [slice(lo[k], hi[k]) for k in range(3)]
+                cover[tuple(blk)] = np.minimum(
+                    cover[tuple(blk)],
+                    cv.reshape(shape)[tuple(
+                        blk[k] if k == frac_axis else slice(None)
+                        for k in range(3))])
             if 'sigma' in b:
                 m.sigma[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = \
                     float(b['sigma'])
@@ -651,6 +716,28 @@ class Problem:
                                fl, fh))
                     disp_blocks.append((lo, hi, float(eps_inf),
                                         float(deps), fl, fh))
+        if subpix and cut_axis is not None:
+            # ONE call, after every block has painted: the laminate rule
+            # turns the coverage into an anisotropic sigma (and leaves
+            # `sigma` holding the in-plane value, so occupancy and every
+            # port helper are unchanged). `slab_fill` is what tells the
+            # solver to build the matching partial-cell dL.
+            if np.any((cover > 0.0) & (cover < 1.0)
+                      & (np.asarray(m.sigma) == 0.0)):
+                raise ValueError(
+                    "a partial cell carries no conductivity -- subpixel "
+                    "coverage and the painted sigma disagree")
+            # cross='full': the CUT AXIS keeps the bulk sigma. The
+            # laminate's harmonic mean is the value for a path passing
+            # all the way THROUGH a cell, and no filament does -- the
+            # half-pair rule gives it the top half of one cell and the
+            # bottom half of the next, so the through-plane value is a
+            # HALF-CELL quantity this array cannot express (see
+            # laminate_sigma). In-plane is exact and is what
+            # studies/slabfill.py measured; the cut axis is left alone
+            # rather than given a value that was never tested.
+            m.laminate_sigma(cover, cut_axis, cross='full')
+            m.slab_fill = dict(fill=cover, axis=int(cut_axis))
         for k, cy in enumerate(self._doc.get('cylinder', [])):
             axis = 'xyz'.index(str(cy['axis']))
             t1, t2 = [ax for ax in range(3) if ax != axis]
@@ -777,6 +864,20 @@ class Problem:
             ax, sg = _FACE[str(e[3])]
             out.append((int(e[0]), int(e[1]), int(e[2]), ax, sg))
         return out
+
+    @staticmethod
+    def _cover(lo_m, hi_m, pitch, n):
+        """Per-cell coverage of ``[lo_m, hi_m]`` on one axis, in [0, 1].
+
+        Exact 1-D clip: cell ``k`` spans ``[k*p, (k+1)*p]``, so its
+        coverage is the overlap over the pitch. Whole cells give 1.0 and
+        the two ends give the fraction the staircase would otherwise
+        round away.
+        """
+        edges = np.arange(n + 1)*float(pitch)
+        ov = np.minimum(edges[1:], float(hi_m)) - np.maximum(edges[:-1],
+                                                             float(lo_m))
+        return np.clip(ov/float(pitch), 0.0, 1.0)
 
     @staticmethod
     def _snap(coords, pitch, name):

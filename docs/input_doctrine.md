@@ -254,6 +254,31 @@ written today still means the same thing after the next refactor.
     of the correction; the residual is staircase voxelization of
     curved cross-sections, not the mode basis.
 
+14b. **`[grid] subpixel = true` represents partial cells instead of
+    rounding them away** (added 2026-08-31). A `[[block]]` whose
+    `from_m`/`to_m` do not land on cell boundaries is otherwise snapped
+    to the nearest boundary with a warning — a 135 nm layer on a 100 nm
+    pitch simply becomes a different object. With subpixel on, the
+    boundary cells keep their exact fractional coverage and carry the
+    LAMINATE effective conductivity: arithmetic mean along the layers,
+    which for a layered medium is exact rather than a bound. Measured on
+    a 75 nm film at 30 nm pitch (2.5 cells) against the same film solved
+    at 15 nm where it is 5 cells exactly: R error 16.67% → 0.00%, L error
+    2.42% → 0.30%. The remaining L error is the partial cell's geometric
+    footprint in the mutual tables, corrected in turn by
+    `subpixel.slab_dL`, which the solver raises automatically.
+
+    SCOPE, and these are hard errors rather than silent approximations:
+    ONE cut axis per model, and at most one off-grid axis per block — a
+    cell cut on two axes at once is not a laminate and neither mean
+    applies to it. The CUT AXIS itself keeps the bulk sigma: the
+    laminate's harmonic mean is the value for a path passing all the way
+    through a cell, and no filament does that — the half-pair rule gives
+    a filament the top half of one cell and the bottom half of the next,
+    so the through-plane value is a HALF-CELL quantity the per-cell array
+    cannot express. In-plane is exact and is what is measured; the cut
+    axis is left alone rather than given an untested value.
+
 14. **Subpixel geometry starts with `[[cylinder]]`** (added
     2026-08-18; stage A of the subpixel program). A round conductor
     is declared by `axis`, `center` (the two transverse coordinates,

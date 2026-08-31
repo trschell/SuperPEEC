@@ -2167,6 +2167,14 @@ class EquiTerminalSolver:
         if getattr(model, 'subpixel', None):
             from subpixel import build_dL
             self.dL_near = build_dL(model, M)
+        elif getattr(model, 'slab_fill', None):
+            # axis-aligned subpixel: stage A made the material law exact,
+            # this is the geometric footprint the mutual tables still
+            # have wrong (a half-filled cell presents a full-cell bar)
+            from subpixel import slab_dL
+            sf = model.slab_fill
+            with _spstatus.task('subpixel dL'):
+                self.dL_near = slab_dL(model, M, sf['fill'], sf['axis'])
         with _spstatus.task('terminal coupler'):
             if fmm:
                 try:

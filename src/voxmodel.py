@@ -183,6 +183,11 @@ class VoxelModel:
         # isotropic, i.e. `sigma` serves every filament orientation --
         # every existing model. See `laminate_sigma`.
         self.sigma_axis = None
+        # OPTIONAL {'fill': array, 'axis': int} for an axis-aligned
+        # subpixel model: what `laminate_sigma` was built from, kept so
+        # the solver can raise the matching partial-cell inductance
+        # correction (subpixel.slab_dL). None on every ordinary model.
+        self.slab_fill = None
         # subpixel stage-B data: dict(axis=, k=, cells={(t1,t2): (k,k)
         # sub-fill array}) for cylinder-boundary cells
         self.subpixel = None
@@ -325,7 +330,7 @@ class VoxelModel:
         return 100.0*float(self.struc().sum())/float(np.prod(self.dims))
 
     def laminate_sigma(self, fill, axis, sigma_out=0.0,
-                       open_floor=0.0):
+                       open_floor=0.0, cross='harmonic'):
         """Per-axis conductivity for cells cut by an AXIS-ALIGNED plane.
 
         A cell that a layer boundary cuts is a LAMINATE: conductor for a
@@ -353,6 +358,24 @@ class VoxelModel:
 
         EXACT ONLY FOR AN AXIS-ALIGNED CUT. A diagonal or curved
         boundary is not a laminate and neither mean applies.
+
+        ``cross`` selects what the CUT AXIS carries. 'harmonic' is the
+        laminate value above -- correct for a path passing all the way
+        THROUGH the cell. 'full' leaves that axis at the bulk sigma.
+
+        THE HALF-CELL PROBLEM, which is why 'full' exists and why the
+        TOML path uses it. No filament passes all the way through a
+        cell: the half-pair rule gives a filament the TOP half of its
+        lower cell and the BOTTOM half of its upper one. A cell filled
+        f = 0.5 from the bottom has an all-metal LOWER half, so a
+        filament arriving from below is entirely in metal and must
+        conduct fully -- while the whole-cell harmonic mean is zero and
+        would block it. The through-plane effective conductivity is
+        therefore a HALF-CELL quantity that differs between a cell's
+        upper and lower half, which this array cannot express. Until it
+        does, 'full' is the honest cut-axis value: it reproduces
+        exactly the in-plane case that studies/slabfill.py measured and
+        claims nothing about the direction that was never measured.
 
         A TRUE OPEN IS NOT REPRESENTABLE, and the model says so rather
         than pretending. Against vacuum the harmonic mean is exactly
@@ -396,9 +419,15 @@ class VoxelModel:
             # per-cell occupancy model, not physics.
             ser = np.maximum(ser, float(open_floor)*np.asarray(
                 self.sigma, dtype=np.float64))
+        if cross not in ('harmonic', 'full'):
+            raise ValueError("cross must be 'harmonic' or 'full', got %r"
+                             % (cross,))
         out = np.empty(tuple(self.dims) + (3,), dtype=np.float64)
         for a in range(3):
-            out[..., a] = ser if a == axis else par
+            if a != axis:
+                out[..., a] = par
+            else:
+                out[..., a] = sig if cross == 'full' else ser
         self.sigma_axis = out
         self.sigma = np.asarray(par, dtype=self.sigma.dtype)
         return out

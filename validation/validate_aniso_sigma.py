@@ -153,6 +153,65 @@ def main():
           "|z| across %.3e vs along %.3e"
           % (np.abs(zc).max(), np.abs(za).max()))
 
+    # -- F: the TOML wiring, end to end -------------------------------
+    # A 75 nm film on a 30 nm pitch is 2.5 cells: the staircase rounds it
+    # to 2 or 3. The reference is the SAME physical object at 15 nm,
+    # where it is 5 cells exactly.
+    import sppeec_input
+    body = """
+[grid]
+dims  = [%d, %d, %d]
+pitch = %g
+%s
+
+[[block]]
+from_m = [0.0, 0.0, 0.0]
+to_m   = [6.0e-7, 1.8e-7, 6.0e-8]
+sigma  = 5.8e7
+
+[[block]]
+from_m = [0.0, 0.0, 1.2e-7]
+to_m   = [6.0e-7, 1.8e-7, 1.95e-7]
+sigma  = 5.8e7
+
+[port]
+p_faces = [%s]
+n_faces = [%s]
+equipotential = true
+
+[solve]
+freq = [1e10]
+"""
+
+    def run(pitch, nx, ny, nz, zlo, zhi, sub):
+        pf = ", ".join('[0, %d, %d, "-x"]' % (j, k)
+                       for j in range(ny) for k in range(zlo, zhi))
+        nf = ", ".join('[%d, %d, %d, "+x"]' % (nx - 1, j, k)
+                       for j in range(ny) for k in range(zlo, zhi))
+        txt = body % (nx, ny, nz, pitch,
+                      "subpixel = true" if sub else "", pf, nf)
+        prob = sppeec_input.loads(txt)
+        mm = prob.model()
+        MM = prob.tree(mm)
+        Z, _ = prob.sweeper(mm, MM).solve(prob.freqs[0])
+        return Z, mm
+
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        Zr, _ = run(1.5e-8, 40, 12, 16, 8, 13, False)     # exact
+        Zs, _ = run(3.0e-8, 20, 6, 8, 4, 7, False)        # staircase
+        Za, ma = run(3.0e-8, 20, 6, 8, 4, 7, True)        # subpixel
+    er = abs(Zs.real/Zr.real - 1.0)
+    ea = abs(Za.real/Zr.real - 1.0)
+    check("subpixel is declared per grid and reaches the model",
+          ma.sigma_axis is not None and ma.slab_fill is not None,
+          "axis %s" % (ma.slab_fill or {}).get('axis'))
+    check("a 2.5-cell film: staircase R is badly wrong",
+          er > 0.10, "%.2f%% off the exact-pitch reference" % (100*er))
+    check("subpixel recovers R to well under 1%",
+          ea < 0.01, "%.3f%% (from %.1f%%)" % (100*ea, 100*er))
+
     print("\n%d checks failed" % len(FAIL))
     return 1 if FAIL else 0
 
