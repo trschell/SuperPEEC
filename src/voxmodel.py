@@ -179,6 +179,10 @@ class VoxelModel:
         # sigma_eff = sigma*fill; Lp is full-cell until stage B.
         # (named fill_frac: .fill() is the percent-occupancy METHOD)
         self.fill_frac = None
+        # OPTIONAL per-axis conductivity, shape dims + (3,). None means
+        # isotropic, i.e. `sigma` serves every filament orientation --
+        # every existing model. See `laminate_sigma`.
+        self.sigma_axis = None
         # subpixel stage-B data: dict(axis=, k=, cells={(t1,t2): (k,k)
         # sub-fill array}) for cylinder-boundary cells
         self.subpixel = None
@@ -319,6 +323,85 @@ class VoxelModel:
     def fill(self):
         """Occupied fraction of the bounding box, as a percentage."""
         return 100.0*float(self.struc().sum())/float(np.prod(self.dims))
+
+    def laminate_sigma(self, fill, axis, sigma_out=0.0,
+                       open_floor=0.0):
+        """Per-axis conductivity for cells cut by an AXIS-ALIGNED plane.
+
+        A cell that a layer boundary cuts is a LAMINATE: conductor for a
+        fraction ``fill`` of its ``axis`` extent, ``sigma_out`` for the
+        rest. A laminate's effective conductivity is anisotropic, and
+        for a layered medium the two values are EXACT rather than
+        bounds:
+
+            along the layers   arithmetic mean   f*sigma + (1-f)*sigma_out
+            across the layers  harmonic mean     1/(f/sigma + (1-f)/sigma_out)
+
+        The isotropic ``sigma_eff = sigma*fill`` the subpixel program
+        carries is exactly the arithmetic mean, so it is right for
+        current IN THE PLANE OF THE CUT and wrong across it: against
+        vacuum the harmonic mean is ZERO -- the open circuit a broken
+        path physically is -- where the scalar gives a finite
+        resistance. On a layer stack that difference is not academic:
+        vias carry current across precisely the boundaries that create
+        partial cells.
+
+        ``fill`` is an array over the lattice, 1.0 where a cell is
+        whole. Sets ``self.sigma_axis``; ``self.sigma`` keeps the
+        in-plane (arithmetic) value, so occupancy, ``sigma_values`` and
+        every port helper are unchanged.
+
+        EXACT ONLY FOR AN AXIS-ALIGNED CUT. A diagonal or curved
+        boundary is not a laminate and neither mean applies.
+
+        A TRUE OPEN IS NOT REPRESENTABLE, and the model says so rather
+        than pretending. Against vacuum the harmonic mean is exactly
+        zero, but occupancy in this solver is per CELL while that
+        blockage is per DIRECTION, so a filament whose two cells are
+        both "occupied" always exists. That only bites for a CRACK --
+        a partial cell sandwiched between two whole ones:
+
+            [full][partial][full]      the z path is blocked but the
+                                       filament exists -> raises
+
+        A LAYER STACK never produces it: the cut is at the top (or
+        bottom) of a layer and the neighbour beyond is spacer, i.e. an
+        empty cell, so the occupancy stencil has already removed that
+        filament. ``open_floor`` gives the crack case a small non-zero
+        conductivity instead, for callers who want a number rather than
+        an exception; it is a NUMERICAL open, not a physical one, and
+        the conditioning cost is the caller's to measure.
+        """
+        f = np.clip(np.asarray(fill, dtype=np.float64), 0.0, 1.0)
+        if f.shape != tuple(self.dims):
+            raise ValueError("fill must have the lattice shape %s, got %s"
+                             % (tuple(self.dims), f.shape))
+        axis = int(axis)
+        if axis not in (0, 1, 2):
+            raise ValueError("axis must be 0, 1 or 2")
+        sig = np.asarray(self.sigma, dtype=np.float64)
+        so = float(sigma_out)
+        par = f*sig + (1.0 - f)*so
+        with np.errstate(divide='ignore', invalid='ignore'):
+            denom = np.where(sig > 0, f/np.where(sig > 0, sig, 1.0), np.inf)
+            if so > 0.0:
+                denom = denom + (1.0 - f)/so
+            else:
+                denom = np.where(f >= 1.0, denom, np.inf)
+            ser = np.where(np.isfinite(denom) & (denom > 0),
+                           1.0/np.where(denom > 0, denom, 1.0), 0.0)
+        if open_floor > 0.0:
+            # numerical open: keep the filament, make it (almost) not
+            # conduct. See the docstring -- this is a workaround for the
+            # per-cell occupancy model, not physics.
+            ser = np.maximum(ser, float(open_floor)*np.asarray(
+                self.sigma, dtype=np.float64))
+        out = np.empty(tuple(self.dims) + (3,), dtype=np.float64)
+        for a in range(3):
+            out[..., a] = ser if a == axis else par
+        self.sigma_axis = out
+        self.sigma = np.asarray(par, dtype=self.sigma.dtype)
+        return out
 
     def sigma_values(self):
         """Sorted distinct nonzero conductivities present, in S/m."""
@@ -742,7 +825,7 @@ class VoxelModel:
         if self.superconductor or self.epsilon is not None:
             return self._complex_resistances(M, freq)
         vals = self.sigma_values()
-        if vals.size == 1:
+        if vals.size == 1 and self.sigma_axis is None:
             # Uniform: keep the scalar. An array of one repeated value is
             # bit-identical through traverseRL (verified), but the scalar
             # costs nothing and leaves every existing result untouched.
@@ -760,6 +843,7 @@ class VoxelModel:
         # each and its resistance is that series pair:
         #     (l_d/2)/(sigma_A*A_d) + (l_d/2)/(sigma_B*A_d).
         sig = np.asarray(self.sigma, dtype=np.float64)
+        aniso = self.sigma_axis
         l = [float(v) for v in np.asarray(M.e.l, dtype=float)]
         area = (l[1]*l[2], l[0]*l[2], l[0]*l[1])       # perp to x, y, z
         out = []
@@ -767,8 +851,14 @@ class VoxelModel:
             c = filament_cells(M, leaf)
             up = c.copy()
             up[:, axis] += 1
-            sa = sig[c[:, 0], c[:, 1], c[:, 2]]
-            sb = sig[up[:, 0], up[:, 1], up[:, 2]]
+            # ANISOTROPY LIVES HERE and nowhere else: this loop already
+            # ran once per filament ORIENTATION, it merely read the same
+            # isotropic sigma each time. R stays diagonal, so the
+            # Toeplitz/FMM structure is untouched -- the same argument
+            # that admitted per-cell conductivity in the first place.
+            sg = sig if aniso is None else aniso[..., axis]
+            sa = sg[c[:, 0], c[:, 1], c[:, 2]]
+            sb = sg[up[:, 0], up[:, 1], up[:, 2]]
             if not (np.all(sa > 0) and np.all(sb > 0)):
                 raise RuntimeError(
                     "%s: a filament spans a cell with zero conductivity -- "
@@ -797,8 +887,24 @@ class VoxelModel:
         occ = self.struc().astype(bool)
         l = [float(v) for v in np.asarray(M.e.l, dtype=float)]
         area = (l[1]*l[2], l[0]*l[2], l[0]*l[1])       # perp to x, y, z
+        # Anisotropic partial cells: z is an IMPEDANCE, so the laminate's
+        # two means swap over relative to sigma -- along the layers the
+        # conductances add (harmonic in z), across them the impedances
+        # add (arithmetic in z). Scaling z by sigma/sigma_axis per
+        # orientation carries that through whatever material law
+        # impedance_density applied, London and dielectric included.
+        zax = None
+        if self.sigma_axis is not None:
+            base = np.asarray(self.sigma, dtype=np.float64)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                ratio = np.where(self.sigma_axis > 0,
+                                 base[..., None]/np.where(
+                                     self.sigma_axis > 0,
+                                     self.sigma_axis, 1.0),
+                                 np.inf)
+            zax = z[..., None]*ratio
         vals = np.unique(z[occ])
-        if vals.size == 1:
+        if vals.size == 1 and zax is None:
             zz = complex(vals[0])
             re = l[1]*zz/area[1]
             rf = l[0]*zz/area[0]
@@ -809,8 +915,9 @@ class VoxelModel:
             c = filament_cells(M, leaf)
             up = c.copy()
             up[:, axis] += 1
-            za = z[c[:, 0], c[:, 1], c[:, 2]]
-            zb = z[up[:, 0], up[:, 1], up[:, 2]]
+            zg = z if zax is None else zax[..., axis]
+            za = zg[c[:, 0], c[:, 1], c[:, 2]]
+            zb = zg[up[:, 0], up[:, 1], up[:, 2]]
             if np.any(za == 0.0) or np.any(zb == 0.0):
                 raise RuntimeError(
                     "%s: a filament spans a cell with zero impedance "
@@ -988,7 +1095,7 @@ One node per cell, at its centre. The current crossing a
                  "  extent        %g x %g x %g m"
                  % tuple(np.asarray(self.dims)*self.d)]
         vals = self.sigma_values()
-        if vals.size == 1:
+        if vals.size == 1 and self.sigma_axis is None:
             lines.append("  conductivity  %g S/m" % vals[0])
         elif vals.size == 0:
             lines.append("  conductivity  none (lossless superconductor)")
