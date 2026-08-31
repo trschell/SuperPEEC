@@ -34,9 +34,18 @@ justification for stage C.2: enrichment amplitudes must be SOLVED
 (net-zero modes over these same sub-prism tables, amplitudes from
 the system), never imposed. The machinery here is C.2's testbed.
 
-Scope: filaments along the cylinder axis only; transverse and
-cross-orientation corrections remain future work on this table
-structure.
+Scope: the CYLINDER path covers filaments along the cylinder axis
+only; transverse and cross-orientation corrections remain future work
+on that table structure.
+
+``slab_dL`` (2026-08-30) is the same formula for an AXIS-ALIGNED SLAB
+cut, which is the RSFQ layer-stack case and is easier in two ways: the
+fill varies along ONE axis only, so the sub-division is 1-D rather than
+k x k, and both filament orientations in the plane of the cut take the
+correction with the same weights. It covers the two IN-PLANE
+orientations; a filament running ACROSS the cut is a length problem,
+not a cross-section one, and is not handled here (nor is it in the
+cylinder path).
 """
 import numpy as np
 import scipy.sparse as sp
@@ -71,6 +80,138 @@ def _profile_weights(model, freq):
         area = sub.ravel()*(d[t1]/k)*(d[t2]/k)
         out[cell] = (w.astype(complex), area)
     return out
+
+
+def slab_weights(fill, k):
+    """1-D sub-prism weights for a cell filled ``fill`` of its extent.
+
+    Uniform current density over the clipped part, normalised. Returns
+    ``None`` for a whole cell, where the correction is identically zero.
+    """
+    f = float(fill)
+    if f >= 1.0 - 1e-12:
+        return None
+    h = 1.0/k
+    edges = np.arange(k + 1)*h
+    w = np.clip(np.minimum(edges[1:], f) - edges[:-1], 0.0, None)
+    tot = w.sum()
+    if tot <= 0.0:
+        return None
+    return w/tot
+
+
+def slab_dL(model, M, fill, axis, k=8, window=2):
+    """Partial-cell inductance correction for an AXIS-ALIGNED SLAB cut.
+
+    ``fill`` is the per-cell filled fraction along ``axis`` (1.0 where
+    whole); ``axis`` is the cut direction, so the corrected filaments
+    are the two IN-PLANE orientations. Same identity as the cylinder
+    path::
+
+        dL_ij = w_i^T T(sep) w_j - u^T T(sep) u
+
+    with T the exact box-mutual table over sub-prisms. Both terms use
+    the SAME kernel, so dL vanishes identically on whole cells and the
+    Toeplitz far field is untouched: the correction is local, decaying
+    like the shape-difference multipoles (measured on a z-cut at fill
+    0.5: -21.8% of the pair at one cell, -12.1% at two, -8.2% at three,
+    but the ABSOLUTE dL falls 2.14 -> 0.60 -> 0.27 e-15, which is what
+    makes a small window enough).
+
+    Cheaper than the cylinder case: the fill varies along one axis only,
+    so the sub-division is 1-D (k pieces, not k*k), and a filament's two
+    end cells share a fill because they differ only in an in-plane
+    index.
+
+    Returns a sparse (efg, efg) real matrix, or None if nothing is
+    partial.
+    """
+    from equiterminal import filament_cells
+    fill = np.asarray(fill, dtype=float)
+    axis = int(axis)
+    d = np.asarray(model.d, dtype=float)
+    fil_axis, fil_cell = filament_cells(M)
+    u = np.full(k, 1.0/k)
+
+    rows, cols, vals = [], [], []
+    Tcache = {}
+
+    def table(orient, off):
+        """Sub-prism mutual block for two `orient` filaments at cell
+        offset `off`. Translation invariant, so cached per offset."""
+        key = (orient, off)
+        if key in Tcache:
+            return Tcache[key]
+        h = d[axis]/k
+        lo = np.zeros((2*k, 3))
+        hi = np.zeros((2*k, 3))
+        for b in range(2):
+            base = np.array(off, dtype=float)*d if b else np.zeros(3)
+            for s in range(k):
+                r = b*k + s
+                lo[r] = base
+                hi[r] = base + d
+                # the filament spans centre to centre along `orient`
+                lo[r, orient] = base[orient] + 0.5*d[orient]
+                hi[r, orient] = base[orient] + 1.5*d[orient]
+                lo[r, axis] = base[axis] + s*h
+                hi[r, axis] = base[axis] + (s + 1)*h
+        T = box_mutual_matrix(lo, hi, orient)[:k, k:]
+        Tcache[key] = T
+        return T
+
+    for orient in [c for c in range(3) if c != axis]:
+        sel = np.nonzero(fil_axis == orient)[0]
+        if sel.size == 0:
+            continue
+        cells = fil_cell[sel]
+        # a filament's two end cells differ only in `orient`, so they
+        # share the cut-axis index and therefore the fill
+        wv = {}
+        for n, c in enumerate(cells):
+            w = slab_weights(fill[c[0], c[1], c[2]], k)
+            if w is not None:
+                wv[n] = w
+        if not wv:
+            continue
+        # EVERY PAIR WITH AT LEAST ONE PARTIAL END, not just
+        # partial-partial. dL_ij = w_i^T T w_j - u^T T u is nonzero as
+        # soon as ONE of the two differs from uniform, and those pairs
+        # dominate: a partial cell couples to the whole slab under it
+        # and to the ground plane, none of which are partial. (Pairing
+        # only partials recovered ~10% of the correction, measured.)
+        by_cell = {}
+        for n, c in enumerate(cells):
+            by_cell[(int(c[0]), int(c[1]), int(c[2]))] = n
+        rng = range(-int(window), int(window) + 1)
+        seen = set()
+        for ia in sorted(wv):
+            ca = cells[ia]
+            for dx0 in rng:
+                for dx1 in rng:
+                    for dx2 in rng:
+                        key = (int(ca[0]) + dx0, int(ca[1]) + dx1,
+                               int(ca[2]) + dx2)
+                        ib = by_cell.get(key)
+                        if ib is None:
+                            continue
+                        for i, j, off in ((ia, ib, (dx0, dx1, dx2)),
+                                          (ib, ia, (-dx0, -dx1, -dx2))):
+                            if (i, j) in seen:
+                                continue
+                            seen.add((i, j))
+                            T = table(orient, off)
+                            wi = wv.get(i, u)
+                            wj = wv.get(j, u)
+                            v = (wi @ T @ wj) - (u @ T @ u)
+                            if v != 0.0:
+                                rows.append(int(sel[i]))
+                                cols.append(int(sel[j]))
+                                vals.append(v)
+    if not vals:
+        return None
+    n = fil_axis.size
+    return sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
 
 
 def build_dZ(model, M, freq, window=2):
