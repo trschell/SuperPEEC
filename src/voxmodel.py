@@ -188,6 +188,13 @@ class VoxelModel:
         # the solver can raise the matching partial-cell inductance
         # correction (subpixel.slab_dL). None on every ordinary model.
         self.slab_fill = None
+        # OPTIONAL per-cell per-axis MULTIPLIER on the impedance
+        # density, shape dims + (3,). Material-agnostic where
+        # sigma_axis is not: a partial cell's z scales as 1/f whether
+        # the cell is ohmic (z = 1/sigma, sigma_eff = sigma*f) or a
+        # London superconductor (z = j w mu lambda^2, lambda_eff =
+        # lambda/sqrt(f)), so ONE array serves both. None = 1.0.
+        self.z_scale = None
         # subpixel stage-B data: dict(axis=, k=, cells={(t1,t2): (k,k)
         # sub-fill array}) for cylinder-boundary cells
         self.subpixel = None
@@ -854,7 +861,8 @@ class VoxelModel:
         if self.superconductor or self.epsilon is not None:
             return self._complex_resistances(M, freq)
         vals = self.sigma_values()
-        if vals.size == 1 and self.sigma_axis is None:
+        if (vals.size == 1 and self.sigma_axis is None
+                and self.z_scale is None):
             # Uniform: keep the scalar. An array of one repeated value is
             # bit-identical through traverseRL (verified), but the scalar
             # costs nothing and leaves every existing result untouched.
@@ -886,6 +894,9 @@ class VoxelModel:
             # Toeplitz/FMM structure is untouched -- the same argument
             # that admitted per-cell conductivity in the first place.
             sg = sig if aniso is None else aniso[..., axis]
+            if self.z_scale is not None:
+                # z_scale multiplies IMPEDANCE, so it divides sigma
+                sg = sg/np.maximum(self.z_scale[..., axis], 1e-300)
             sa = sg[c[:, 0], c[:, 1], c[:, 2]]
             sb = sg[up[:, 0], up[:, 1], up[:, 2]]
             if not (np.all(sa > 0) and np.all(sb > 0)):
@@ -932,6 +943,10 @@ class VoxelModel:
                                      self.sigma_axis, 1.0),
                                  np.inf)
             zax = z[..., None]*ratio
+        if self.z_scale is not None:
+            zs = z[..., None]*np.asarray(self.z_scale, dtype=np.float64)
+            zax = zs if zax is None else zax*np.asarray(
+                self.z_scale, dtype=np.float64)
         vals = np.unique(z[occ])
         if vals.size == 1 and zax is None:
             zz = complex(vals[0])
@@ -1124,7 +1139,8 @@ One node per cell, at its centre. The current crossing a
                  "  extent        %g x %g x %g m"
                  % tuple(np.asarray(self.dims)*self.d)]
         vals = self.sigma_values()
-        if vals.size == 1 and self.sigma_axis is None:
+        if (vals.size == 1 and self.sigma_axis is None
+                and self.z_scale is None):
             lines.append("  conductivity  %g S/m" % vals[0])
         elif vals.size == 0:
             lines.append("  conductivity  none (lossless superconductor)")

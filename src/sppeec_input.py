@@ -550,7 +550,12 @@ class Problem:
         # the material law -- it is the material law the staircase was
         # approximating. See VoxelModel.laminate_sigma.
         subpix = bool(g.get('subpixel', False))
-        cover = np.ones(m.dims, dtype=np.float64) if subpix else None
+        # coverage ACCUMULATES across blocks and is capped at 1: two
+        # abutting layers routinely share a boundary cell (in the SFQ5ee
+        # stack at 100 nm, M5 covers 0.35 of cell 21 and J5 the other
+        # 0.65), and that cell is FULL, of two conductors. Taking a
+        # minimum instead would have called it 35% filled.
+        cover = np.zeros(m.dims, dtype=np.float64) if subpix else None
         cut_axis = None
         for b in self._doc.get('block', []):
             has_cells = ('from' in b) or ('to' in b)
@@ -625,21 +630,23 @@ class Problem:
                     raise ValueError("block %r: %s only means "
                                      "something under dispersion"
                                      % (b.get('name', '?'), k))
-            if subpix and frac_axis is not None:
+            if subpix and has_m:
                 # per-cell coverage along the cut axis, clipped to this
                 # block's cell range; other axes are commensurate so
                 # their coverage is exactly 1
-                cv = self._cover(b['from_m'][frac_axis],
-                                 b['to_m'][frac_axis],
-                                 m.d[frac_axis], m.dims[frac_axis])
+                # every block contributes, on-grid ones included: a
+                # commensurate block covers its cells exactly 1.0, and
+                # leaving it out would leave its cells at zero
+                ax = frac_axis if frac_axis is not None else (
+                    cut_axis if cut_axis is not None else 2)
+                cv = self._cover(b['from_m'][ax], b['to_m'][ax],
+                                 m.d[ax], m.dims[ax])
                 shape = [1, 1, 1]
-                shape[frac_axis] = m.dims[frac_axis]
+                shape[ax] = m.dims[ax]
                 blk = [slice(lo[k], hi[k]) for k in range(3)]
-                cover[tuple(blk)] = np.minimum(
-                    cover[tuple(blk)],
-                    cv.reshape(shape)[tuple(
-                        blk[k] if k == frac_axis else slice(None)
-                        for k in range(3))])
+                cover[tuple(blk)] += cv.reshape(shape)[tuple(
+                    blk[k] if k == ax else slice(None)
+                    for k in range(3))]
             if 'sigma' in b:
                 m.sigma[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = \
                     float(b['sigma'])
@@ -717,26 +724,35 @@ class Problem:
                     disp_blocks.append((lo, hi, float(eps_inf),
                                         float(deps), fl, fh))
         if subpix and cut_axis is not None:
-            # ONE call, after every block has painted: the laminate rule
-            # turns the coverage into an anisotropic sigma (and leaves
-            # `sigma` holding the in-plane value, so occupancy and every
-            # port helper are unchanged). `slab_fill` is what tells the
-            # solver to build the matching partial-cell dL.
-            if np.any((cover > 0.0) & (cover < 1.0)
-                      & (np.asarray(m.sigma) == 0.0)):
+            np.clip(cover, 0.0, 1.0, out=cover)
+            # ONE pass, after every block has painted. Z_SCALE rather
+            # than laminate_sigma: this model may be ohmic (z = 1/sigma)
+            # or London (z = j w mu lambda^2), and in BOTH the partial
+            # cell's impedance density scales as 1/f in the plane of the
+            # cut. One multiplier serves both, where a sigma array
+            # cannot describe a lossless superconductor at all -- its
+            # sigma is legitimately zero everywhere.
+            occ = np.asarray(m.struc()) > 0
+            if np.any((cover > 0.0) & (cover < 1.0) & ~occ):
                 raise ValueError(
-                    "a partial cell carries no conductivity -- subpixel "
-                    "coverage and the painted sigma disagree")
-            # cross='full': the CUT AXIS keeps the bulk sigma. The
-            # laminate's harmonic mean is the value for a path passing
-            # all the way THROUGH a cell, and no filament does -- the
-            # half-pair rule gives it the top half of one cell and the
-            # bottom half of the next, so the through-plane value is a
-            # HALF-CELL quantity this array cannot express (see
-            # laminate_sigma). In-plane is exact and is what
-            # studies/slabfill.py measured; the cut axis is left alone
-            # rather than given a value that was never tested.
-            m.laminate_sigma(cover, cut_axis, cross='full')
+                    "a partial cell carries no material -- subpixel "
+                    "coverage and the painted blocks disagree")
+            zs = np.ones(tuple(m.dims) + (3,), dtype=np.float64)
+            inv = np.where(cover > 0.0,
+                           1.0/np.maximum(cover, 1e-300), 1.0)
+            for a in range(3):
+                if a != cut_axis:
+                    zs[..., a] = np.where(occ, inv, 1.0)
+            # The CUT AXIS keeps the bulk value. The laminate's harmonic
+            # mean is the through-plane figure for a path passing all
+            # the way THROUGH a cell, and no filament does that: the
+            # half-pair rule gives a filament the top half of one cell
+            # and the bottom half of the next, so the through-plane
+            # value is a HALF-CELL quantity this array cannot express
+            # (see VoxelModel.laminate_sigma). In-plane is exact and is
+            # what is measured; the cut axis is left alone rather than
+            # given a value that was never tested.
+            m.z_scale = zs
             m.slab_fill = dict(fill=cover, axis=int(cut_axis))
         for k, cy in enumerate(self._doc.get('cylinder', [])):
             axis = 'xyz'.index(str(cy['axis']))

@@ -205,7 +205,7 @@ freq = [1e10]
     er = abs(Zs.real/Zr.real - 1.0)
     ea = abs(Za.real/Zr.real - 1.0)
     check("subpixel is declared per grid and reaches the model",
-          ma.sigma_axis is not None and ma.slab_fill is not None,
+          ma.z_scale is not None and ma.slab_fill is not None,
           "axis %s" % (ma.slab_fill or {}).get('axis'))
     check("a 2.5-cell film: staircase R is badly wrong",
           er > 0.10, "%.2f%% off the exact-pitch reference" % (100*er))

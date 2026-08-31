@@ -78,6 +78,25 @@ STACK = {s[0]: s for s in _STACK}
 BY_GDS = {s[1]: s for s in _STACK}
 LABEL_LAYER = 182
 
+# HOW CLOSE A PORT LABEL MUST SIT TO THE LAYOUT BOUNDARY to count as an
+# edge port, and how far inward to scan for that layer's first metal.
+# PHYSICAL, in metres, and that is the whole point: both were once
+# counted in CELLS (1.5 and 4), which is a shrinking physical distance
+# as the pitch falls, so a converter that worked at 100 nm rejected the
+# same port at 30 nm. The offset it was tripping over is fixed and
+# geometric -- marker polygons (IXPORT and friends) push the GDS bbox
+# 0.05 um past the drawn metal, so a port drawn exactly on the layout
+# edge sits 0.05 um inside the bbox at EVERY pitch: 0.50 cells at
+# 100 nm, 1.48 at 33.75, 1.67 at 30 -- which is where it started
+# failing.
+#
+# 0.5 um separates the two populations by a wide margin on the RSFQlib
+# cells: every signal port (P1..P4) sits 0.050 um inside the bbox and
+# the nearest BIAS port (PB4) 1.700 um, so the window is 10x above the
+# marker overhang and 3.4x below the first interior port.
+EDGE_TOL_M = 0.5e-6
+EDGE_SCAN_M = 0.5e-6
+
 
 def _read(path):
     lib = gdstk.read_gds(path)
@@ -184,16 +203,17 @@ def _edge_port(name, spec, occ, origin, pitch, dims, zc,
     ix = (x - origin[0])/pitch[0]
     iy = (y - origin[1])/pitch[1]
     nx, ny = dims
-    # which boundary, if any (within a cell of the layout bbox)
+    # which boundary, if any -- ranked in METRES, so the answer does not
+    # change with the pitch (see EDGE_TOL_M)
     cand = []
     for axis, val, lo_face, hi_face, extent in (
             (0, ix, '-x', '+x', nx), (1, iy, '-y', '+y', ny)):
-        cand.append((abs(val - _EDGE[axis][0]), axis, _EDGE[axis][0],
-                     lo_face))
-        cand.append((abs(val - _EDGE[axis][1]), axis, _EDGE[axis][1] - 1,
-                     hi_face))
+        cand.append((abs(val - _EDGE[axis][0])*pitch[axis], axis,
+                     _EDGE[axis][0], lo_face))
+        cand.append((abs(val - _EDGE[axis][1])*pitch[axis], axis,
+                     _EDGE[axis][1] - 1, hi_face))
     dist, axis, col, face = min(cand)
-    if dist > 1.5:
+    if dist > EDGE_TOL_M:
         return None
     other = 1 - axis
     along = int(np.floor(iy if axis == 0 else ix))
@@ -205,14 +225,16 @@ def _edge_port(name, spec, occ, origin, pitch, dims, zc,
         # occupied column on the label's row
         o = occ[layer]
         step = 1 if face[0] == '-' else -1
-        for c in range(col, col + 4*step, step):
+        nscan = max(4, int(np.ceil(EDGE_SCAN_M/pitch[axis])))
+        for c in range(col, col + nscan*step, step):
             line = o[c, :] if axis == 0 else o[:, c]
             if line[along]:
                 break
         else:
-            raise SystemExit("port %s: no %s metal within 4 cells of "
-                             "the %s edge at the label row"
-                             % (name, layer, face))
+            raise SystemExit("port %s: no %s metal within %.2f um (%d "
+                             "cells) of the %s edge at the label row"
+                             % (name, layer, EDGE_SCAN_M*1e6, nscan,
+                                face))
         run = _run_containing(line, along)
         if run_ref is not None:
             # the reference plane's terminal is the strip under the
@@ -273,7 +295,7 @@ def convert(args):
     def to_m(p):
         return gdstk.Polygon(np.asarray(p.points)*unit, p.layer,
                              p.datatype)
-    occ, zc, mat = {}, {}, {}
+    occ, zc, mat, zm = {}, {}, {}, {}
     report = []
     j5_polys = [to_m(p) for p in bylayer.get('J5', [])]
     for name, gds, kind, z0, z1 in _STACK:
@@ -303,6 +325,11 @@ def convert(args):
         c1 += args.zmargin
         occ[name] = o
         zc[name] = (c0, c1)
+        # the layer's TRUE z span in metres, offset by the z margin --
+        # what --subpixel emits instead of the snapped cell pair, so a
+        # 135 nm M5 stays 135 nm at any pitch
+        zm[name] = (z0*1e-9 + args.zmargin*pitch[2],
+                    z1*1e-9 + args.zmargin*pitch[2])
         mat[name] = ('mo' if kind == 'resistor' else 'nb')
         report.append((name, gds, kind, z0, z1, c0 - args.zmargin,
                        c1 - args.zmargin, int(o.sum()), len(pm)))
@@ -312,8 +339,10 @@ def convert(args):
     ncell = 0
     for name in occ:
         c0, c1 = zc[name]
+        zlo, zhi = zm[name]
         for (x0, y0, x1, y1) in _boxes(occ[name]):
-            blocks.append((name, x0, y0, c0, x1, y1, c1, mat[name]))
+            blocks.append((name, x0, y0, c0, x1, y1, c1, mat[name],
+                           zlo, zhi))
             ncell += (x1 - x0)*(y1 - y0)*(c1 - c0)
 
     # ports
@@ -363,12 +392,24 @@ def convert(args):
         w("pitch = %g" % pitch[0])
     else:
         w("pitch = [%g, %g, %g]" % pitch)
+    if args.subpixel:
+        w("subpixel = true")
     w("")
-    for (name, x0, y0, z0, x1, y1, z1, m) in blocks:
+    for (name, x0, y0, z0, x1, y1, z1, m, zlo, zhi) in blocks:
         w("[[block]]")
         w("name = \"%s\"" % name)
-        w("from = [%d, %d, %d]" % (x0, y0, z0))
-        w("to   = [%d, %d, %d]" % (x1, y1, z1))
+        if args.subpixel:
+            # PHYSICAL z bounds, so the layer keeps its true thickness
+            # at any pitch and [grid] subpixel handles the boundary
+            # cells. x/y stay on the grid: the rasteriser works in whole
+            # cells there, and subpixel v1 cuts ONE axis.
+            w("from_m = [%.12g, %.12g, %.12g]"
+              % (x0*pitch[0], y0*pitch[1], zlo))
+            w("to_m   = [%.12g, %.12g, %.12g]"
+              % (x1*pitch[0], y1*pitch[1], zhi))
+        else:
+            w("from = [%d, %d, %d]" % (x0, y0, z0))
+            w("to   = [%d, %d, %d]" % (x1, y1, z1))
         if m == 'nb':
             w("lambda_l = %g" % LAMBDA_NB)
         else:
@@ -420,6 +461,10 @@ def main(argv=None):
                          'the whole plane edge')
     ap.add_argument('--freq', type=float, default=1e10)
     ap.add_argument('--rtol', type=float, default=None)
+    ap.add_argument('--subpixel', action='store_true',
+                    help='emit PHYSICAL z bounds and [grid] subpixel = '
+                         'true, so a layer keeps its real thickness at '
+                         'a pitch that does not divide it')
     ap.add_argument('--margin', type=float, default=1e-6,
                     help='empty margin around the layout, m (xy)')
     ap.add_argument('--zmargin', type=int, default=2,

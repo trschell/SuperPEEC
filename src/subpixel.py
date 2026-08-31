@@ -100,7 +100,8 @@ def slab_weights(fill, k):
     return w/tot
 
 
-def slab_dL(model, M, fill, axis, k=8, window=2):
+def slab_dL(model, M, fill, axis, k=8, window=2,
+            max_pairs=20_000_000):
     """Partial-cell inductance correction for an AXIS-ALIGNED SLAB cut.
 
     ``fill`` is the per-cell filled fraction along ``axis`` (1.0 where
@@ -124,7 +125,20 @@ def slab_dL(model, M, fill, axis, k=8, window=2):
     index.
 
     Returns a sparse (efg, efg) real matrix, or None if nothing is
-    partial.
+    partial -- or if the work exceeds ``max_pairs``, in which case it
+    WARNS AND RETURNS None rather than exhausting the machine, and the
+    solve proceeds with stage A alone.
+
+    That cap is not hypothetical. The pair loop is Python, one small
+    triple product per candidate, and the candidate count is
+    (partial filaments) x (2 orientations) x (2*window+1)**3. A test
+    slab has ~1e3 partial cells; the RSFQ XNOR at 100 nm cubic has
+    1.01e6, which is 2.5e8 candidates and tens of GB of Python list
+    before any matrix exists. Stage A carries the bulk of the
+    correction anyway (on the slab bench, 16.7% of the R error against
+    stage B's further 0.3% of L), so degrading to it is a real answer
+    rather than a failure. Vectorising this loop -- the same fix
+    _sub_boxes needed -- is what lifts the cap.
     """
     from equiterminal import filament_cells
     fill = np.asarray(fill, dtype=float)
@@ -132,6 +146,18 @@ def slab_dL(model, M, fill, axis, k=8, window=2):
     d = np.asarray(model.d, dtype=float)
     fil_axis, fil_cell = filament_cells(M)
     u = np.full(k, 1.0/k)
+
+    npart_est = int(np.count_nonzero((fill > 1e-12) & (fill < 1.0 - 1e-12)))
+    cand = npart_est*2*(2*int(window) + 1)**3
+    if cand > int(max_pairs):
+        import warnings
+        warnings.warn(
+            "subpixel stage B skipped: %d partial cells give %.1e pair "
+            "candidates, over the %.1e cap. The solve keeps stage A "
+            "(the material law), which carries most of the correction; "
+            "raise max_pairs deliberately if you can pay for it."
+            % (npart_est, cand, max_pairs), RuntimeWarning, stacklevel=2)
+        return None
 
     rows, cols, vals = [], [], []
     Tcache = {}
