@@ -608,6 +608,13 @@ def material_response(model, freq):
 def conduction_weights(kk, dx, delta, p=None):
     """Net-zero CONDUCTION-MODE weights on the ``kk[0] x kk[1]`` sub-bar grid.
 
+    ``dx`` is the physical cross-section: a scalar (square cell) or the
+    ``(d0, d1)`` pair of transverse pitches (anisotropic cells,
+    2026-09-01). The shapes are exponentials in PHYSICAL distance from
+    each face, so a rectangular cross-section only changes where the
+    faces sit -- the palette, the parity split and the pruning are
+    unchanged.
+
     Daniel, Sangiovanni-Vincentelli & White (EPEP 2000): inside a good
     conductor the current solves a Helmholtz equation whose solutions
     are exponentials anchored to the cross-section's faces and corners
@@ -661,14 +668,16 @@ def conduction_weights(kk, dx, delta, p=None):
     """
     from scipy.linalg import qr
     k0, k1 = kk
+    d0, d1 = ((float(dx), float(dx)) if np.isscalar(dx)
+              else (float(dx[0]), float(dx[1])))
     u = (np.arange(k0) + 0.5)/k0
     v = (np.arange(k1) + 0.5)/k1
     U, V = np.meshgrid(u, v, indexing='ij')       # matches _sub_boxes
-    x = U.ravel()*dx                              # distance from the low
-    y = V.ravel()*dx                              # face, per split axis
+    x = U.ravel()*d0                              # distance from the low
+    y = V.ravel()*d1                              # face, per split axis
     p = (1.0 + 1.0j)/delta if p is None else complex(p)
-    ex0, ex1 = np.exp(-p*x), np.exp(-p*(dx - x))
-    ey0, ey1 = np.exp(-p*y), np.exp(-p*(dx - y))
+    ex0, ex1 = np.exp(-p*x), np.exp(-p*(d0 - x))
+    ey0, ey1 = np.exp(-p*y), np.exp(-p*(d1 - y))
     pc = p/np.sqrt(2.0)
     # INDIVIDUAL faces and corners (2026-08-20, studies/
     # palette_ablation.py + xsection_tabulated.py). The original
@@ -686,9 +695,9 @@ def conduction_weights(kk, dx, delta, p=None):
     # counts unchanged with mode_precond.
     shapes = [ex0, ex1, ey0, ey1,
               np.exp(-pc*(x + y)),
-              np.exp(-pc*(x + (dx - y))),
-              np.exp(-pc*((dx - x) + y)),
-              np.exp(-pc*((dx - x) + (dx - y)))]
+              np.exp(-pc*(x + (d1 - y))),
+              np.exp(-pc*((d0 - x) + y)),
+              np.exp(-pc*((d0 - x) + (d1 - y)))]
     cols = []
     for c in shapes:
         for part in (c.real, c.imag):
@@ -699,7 +708,7 @@ def conduction_weights(kk, dx, delta, p=None):
     if not cols:
         raise ValueError("conduction modes are all constant at dx/delta = "
                          "%.3e -- no skin effect to model; use "
-                         "subdivide=False instead" % (dx/delta,))
+                         "subdivide=False instead" % (max(d0, d1)/delta,))
     W = np.stack(cols, axis=1)
     # Prune near-dependent columns by pivoted QR, KEEPING original
     # (physical) columns rather than mixing them, so the result is
@@ -767,7 +776,16 @@ class Redistribution:
         self.split = others
         self.kk = kk
         self.k = kk[0]*kk[1]
-        self.dx = model.dx
+        # Per-axis pitch (2026-09-01): the filament's AXIAL step and
+        # the two TRANSVERSE pitches of its cross-section. On a cubic
+        # model all three coincide and every formula below reduces to
+        # the old scalar-dx one; self.dx keeps the historical name for
+        # the axial pitch (nothing outside this class reads it).
+        d3 = np.asarray(model.d, dtype=float)
+        self.d3 = d3
+        self.dax = float(d3[self.axis])
+        self.dt = (float(d3[others[0]]), float(d3[others[1]]))
+        self.dx = self.dax
         # The material enters through material_response() alone -- see
         # there for why that leaves no superconductor branch below. A
         # lossless London model legitimately has sigma = 0 and no skin
@@ -837,8 +855,8 @@ class Redistribution:
         self.cells = fil_cell[self.sel]
         self.lo, self.hi = self._sub_boxes(self.cells)
         self.flo, self.fhi = self._full_boxes(self.cells)
-        self.asub = (self.dx/kk[0])*(self.dx/kk[1])
-        self.afull = self.dx*self.dx
+        self.asub = (self.dt[0]/kk[0])*(self.dt[1]/kk[1])
+        self.afull = self.dt[0]*self.dt[1]
         # Per-filament weights, IDENTICAL for every filament. Columns
         # span (part of) the NET-ZERO space -- that is the load-bearing
         # property: zero net current => zero incidence => invisible to
@@ -873,7 +891,7 @@ class Redistribution:
         # material in one place regardless of which shapes are chosen.
         self._p, self._z = material_response(model, self.skin_freq)
         if self.mode_basis == 'conduction':
-            W = conduction_weights(kk, self.dx, None, p=self._p)
+            W = conduction_weights(kk, self.dt, None, p=self._p)
         elif self.mode_basis == 'linear':
             k0, k1 = kk
             u = (np.arange(k0) + 0.5)/k0 - 0.5
@@ -996,7 +1014,7 @@ class Redistribution:
         moved = (p != self._p)
         self._p = p
         if moved:
-            self._set_W(conduction_weights(self.kk, self.dx, None, p=p))
+            self._set_W(conduction_weights(self.kk, self.dt, None, p=p))
         self._assemble()
         return bool(moved)
 
@@ -1035,17 +1053,20 @@ class Redistribution:
         lambda^2 and the same expression gives a reactance proportional
         to w. Both callers -- _assemble and mode_precond -- must use the
         SAME value or the preconditioner stops approximating the
-        operator it preconditions.
+        operator it preconditions. Per-axis ``z*l/a_sub`` -- on a cubic
+        model exactly the old ``z*k/dx``.
         """
-        return self._z*self.k/self.dx
+        return self._z*self.dax/self.asub
 
     def _sub_boxes(self, cells):
         """The parallel sub-bars of each filament: the cross-section cut
         ``kk[0] x kk[1]`` over the two transverse axes, full length."""
-        dx, d = self.dx, self.axis
+        d = self.axis
         s0, s1 = self.split
         k0, k1 = self.kk
-        h0, h1 = dx/k0, dx/k1
+        d3, dax = self.d3, self.dax
+        d0, d1 = self.dt
+        h0, h1 = d0/k0, d1/k1
         cells = np.atleast_2d(np.asarray(cells))
         # VECTORISED (2026-08-29). This was a Python triple loop over
         # cells x k0 x k1 building two 3-lists per sub-bar. It is pure
@@ -1061,29 +1082,30 @@ class Redistribution:
         pq = np.arange(self.k)
         P = (pq//k1).astype(float)
         Q = (pq % k1).astype(float)
-        lo = np.repeat((c*dx)[:, None, :], self.k, axis=1)
-        hi = np.repeat(((c + 1.0)*dx)[:, None, :], self.k, axis=1)
-        lo[:, :, d] = ((c[:, d] + 0.5)*dx)[:, None]   # centre to centre
-        hi[:, :, d] = ((c[:, d] + 1.5)*dx)[:, None]
-        lo[:, :, s0] = (c[:, s0]*dx)[:, None] + P[None, :]*h0
-        hi[:, :, s0] = (c[:, s0]*dx)[:, None] + (P[None, :] + 1.0)*h0
-        lo[:, :, s1] = (c[:, s1]*dx)[:, None] + Q[None, :]*h1
-        hi[:, :, s1] = (c[:, s1]*dx)[:, None] + (Q[None, :] + 1.0)*h1
+        lo = np.repeat((c*d3)[:, None, :], self.k, axis=1)
+        hi = np.repeat(((c + 1.0)*d3)[:, None, :], self.k, axis=1)
+        lo[:, :, d] = ((c[:, d] + 0.5)*dax)[:, None]  # centre to centre
+        hi[:, :, d] = ((c[:, d] + 1.5)*dax)[:, None]
+        lo[:, :, s0] = (c[:, s0]*d0)[:, None] + P[None, :]*h0
+        hi[:, :, s0] = (c[:, s0]*d0)[:, None] + (P[None, :] + 1.0)*h0
+        lo[:, :, s1] = (c[:, s1]*d1)[:, None] + Q[None, :]*h1
+        hi[:, :, s1] = (c[:, s1]*d1)[:, None] + (Q[None, :] + 1.0)*h1
         lo = lo.reshape(n*self.k, 3)
         hi = hi.reshape(n*self.k, 3)
         return lo, hi
 
     def _full_boxes(self, cells):
         """The undivided filament of each subdivided cell."""
-        dx, d = self.dx, self.axis
+        d = self.axis
+        d3, dax = self.d3, self.dax
         cells = np.atleast_2d(np.asarray(cells))
         lo = np.zeros((len(cells), 3))
         hi = np.zeros((len(cells), 3))
         for f, c in enumerate(cells):
-            lo[f] = [c[0]*dx, c[1]*dx, c[2]*dx]
-            hi[f] = [(c[0]+1)*dx, (c[1]+1)*dx, (c[2]+1)*dx]
-            lo[f][d] = (c[d] + 0.5)*dx
-            hi[f][d] = (c[d] + 1.5)*dx
+            lo[f] = [c[0]*d3[0], c[1]*d3[1], c[2]*d3[2]]
+            hi[f] = [(c[0]+1)*d3[0], (c[1]+1)*d3[1], (c[2]+1)*d3[2]]
+            lo[f][d] = (c[d] + 0.5)*dax
+            hi[f][d] = (c[d] + 1.5)*dax
         return lo, hi
 
     def _neighbour_pairs(self, radius, other=None):
@@ -1498,14 +1520,15 @@ class Redistribution:
 
     def _term_boxes(self, cells, signs, t_l):
         """Terminal bars at the given cells and face signs."""
-        dx, d = self.dx, self.axis
+        d = self.axis
+        d3, dax = self.d3, self.dax
         cells = np.atleast_2d(np.asarray(cells))
         lo = np.zeros((len(cells), 3))
         hi = np.zeros((len(cells), 3))
         for t, c in enumerate(cells):
-            lo[t] = [c[0]*dx, c[1]*dx, c[2]*dx]
-            hi[t] = [(c[0]+1)*dx, (c[1]+1)*dx, (c[2]+1)*dx]
-            mid = (c[d] + 0.5)*dx
+            lo[t] = [c[0]*d3[0], c[1]*d3[1], c[2]*d3[2]]
+            hi[t] = [(c[0]+1)*d3[0], (c[1]+1)*d3[1], (c[2]+1)*d3[2]]
+            mid = (c[d] + 0.5)*dax
             if signs[t] > 0:
                 lo[t][d], hi[t][d] = mid, mid + t_l
             else:
@@ -1513,13 +1536,14 @@ class Redistribution:
         return lo, hi
 
     def _terminal_boxes(self, term):
-        dx, d = self.dx, self.axis
+        d = self.axis
+        d3, dax = self.d3, self.dax
         lo = np.zeros((term.n, 3))
         hi = np.zeros((term.n, 3))
         for t, (cell, sgn, _) in enumerate(term.faces):
-            a = [cell[0]*dx, cell[1]*dx, cell[2]*dx]
-            b = [(cell[0]+1)*dx, (cell[1]+1)*dx, (cell[2]+1)*dx]
-            mid = (cell[d] + 0.5)*dx
+            a = [cell[0]*d3[0], cell[1]*d3[1], cell[2]*d3[2]]
+            b = [(cell[0]+1)*d3[0], (cell[1]+1)*d3[1], (cell[2]+1)*d3[2]]
+            mid = (cell[d] + 0.5)*dax
             if sgn > 0:
                 a[d], b[d] = mid, mid + term.t_l
             else:
@@ -1615,6 +1639,11 @@ class SubpixelModes(Redistribution):
         self.kk = kk
         self.k = kk[0]*kk[1]
         self.dx = model.dx
+        # inherited _sub_boxes/_full_boxes read the per-axis attrs;
+        # this engine is cubic-only (model.dx raised otherwise)
+        self.d3 = np.asarray(model.d, dtype=float)
+        self.dax = self.dx
+        self.dt = (self.dx, self.dx)
         self.sigma = sigs.pop()
         self.sel = np.flatnonzero(fil_axis == self.axis)
         self.mode_basis = 'conduction'
@@ -2220,13 +2249,12 @@ class EquiTerminalSolver:
                 "branch without its bound charge is not a dielectric).")
         skin_off = (subdivide is False or subdivide is None
                     or (subdivide == 1 and subdivide is not True))
-        if getattr(model, 'anisotropic', False) and not skin_off:
-            raise NotImplementedError(
-                "skin-effect subdivision on ANISOTROPIC cells: the "
-                "redistribution engine's sub-bars, mode tables and "
-                "skin-depth heuristics assume a square cross-section. "
-                "Solve with subdivide=False, or resample the model to "
-                "cubic voxels first.")
+        # ANISOTROPIC cells are supported since 2026-09-01: the box
+        # builders, sub-bar areas, conduction shapes and the k rule are
+        # all per-axis now (gate: studies/london_film.py, the cubic
+        # recovered-fraction curve reproduced from an anisotropic mesh
+        # of the same physical film). The SubpixelModes engine is still
+        # cubic-only -- it raises through model.dx on its own.
         if getattr(model, 'superconductor', False) and not skin_off:
             # The two objections this guard used to raise are both
             # answered for a UNIFORM London model, and only for one:
@@ -2275,14 +2303,18 @@ class EquiTerminalSolver:
                 lam = 1.0/lp
                 sig0 = 2.0/(2.0*np.pi*fref*4e-7*np.pi*lam**2) if fref > 0 \
                     else 0.0
-                self.skin_k = (recommend_subdivision(model.dx, sig0, fref)
+                dtc = max(float(v) for c, v in enumerate(model.d)
+                          if c != self.term.axis)
+                self.skin_k = (recommend_subdivision(dtc, sig0, fref)
                                if sig0 > 0 else 1)
             else:
                 # fill models have no uniform sigma, but the base METAL
                 # sigma (what the skin depth is made of) is well defined
                 sig0 = (next(iter(spx['geom'].values()))[3] if spx
                         else model.uniform_sigma())
-                self.skin_k = recommend_subdivision(model.dx, sig0, fref)
+                dtc = max(float(v) for c, v in enumerate(model.d)
+                          if c != self.term.axis)
+                self.skin_k = recommend_subdivision(dtc, sig0, fref)
         elif subdivide in (False, None):
             self.skin_k = 1
         else:
