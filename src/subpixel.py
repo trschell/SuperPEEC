@@ -101,7 +101,7 @@ def slab_weights(fill, k):
 
 
 def slab_dL(model, M, fill, axis, k=8, window=2,
-            max_pairs=20_000_000):
+            max_pairs=250_000_000):
     """Partial-cell inductance correction for an AXIS-ALIGNED SLAB cut.
 
     ``fill`` is the per-cell filled fraction along ``axis`` (1.0 where
@@ -129,16 +129,30 @@ def slab_dL(model, M, fill, axis, k=8, window=2,
     WARNS AND RETURNS None rather than exhausting the machine, and the
     solve proceeds with stage A alone.
 
-    That cap is not hypothetical. The pair loop is Python, one small
-    triple product per candidate, and the candidate count is
-    (partial filaments) x (2 orientations) x (2*window+1)**3. A test
-    slab has ~1e3 partial cells; the RSFQ XNOR at 100 nm cubic has
-    1.01e6, which is 2.5e8 candidates and tens of GB of Python list
-    before any matrix exists. Stage A carries the bulk of the
-    correction anyway (on the slab bench, 16.7% of the R error against
-    stage B's further 0.3% of L), so degrading to it is a real answer
-    rather than a failure. Vectorising this loop -- the same fix
-    _sub_boxes needed -- is what lifts the cap.
+    THE CAP MEANS SOMETHING DIFFERENT NOW (2026-08-31). It used to
+    bound COMPUTE: the pair loop was Python, one small triple product
+    per candidate, so (partial filaments) x 2 x (2*window+1)**3 dots
+    ran one at a time behind a `seen` set holding every ordered pair.
+    At 2.0e7 that cap silently excluded the case the feature exists
+    for -- the RSFQ XNOR at pitch 200 / pz 67.5 nm reports 706254
+    partial cells and 1.8e8 candidates, 9x over, so every XNOR subpixel
+    run to date got stage A alone. Stage A fixes the material law and
+    leaves the mutual footprint wrong (a half-filled cell still
+    presents a full-cell bar), which is a HALF-APPLIED correction, and
+    that is how subpixel measured slightly WORSE than no subpixel.
+
+    The loop is vectorised now and the value is memoised over
+    (orient, off, fill_i, fill_j) -- see the comment at the pair loop.
+    Compute is no longer the binding cost; the OUTPUT is. Budget about
+    16 bytes per emitted pair (int32 row + int32 col + float64 value)
+    while the COO arrays live, and roughly 12 bytes/nnz once it is CSR.
+    The default admits the XNOR at ~2.9 GB transient. Raise it only
+    with that arithmetic in hand.
+
+    Degrading to stage A remains a real answer rather than a failure
+    (on the slab bench, stage A carries 16.7% of the R error against
+    stage B's further 0.3% of L) -- but it is now a deliberate choice
+    at a much higher threshold, not an accident at a low one.
     """
     from equiterminal import filament_cells
     fill = np.asarray(fill, dtype=float)
@@ -159,7 +173,7 @@ def slab_dL(model, M, fill, axis, k=8, window=2,
             % (npart_est, cand, max_pairs), RuntimeWarning, stacklevel=2)
         return None
 
-    rows, cols, vals = [], [], []
+    parts = []
     Tcache = {}
 
     def table(orient, off):
@@ -186,57 +200,98 @@ def slab_dL(model, M, fill, axis, k=8, window=2,
         Tcache[key] = T
         return T
 
+    # THE PAIR VALUE IS A FUNCTION OF FOUR SMALL THINGS, not of the
+    # pair: dL = (w_i^T T(orient, off) w_j) - (u^T T u) depends only on
+    # (orient, off, fill_i, fill_j), and `fill` is QUANTIZED -- a layer
+    # stack of thickness t at pitch dz yields fills on the 1/n lattice
+    # (the RSFQ XNOR at pz = 67.5 nm has 13 distinct values, all n/27).
+    # So the 1.8e8 "pair candidates" that used to trip the cap collapse
+    # to at most (2 orientations) x (2w+1)^3 offsets x F^2 distinct
+    # triple products -- 2 x 125 x 196 = 49000 for that model. The old
+    # loop recomputed the same handful of dots a hundred million times
+    # in Python, and paid a `seen` set of every ordered pair on top.
+    #
+    # Values are BIT-IDENTICAL to the scalar loop: the per-(a, b) dot is
+    # evaluated exactly as before, (W[a] @ T) @ W[b] - (u @ T) @ u, one
+    # entry at a time rather than as a matmul, so no BLAS re-association
+    # can shift a ulp. Only the emission ORDER changes, and duplicate-free
+    # COO -> CSR is order-independent.
+    dims = fill.shape
     for orient in [c for c in range(3) if c != axis]:
         sel = np.nonzero(fil_axis == orient)[0]
         if sel.size == 0:
             continue
-        cells = fil_cell[sel]
+        cells = np.asarray(fil_cell[sel], dtype=np.int64)
         # a filament's two end cells differ only in `orient`, so they
         # share the cut-axis index and therefore the fill
-        wv = {}
-        for n, c in enumerate(cells):
-            w = slab_weights(fill[c[0], c[1], c[2]], k)
-            if w is not None:
-                wv[n] = w
-        if not wv:
+        fv = fill[cells[:, 0], cells[:, 1], cells[:, 2]]
+        uf, inv = np.unique(fv, return_inverse=True)
+        W = np.empty((uf.size, k), dtype=float)
+        partial = np.zeros(uf.size, dtype=bool)
+        for a, f in enumerate(uf):
+            w = slab_weights(f, k)
+            if w is None:
+                W[a] = u
+            else:
+                W[a] = w
+                partial[a] = True
+        if not partial.any():
             continue
-        # EVERY PAIR WITH AT LEAST ONE PARTIAL END, not just
-        # partial-partial. dL_ij = w_i^T T w_j - u^T T u is nonzero as
-        # soon as ONE of the two differs from uniform, and those pairs
-        # dominate: a partial cell couples to the whole slab under it
-        # and to the ground plane, none of which are partial. (Pairing
-        # only partials recovered ~10% of the correction, measured.)
-        by_cell = {}
-        for n, c in enumerate(cells):
-            by_cell[(int(c[0]), int(c[1]), int(c[2]))] = n
+        # cell -> local filament index; a later duplicate wins, exactly
+        # as the old dict-building loop did
+        loc = np.full(dims, -1, dtype=np.int64)
+        loc[cells[:, 0], cells[:, 1], cells[:, 2]] = np.arange(cells.shape[0])
+        ispart = partial[inv]
         rng = range(-int(window), int(window) + 1)
-        seen = set()
-        for ia in sorted(wv):
-            ca = cells[ia]
-            for dx0 in rng:
-                for dx1 in rng:
-                    for dx2 in rng:
-                        key = (int(ca[0]) + dx0, int(ca[1]) + dx1,
-                               int(ca[2]) + dx2)
-                        ib = by_cell.get(key)
-                        if ib is None:
-                            continue
-                        for i, j, off in ((ia, ib, (dx0, dx1, dx2)),
-                                          (ib, ia, (-dx0, -dx1, -dx2))):
-                            if (i, j) in seen:
-                                continue
-                            seen.add((i, j))
-                            T = table(orient, off)
-                            wi = wv.get(i, u)
-                            wj = wv.get(j, u)
-                            v = (wi @ T @ wj) - (u @ T @ u)
-                            if v != 0.0:
-                                rows.append(int(sel[i]))
-                                cols.append(int(sel[j]))
-                                vals.append(v)
-    if not vals:
+        for dx0 in rng:
+            for dx1 in rng:
+                for dx2 in rng:
+                    off = (dx0, dx1, dx2)
+                    c0 = cells[:, 0] + dx0
+                    c1 = cells[:, 1] + dx1
+                    c2 = cells[:, 2] + dx2
+                    ok = ((c0 >= 0) & (c0 < dims[0])
+                          & (c1 >= 0) & (c1 < dims[1])
+                          & (c2 >= 0) & (c2 < dims[2]))
+                    j = np.full(cells.shape[0], -1, dtype=np.int64)
+                    if ok.any():
+                        j[ok] = loc[c0[ok], c1[ok], c2[ok]]
+                    # EVERY PAIR WITH AT LEAST ONE PARTIAL END, not just
+                    # partial-partial. dL is nonzero as soon as ONE end
+                    # differs from uniform, and those pairs dominate: a
+                    # partial cell couples to the whole slab under it and
+                    # to the ground plane, none of which are partial.
+                    # (Pairing only partials recovered ~10%, measured.)
+                    m = j >= 0
+                    if not m.any():
+                        continue
+                    ii = np.nonzero(m)[0]
+                    jj = j[ii]
+                    keep = ispart[ii] | ispart[jj]
+                    if not keep.any():
+                        continue
+                    ii = ii[keep]
+                    jj = jj[keep]
+                    T = table(orient, off)
+                    uTu = (u @ T) @ u
+                    V = np.empty((uf.size, uf.size), dtype=float)
+                    for a in range(uf.size):
+                        Ta = W[a] @ T
+                        for b in range(uf.size):
+                            V[a, b] = (Ta @ W[b]) - uTu
+                    v = V[inv[ii], inv[jj]]
+                    nz = v != 0.0
+                    if not nz.any():
+                        continue
+                    parts.append((sel[ii[nz]].astype(np.int32),
+                                  sel[jj[nz]].astype(np.int32),
+                                  v[nz]))
+    if not parts:
         return None
     n = fil_axis.size
+    rows = np.concatenate([p[0] for p in parts])
+    cols = np.concatenate([p[1] for p in parts])
+    vals = np.concatenate([p[2] for p in parts])
     return sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
 
 
