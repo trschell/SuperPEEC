@@ -345,12 +345,31 @@ def convert(args):
                            zlo, zhi))
             ncell += (x1 - x0)*(y1 - y0)*(c1 - c0)
 
-    # ports
+    # ports. In --subpixel mode the metal REALLY spans the floor/ceil
+    # cover of its physical z bounds -- the rim cells exist with
+    # sigma_eff = sigma*fill, and the terminal machinery reads R per
+    # face from the cell it sits in -- so the port must drive the rim
+    # cells too, not just the round()-snapped core that zc holds.
+    # Skipping a rim cell forces its current to enter laterally PAST
+    # the reference plane (a port-model error of the gnd-strip class:
+    # at pz = 67.5 nm the driven span covered 2.74 of 2.96 cells of
+    # metal). The same floor/ceil arithmetic as sppeec_input._cover
+    # keeps the two views of "which cells hold metal" identical; the
+    # 1e-6-cell guards keep an exactly-on-boundary layer from growing
+    # a zero-fill sliver either side. Non-subpixel ports keep zc.
+    if args.subpixel:
+        zp = {}
+        for name, (zlo, zhi) in zm.items():
+            c0 = int(np.floor(zlo/pitch[2] + 1e-6))
+            c1 = int(np.ceil(zhi/pitch[2] - 1e-6))
+            zp[name] = (c0, max(c1, c0 + 1))
+    else:
+        zp = zc
     drive = args.drive
     if drive not in ports:
         raise SystemExit("drive port %r not in layout ports %s"
                          % (drive, sorted(ports)))
-    ep = _edge_port(drive, ports[drive], occ, origin, pitch, (nx, ny), zc,
+    ep = _edge_port(drive, ports[drive], occ, origin, pitch, (nx, ny), zp,
                     args.gnd_strip)
     if ep is None:
         raise SystemExit("port %s at (%.2f, %.2f) um is not on the "
