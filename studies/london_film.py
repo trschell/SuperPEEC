@@ -108,12 +108,15 @@ def toml_text(dx, dz, ln, lam, offset, modes):
     blocks += [("M0", MX*dx, jg0*dx, zp0, (MX + L)*dx, jg1*dx, zp1),
                ("M1", MX*dx, js0*dx, zg0, (MX + L)*dx, js1*dx, zg1),
                ("via", (MX + L - 2)*dx, js0*dx, zp1, (MX + L)*dx, js1*dx, zg0)]
+    filmline = ('film = "z"'
+                if getattr(ARGS, 'film', False) else None)
     for n, x0, y0, z0, x1, y1, z1 in blocks:
+        fln = [filmline] if (filmline and n in ('M0', 'M1')) else []
         if offset:
             w += ["[[block]]", 'name = "%s"' % n,
                   "from_m = [%.12g, %.12g, %.12g]" % (x0, y0, z0),
                   "to_m   = [%.12g, %.12g, %.12g]" % (x1, y1, z1),
-                  "lambda_l = %g" % lam, ""]
+                  "lambda_l = %g" % lam] + fln + [""]
         else:
             c = lambda v, p: int(round(v/p))        # noqa: E731
             if abs(round(z0/dz) - z0/dz) > 1e-9 or \
@@ -123,7 +126,7 @@ def toml_text(dx, dz, ln, lam, offset, modes):
             w += ["[[block]]", 'name = "%s"' % n,
                   "from = [%d, %d, %d]" % (c(x0, dx), c(y0, dx), c(z0, dz)),
                   "to   = [%d, %d, %d]" % (c(x1, dx), c(y1, dx), c(z1, dz)),
-                  "lambda_l = %g" % lam, ""]
+                  "lambda_l = %g" % lam] + fln + [""]
     kg = range(fl(zp0), ce(zp1))
     ks = range(fl(zg0), ce(zg1))
     fmt = lambda F: "[" + ", ".join(                # noqa: E731
@@ -162,6 +165,11 @@ def main(argv=None):
     ap.add_argument('--modes', action='store_true',
                     help='sub-cell London modes on '
                          '(skin mode="on", basis="conduction")')
+    ap.add_argument('--film', action='store_true',
+                    help='declare M0/M1 as thin films (film = "z"): the '
+                         'engine spends its sub-cell budget on the '
+                         'normal -- 1-D kz split, z-face shapes, wide '
+                         'rc defaults')
     ap.add_argument('--freq', type=float, default=1e10)
     global ARGS
     ARGS = ap.parse_args(argv)

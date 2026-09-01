@@ -2290,6 +2290,29 @@ class EquiTerminalSolver:
         self.skin_freq = fref
         self.skin_k = 1
         spx = getattr(model, 'subpixel', None)
+        # THIN-FILM PALETTE ([[block]] film = "x|y|z", 2026-09-01). The
+        # declared normal is the stiff axis: in-plane current varies on
+        # the lambda/delta scale THROUGH the film, and (measured,
+        # studies/london_film.py Stage 0) recovering it needs BOTH fine
+        # quadrature along the normal and wide coupling radii -- two
+        # budgets the k x k cross-section palette cannot pay at once
+        # (its tables cost rc^3 * k^4-ish; the last Stage-0 bench point
+        # took 73 minutes). The film palette is the same engine spending
+        # the same budget where the physics is: a 1-D split along the
+        # normal, kk = (1, kz), under which conduction_weights reduces
+        # BY PRUNING to the normal-axis face family (the in-plane
+        # columns become constants and the corner columns degenerate) --
+        # ~3 modes and kz sub-bars instead of up to 16 and kz^2. kz
+        # takes the floor-7 conduction rule (Stage 0: k = 3 plateaus at
+        # 77% recovered, a quadrature ceiling; a 1-D kz = 7..12 is
+        # cheap). Applies when the port axis is IN-PLANE; a port along
+        # the normal falls back to the standard palette. Amplitudes are
+        # always solved -- this is a budget hint, not a sheet model.
+        fnorm = getattr(model, 'film_normal', None)
+        film = (fnorm is not None and int(fnorm) != self.term.axis
+                and mode_basis == 'conduction')
+        if film:
+            fnorm = int(fnorm)
         if subdivide is True or subdivide == 'auto':
             lp = london_rate(model)
             if lp is not None:
@@ -2303,8 +2326,9 @@ class EquiTerminalSolver:
                 lam = 1.0/lp
                 sig0 = 2.0/(2.0*np.pi*fref*4e-7*np.pi*lam**2) if fref > 0 \
                     else 0.0
-                dtc = max(float(v) for c, v in enumerate(model.d)
-                          if c != self.term.axis)
+                dtc = (float(model.d[fnorm]) if film
+                       else max(float(v) for c, v in enumerate(model.d)
+                                if c != self.term.axis))
                 self.skin_k = (recommend_subdivision(dtc, sig0, fref)
                                if sig0 > 0 else 1)
             else:
@@ -2312,14 +2336,24 @@ class EquiTerminalSolver:
                 # sigma (what the skin depth is made of) is well defined
                 sig0 = (next(iter(spx['geom'].values()))[3] if spx
                         else model.uniform_sigma())
-                dtc = max(float(v) for c, v in enumerate(model.d)
-                          if c != self.term.axis)
+                dtc = (float(model.d[fnorm]) if film
+                       else max(float(v) for c, v in enumerate(model.d)
+                                if c != self.term.axis))
                 self.skin_k = recommend_subdivision(dtc, sig0, fref)
         elif subdivide in (False, None):
             self.skin_k = 1
         else:
             self.skin_k = int(subdivide)
+        if film and self.skin_k > 1:
+            # 1-D split is cheap (kz, not kz^2, sub-bars), so give it
+            # the conduction-quality quadrature unconditionally
+            self.skin_k = int(min(12, max(7, self.skin_k)))
         subdivide = self.skin_k
+        self.film_kk = None
+        if film and subdivide > 1:
+            others = [c for c in range(3) if c != self.term.axis]
+            self.film_kk = tuple(subdivide if c == fnorm else 1
+                                 for c in others)
         self.redist = None
         if subdivide > 1 and spx is not None:
             # subpixel models get the surface-anchored per-cell engine;
@@ -2340,7 +2374,7 @@ class EquiTerminalSolver:
                     model, M, self.term.axis,
                     self.fil_axis, self.fil_cell,
                     split_axis=split_axis,
-                    k=subdivide, term=self.term,
+                    k=(self.film_kk or subdivide), term=self.term,
                     rc_uu=rc_uu, rc_cross=rc_cross,
                     use_fft=use_fft,
                     csr_max_gb=csr_max_gb,

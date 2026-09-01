@@ -188,6 +188,10 @@ class VoxelModel:
         # the solver can raise the matching partial-cell inductance
         # correction (subpixel.slab_dL). None on every ordinary model.
         self.slab_fill = None
+        # thin-film declaration ([[block]] film = "x|y|z" in the TOML):
+        # the normal axis of declared films, or None. A hint consumed by
+        # the sub-cell mode engine; nothing else reads it.
+        self.film_normal = None
         # OPTIONAL per-cell per-axis MULTIPLIER on the impedance
         # density, shape dims + (3,). Material-agnostic where
         # sigma_axis is not: a partial cell's z scales as 1/f whether

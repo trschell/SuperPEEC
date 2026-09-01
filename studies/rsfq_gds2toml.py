@@ -433,6 +433,14 @@ def convert(args):
             w("lambda_l = %g" % LAMBDA_NB)
         else:
             w("sigma = %g" % SIGMA_MO)
+        if STACK[name][2] == 'metal':
+            # thin-film declaration: in-plane current through a wiring
+            # layer varies on the lambda scale along z, and the mode
+            # engine spends its sub-cell budget there (1-D kz split,
+            # z-face shapes, wide-rc defaults). Vias, junction stacks
+            # and resistors carry z-directed or lumped current and are
+            # NOT films.
+            w('film = "z"')
         w("")
     w("[port]")
     w("name = \"%s\"" % drive)

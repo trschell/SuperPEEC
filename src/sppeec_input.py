@@ -71,7 +71,7 @@ _SCHEMA = {
                  'from_m', 'to_m', 'sigma', 'name'},
     'block': {'from', 'to', 'from_m', 'to_m', 'sigma', 'name',
               'epsilon', 'loss_tangent', 'lambda_l',
-              'dispersion', 'f_ref', 'f1', 'f2'},
+              'dispersion', 'f_ref', 'f1', 'f2', 'film'},
     'model': {'vhr'},
     'wire': {'name', 'points', 'radius', 'sigma', 'max_seglen',
              'nring', 'nsect', 'foot_r0', 'shape', 'start_vec',
@@ -557,7 +557,30 @@ class Problem:
         # minimum instead would have called it 35% filled.
         cover = np.zeros(m.dims, dtype=np.float64) if subpix else None
         cut_axis = None
+        # THIN-FILM DECLARATION (2026-09-01). `film = "z"` on a block is
+        # a HINT about the stiff axis, not a formulation change: in-plane
+        # current through the block varies on the lambda (or skin-depth)
+        # scale along that normal, so the sub-cell mode engine should
+        # spend its budget there -- a 1-D split along the normal with the
+        # normal-axis shape family, instead of the k x k cross-section
+        # palette (see EquiTerminalSolver). Amplitudes are always SOLVED;
+        # if the field disagrees with the profile ansatz near an edge or
+        # via mouth, the solve wins. One normal per model in v1 (a layer
+        # stack shares it); mixed normals raise.
+        film_normal = None
         for b in self._doc.get('block', []):
+            fa = b.get('film')
+            if fa is not None:
+                if fa not in ('x', 'y', 'z'):
+                    raise ValueError("block film = %r: must be 'x', 'y' "
+                                     "or 'z' (the film NORMAL)" % (fa,))
+                fa = 'xyz'.index(fa)
+                if film_normal is not None and film_normal != fa:
+                    raise ValueError(
+                        "blocks declare different film normals (%s vs "
+                        "%s) -- one normal per model in v1"
+                        % ('xyz'[film_normal], 'xyz'[fa]))
+                film_normal = fa
             has_cells = ('from' in b) or ('to' in b)
             has_m = ('from_m' in b) or ('to_m' in b)
             if has_cells == has_m:
@@ -864,6 +887,7 @@ class Problem:
                 plist.append(p)
             m.ports = plist
         m.freq = np.array(self.freqs if self.freqs else [0.0])
+        m.film_normal = film_normal
         return m
 
     @staticmethod
@@ -1266,7 +1290,17 @@ class _EquiSweep:
                 # whose cost grows as (2rc+1)^3 and whose Kelvin
                 # bands are validated at (3,4); they keep the small
                 # radii unless set explicitly.
-                if getattr(m, 'subpixel', None) is None:
+                if getattr(m, 'film_normal', None) is not None:
+                    # declared thin films: Stage 0 (studies/
+                    # london_film.py, 2026-09-01) measured the film's
+                    # mode dipoles as coherently ALIGNED, so recovery
+                    # keeps climbing with the coupling radius (68.7 ->
+                    # 83.0% over rc (3,4) -> (12,16) at k = 7) and falls
+                    # with film extent at small rc. The film palette's
+                    # 1-D split makes these radii affordable (tables
+                    # cost rc^3 * kz, not rc^3 * kz^2-squared).
+                    au, ac = 12, 16
+                elif getattr(m, 'subpixel', None) is None:
                     pax = int(prob.ports_faces[0][1][0][3])
                     au, ac = _auto_rc(m.struc(), pax)
                 else:
