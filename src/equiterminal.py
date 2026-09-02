@@ -693,11 +693,27 @@ def conduction_weights(kk, dx, delta, p=None):
     # (same span as the old symmetric+antisymmetric pairs). km grows
     # to <= 16, so the mode-FFT spectra cost 4x -- measured matvec
     # counts unchanged with mode_precond.
-    shapes = [ex0, ex1, ey0, ey1,
-              np.exp(-pc*(x + y)),
-              np.exp(-pc*(x + (d1 - y))),
-              np.exp(-pc*((d0 - x) + y)),
-              np.exp(-pc*((d0 - x) + (d1 - y)))]
+    shapes = [ex0, ex1, ey0, ey1]
+    if min(k0, k1) > 1:
+        # corner exponentials only when the cross-section is genuinely
+        # 2-D. Under a 1-D split (the thin-film palette, kk = (1, kz))
+        # a "corner" shape degenerates into a face exponential at the
+        # rate p/sqrt(2) -- not new physics, a same-shaped column at a
+        # slightly different rate. MEASURED (2026-09-02, XNOR symbol
+        # probe): keeping them makes the translation-invariant mode
+        # operator NEARLY SINGULAR -- condition 2.7e12, worst
+        # directions in-plane-smooth / z-oscillating combinations of
+        # the 1/lambda and 1/(lambda sqrt 2) families a factor 1000
+        # below the spectral floor -- which is the ~2000-matvec
+        # film-palette stall no block preconditioner could fix
+        # (near-null operator directions are not preconditionable).
+        # The per-cell QR prune cannot see it: the columns are
+        # independent WITHIN a cell and degenerate only ACROSS cells
+        # at specific k.
+        shapes += [np.exp(-pc*(x + y)),
+                   np.exp(-pc*(x + (d1 - y))),
+                   np.exp(-pc*((d0 - x) + y)),
+                   np.exp(-pc*((d0 - x) + (d1 - y)))]
     cols = []
     for c in shapes:
         for part in (c.real, c.imag):
