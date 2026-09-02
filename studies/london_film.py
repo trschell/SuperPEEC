@@ -42,6 +42,18 @@ TWO CORRECTIONS, both measured here:
     fractional boundaries put thin sample cells where cosh(z/lambda)
     bends hardest.
 
+NORMALISATION CAVEAT (2026-09-02). ``recovered`` is measured against
+the per-square sheet formula, which is exact for infinite films (and
+in studies/london1d.py) but OVERSTATES the kinetic term of the finite
+strip: the true value from the 2-D cross-section oracle
+(studies/london_oracle2d.py) is 68.7% / 78.9% of per-square at
+W = 2 / 4 um, H = 200 nm. So the recovered-% printed here saturates
+near ~79-90%, NOT 100%, when the solver is exact; use the oracle for
+absolute accuracy claims and this bench for RELATIVE comparisons
+(mesh, palette, rc) where the fixed normalisation cancels. Measured
+against the oracle: the film palette is ~94% of truth at nt = 2,
+k = 7 and ~98% at nt = 4, k = 12.
+
 USE AS A GATE. Any change to the mode engine or the subpixel path that
 touches cell geometry (per-axis pitch, anisotropic cross-sections)
 must reproduce the cubic recovered-fraction curve: run the same
@@ -195,7 +207,7 @@ def main(argv=None):
         kin = ((q[(LENS[1], lam)] - q[(LENS[1], tiny)])
                - (q[(LENS[0], lam)] - q[(LENS[0], tiny)]))
         tgt = kin_exact/(MU0*H)*geo
-        print("%8.4g %8.3g | %9.4f pH | %8.4f %8.4f %9.1f%%"
+        print("%8.4g %8.3g | %9.4f pH | %8.4f %8.4f %9.1f%"
               % (dz*1e9, T/dz, geo*1e12, kin*1e12, tgt*1e12,
                  100*kin/tgt))
 
