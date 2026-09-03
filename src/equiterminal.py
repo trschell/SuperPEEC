@@ -76,7 +76,7 @@ import meshgraph as mg
 import sppeec_status as _spstatus
 import terminal as tm
 import stencils as st
-from enrich import Enrichment, london_rate, partial_dL
+from enrich import Enrichment, ModeStack, london_rate, partial_dL
 
 _AXIS_ORIENT = {0: 'f', 1: 'e', 2: 'g'}
 
@@ -944,26 +944,25 @@ class EquiTerminalSolver:
                     rc=(rc_uu, rc_cross), reach=reach, use_fft=use_fft,
                     csr_max_gb=csr_max_gb, freq=fref)
         if corner_modes:
-            if self.redist is not None and not self.redist.shared:
-                raise ValueError(
-                    "corner_modes with the surface (per-cell) palette is "
-                    "not composed yet -- run one or the other")
-            from cornermode import CornerModes, ModeStack
-            arm = None
-            if self.redist is not None:
-                # match the tabulation baseline to the engine's
-                # single-axis coverage (axis 2 has no in-plane modes)
-                arm = {0: 'u', 1: 'v'}.get(int(self.redist.axis))
-            cm = CornerModes(model, M, self.fil_axis, self.fil_cell,
-                             rc_cross=rc_cross, verbose=verbose,
-                             engine_arm=arm)
-            if cm.nmode and self.redist is not None:
-                self.redist = ModeStack(self.redist, cm)
-            elif cm.nmode:
-                self.redist = cm
-            elif verbose:
-                print("    corner modes: requested but no eligible "
-                      "corners found")
+            from cornermode import corner_palette
+            # tabulate against the engine's single-axis coverage (axis
+            # 2 has no in-plane modes) so the tables do not double
+            # count the near-corner crowding the engine already fixes
+            arm = ({0: 'u', 1: 'v'}.get(int(self.redist.axis))
+                   if self.redist is not None else None)
+            cp = corner_palette(model, M, self.fil_axis, self.fil_cell,
+                                engine_arm=arm, verbose=verbose)
+            if cp is not None:
+                # mode-mode dense across a patch (4W), mode-aggregate at
+                # the engine's own radius (measured: the composed bands
+                # sit at x0.46 here against x0.41 at 2W + rc_cross)
+                Wm = max(c[4] for c in cp.corners)
+                cm = Enrichment(model, M, None, self.fil_axis, self.fil_cell,
+                                (cp.k_in, 1), palette=cp, term=self.term,
+                                rc=(4*Wm, rc_cross), use_fft=False,
+                                csr_max_gb=csr_max_gb, freq=fref)
+                self.redist = (cm if self.redist is None
+                               else ModeStack([self.redist, cm]))
         self.nu = 0 if self.redist is None else self.redist.nmode
         with _spstatus.task('assemble + preconditioner'):
             self._build_augmented()
@@ -1682,14 +1681,10 @@ class EquiTerminalSolver:
         # (if parallel to them) to the terminals. Everything here is
         # dipolar and short ranged -- kept dense for correctness.
         r = self.redist
-        sel = r.sel
-        if r.use_fft:
-            mu, mf = r.apply_fft(u, np.ascontiguousarray(i_f[sel]))
-            out_u = r.Ru @ u + jw*mu
-            out_f[sel] += jw*mf
-        else:
-            out_u = r.Ru @ u + jw*(r.Zuu @ u + r.Zcross @ i_f[sel])
-            out_f[sel] += jw*(r.Zcross.T @ u)
+        agg = r.agg
+        mu, mf = r.apply(u, np.ascontiguousarray(i_f[agg]))
+        out_u = r.Ru @ u + jw*mu
+        out_f[agg] += jw*mf
         if r.Zt is not None:
             out_u += jw*(r.Zt @ i_t)
             out_t += jw*(r.Zt.T @ u)

@@ -217,12 +217,63 @@ the scoped code is ~1300 lines from 3334, i.e. about -2000 on `src/`.
 |---|---|---|---|---|---|---|---|
 | 0 baseline | 9e672ff | 27127 | 12054 | 11054 | equiterminal 3398, cornermode 615, subpixel 444, voxmodel 1179, sppeec_input 1399 | 44 pass / 0 skip / 1 fail (`validate_aniso`, stale guard; fixed, 9/9 standalone) | setup1 1.0187104968887117e-30, setup2 3.740159228711359e-30, setup3 2.34153831468213e-31 |
 | 1 geometry + tables | cea4b11 | 26826 | 12294 | 11054 | equiterminal 3165, cornermode 607, enrich 385 (new), subpixel 0 (deleted), voxmodel 1179, sppeec_input 1399 | 46 pass / 0 skip / 0 fail (incl. new `validate_enrich`) | all three BIT-IDENTICAL to phase 0 |
-| 2 the Enrichment class | (next commit) | 26278 | 12251 | 11050 | equiterminal 1943, cornermode 607, enrich 1060, voxmodel 1179, sppeec_input 1398 | 46 pass / 0 skip / 0 fail | all three BIT-IDENTICAL to phase 0 |
+| 2 the Enrichment class | d306965 | 26278 | 12251 | 11050 | equiterminal 1943, cornermode 607, enrich 1060, voxmodel 1179, sppeec_input 1398 | 46 pass / 0 skip / 0 fail | all three BIT-IDENTICAL to phase 0 |
+| 3 corner generator + n-ary stack | (next commit) | 26235 | 12275 | 11050 | equiterminal 1938, cornermode 379, enrich 1250, voxmodel 1179, sppeec_input 1398 | 45 pass / 0 skip / 1 fail in the gate (`validate_subpixel` read a validator attribute moved in this phase; fixed, green standalone; no src change) | all three BIT-IDENTICAL to phase 0 |
 
 Scoped validators at baseline: equiterminal 407, subpixel 380, corner
 202, superconductor 249, aniso 189, aniso_sigma 220, input_lppr 520.
 
 ## 8. Phase log
+
+### Phase 3 (2026-09-03): corner modes as a palette, n-ary stack
+
+* The corner modes are PATCH-level unknowns (3 per corner) over BOTH
+  in-plane orientations with overlapping patches, which the per-
+  filament, single-orientation `Enrichment` could not hold. It grew
+  three things, each generic: ENTRIES (a filament under one palette;
+  any orientations, repeats allowed; pairs are built per orientation
+  and perpendicular pairs vanish), a PROLONGATION `P` that ties
+  per-entry columns into patch modes (blocks fold as `P' Z P`;
+  block-Jacobi groups come from the palette), and a PALETTE object
+  (`ConductionPalette`, `SurfacePalette`, `FixedPalette`) replacing
+  the if/else on weights. `cornermode.py` keeps `_tabulate` and
+  `find_corners` and becomes `corner_palette()`: 607 -> 379 lines;
+  `CornerModes` and the pairwise `ModeStack` are gone. `ModeStack` in
+  `enrich.py` is n-ary: union of aggregates, generic sparse cross
+  blocks between any two families over parallel entry pairs (radius =
+  the larger `rc_uu`), block-diagonal preconditioner. Corner + surface
+  palette now composes (the phase-2 ValueError is gone).
+* THE TRAP: the generic family coupled its modes only to its OWN
+  entries. The engine never noticed (its entries are all parallel
+  filaments) but a patch-subset family lost the drive from the
+  filaments just outside its patch and the corner bands collapsed
+  (x0.35 vs x0.66; composed over-corrected). Measured on the Z-trace
+  that neither the terminal coupling nor the cross radius nor the
+  aggregate radius mattered -- only the aggregate SET. The family now
+  carries `agg`: every filament of its orientations within rc_cross
+  of an entry. Engine-off bands back to exactly the old x0.66 / x0.74;
+  composed x0.54 / x0.46 (old ~0.53 / ~0.53; the corner's aggregate
+  radius is now the engine's own rc_cross rather than a window around
+  the vertex; at 2W + rc_cross it reads x0.41, still in band).
+* Validators: `validate_corner` keeps detection, DC decoupling and the
+  AC bands (202 -> 171); net-zero, Zuu symmetry, augmented reciprocity
+  (one family and the two-family stack) are `validate_enrich` J.
+* A/B vs the phase-1 snapshot: engine paths unchanged (<= 1.5e-11);
+  the corner stack's matvec differs by 2e-3 (the wider aggregate set
+  and the corner entries' new terminal coupling), its Ru identical to
+  1.4e-15 -- the tabulated weights are reproduced.
+* Gate slip: `validate_subpixel` read the per-cell geometry as engine
+  attributes (`_tkey`, `_percell`, `_rfac`) that this phase moved onto
+  the palette, and I had not re-run it after the rework; it failed in
+  the full gate. Validator-only fix (`rt.palette.*`, and the per-entry
+  impedance is now an array), green standalone; no `src/` change, so
+  the gate's other 45 verdicts and the anchors stand.
+* LEDGER WARNING: before the prose trim this phase was +16 lines on
+  `src/` -- the generalisation (entries, `P`, palettes, `agg`, the
+  n-ary stack) cost what deleting the two classes saved. After moving
+  duplicated prose to the history document: 26278 -> 26235 (-43;
+  -892 total). Phases 4 and 5 must deliver >= 308 net to meet the
+  25927 threshold; their scoped code is ~640 lines.
 
 ### Phase 2 (2026-09-03): one Enrichment class
 

@@ -57,8 +57,9 @@ re-tabulate against a coarse+engine baseline, or the tables
 double-count the near-corner crowding the engine fixes). Corners that
 fail a check are SKIPPED with a warning, never fatal.
 
-Interface: duck-types the solver's ``redist`` slot (use_fft=False
-path): nmode/sel/Ru/Zuu/Zcross/Zt/set_frequency/mode_precond.
+Interface: :func:`corner_palette` returns an ``enrich.FixedPalette``;
+the solver wraps it in an ``enrich.Enrichment`` and, with the skin
+engine present, an ``enrich.ModeStack``.
 """
 import warnings
 
@@ -66,7 +67,6 @@ import numpy as np
 import scipy.sparse as sp
 
 import terminal as tm
-from enrich import Split, unique_separations
 
 MU0 = 4e-7*np.pi
 _TABLES = {}                # (W_cells, dx, sigma, KF, ratios) -> fields
@@ -282,326 +282,98 @@ def find_corners(struc):
     return out
 
 
-# ---------------------------------------------------------------- modes
-class CornerModes:
-    """Tabulated corner circulation modes; duck-types the solver's
-    ``redist`` slot (dense/sparse path, ``use_fft = False``)."""
+# -------------------------------------------------------------- palette
+def corner_palette(model, M, fil_axis, fil_cell, engine_arm=None,
+                   ratios=(1e-3, 2.0, 4.0), verbose=False):
+    """The tabulated corner fields as an :class:`enrich.FixedPalette`,
+    or None when the model has no eligible corner.
 
-    use_fft = False
-    Zt = None
+    Per corner: the patch filaments (both in-plane orientations within
+    2W of the vertex, on the occupied z layers) become ENTRIES; each
+    entry carries the ``KF`` in-plane sub-strip currents that the three
+    tabulated stream functions telescope to (``psi(top) - psi(bottom)``
+    per sub-strip, averaged over the fine planes inside the filament's
+    centre-to-centre span), mean-removed per filament -- the net-zero
+    invariant. The prolongation ``P`` ties field ``m`` of every entry of
+    the corner into ONE unknown, so a corner is 3 solved amplitudes
+    whatever its patch size. Handedness classes are the four vacuum
+    quadrants; ``psi`` flips sign under a reflection. Overlapping
+    patches enter the shared filament once per corner.
+    """
+    from enrich import FixedPalette
+    corners = find_corners(model.struc())
+    if not corners:
+        if verbose:
+            print("    corner modes: requested but no eligible corners "
+                  "found")
+        return None
+    fil_cell = np.asarray(fil_cell)
+    fil_axis = np.asarray(fil_axis)
+    dx = model.dx
+    sigma = model.uniform_sigma()
+    KF = 6
+    sel, Wf, prow, pcol, groups = [], [], [], [], []
+    nmode = 0
+    for cn, (Ix, Iy, sx, sy, Wc, zs) in enumerate(corners):
+        # engine coverage maps to canonical arms axis-wise (the
+        # handedness maps are axis-aligned): engine axis 0 covers the
+        # u-arm, axis 1 the v-arm, anything else neither
+        fields, WF = _tabulate(Wc, dx, sigma, KF, tuple(ratios),
+                               nz=len(zs), engine_arm=engine_arm)
+        sgn = float((-sx)*sy)               # psi flips under reflection
+        R = 2*Wc
+        inw = ((np.abs(fil_cell[:, 0] - Ix + 0.5) <= R)
+               & (np.abs(fil_cell[:, 1] - Iy + 0.5) <= R)
+               & (fil_axis < 2))
+        idx = np.flatnonzero(inw & np.isin(fil_cell[:, 2], zs))
+        if idx.size == 0:
+            continue
+        XI, YI = 3*WF, WF                   # canonical corner (fine)
 
-    def __init__(self, model, M, fil_axis, fil_cell, rc_cross=4,
-                 ratios=(1e-3, 2.0, 4.0), verbose=False,
-                 engine_arm=None):
-        self.dx = model.dx
-        self.sigma = model.uniform_sigma()
-        self.engine_arm = engine_arm
-        corners = find_corners(model.struc())
-        self.corners = corners
-        self.ratios = tuple(ratios)
-        self.ncorner = len(corners)
-        self.kk = (0, 0)                    # print compatibility
-        self.nnz = (0, 0)
-        self.ntable = 0
-        if not corners:
-            self.nmode = 0
-            self.sel = np.zeros(0, dtype=np.int64)
-            return
-        fil_cell = np.asarray(fil_cell)
-        fil_axis = np.asarray(fil_axis)
+        def psi(fld, xr, yr):
+            """Tabulated psi at solver-relative in-plane point (xr, yr)
+            in dx units; 0 outside the table."""
+            u = int(round(XI + (-sx)*xr*KF))
+            v = int(round(YI + sy*yr*KF))
+            if 0 <= u < fld.shape[0] and 0 <= v < fld.shape[1]:
+                return sgn*fld[u, v]
+            return 0.0
 
-        # one KF/k_in per construction: sub-strips == tabulation columns
-        self.KF = 6
-        k_in = self.KF
-
-        # ---- per-corner patches: filaments, sub-strips, mode weights
-        # global lists across corners (sub-bar space is their union)
-        pf_idx = []                         # filament index per patch fil
-        pf_axis = []
-        pf_cell = []
-        pf_corner = []
-        weights = []                        # per corner: (npf*k_in, nmod)
-        for cn, (Ix, Iy, sx, sy, Wc, zs) in enumerate(corners):
-            # engine coverage maps to canonical arms axis-wise (the
-            # handedness maps are axis-aligned): engine axis 0 covers
-            # the u-arm, axis 1 the v-arm, anything else neither
-            fields, WF = _tabulate(Wc, self.dx, self.sigma, self.KF,
-                                   self.ratios, nz=len(zs),
-                                   engine_arm=engine_arm)
-            sgn = float((-sx)*sy)           # psi flips under reflection
-            R = 2*Wc
-            inw = ((np.abs(fil_cell[:, 0] - Ix + 0.5) <= R)
-                   & (np.abs(fil_cell[:, 1] - Iy + 0.5) <= R)
-                   & (fil_axis < 2))
-            idx = np.flatnonzero(inw & np.isin(fil_cell[:, 2], zs))
-            if idx.size == 0:
-                continue
-            XI, YI = 3*WF, WF               # canonical corner (fine)
-
-            def psi(fld, xr, yr):
-                """Tabulated psi at solver-relative in-plane point
-                (xr, yr) in dx units; 0 outside the table."""
-                u = int(round(XI + (-sx)*xr*self.KF))
-                v = int(round(YI + sy*yr*self.KF))
-                if 0 <= u < fld.shape[0] and 0 <= v < fld.shape[1]:
-                    return sgn*fld[u, v]
-                return 0.0
-
-            Wm = np.zeros((idx.size*k_in, len(fields)), dtype=complex)
-            for fi, f in enumerate(idx):
-                ax = int(fil_axis[f])
-                cx, cy = (fil_cell[f, 0] - Ix, fil_cell[f, 1] - Iy)
-                for m, fld in enumerate(fields):
-                    for p in range(k_in):
-                        acc = 0.0
-                        # planes: the KF integer fine planes inside the
-                        # centre-to-centre span (KF even -> integers)
-                        for s in range(self.KF):
-                            ln = (0.5 + (s + 1.0)/self.KF)
-                            if ax == 0:
-                                acc += (psi(fld, cx + ln, cy + (p+1)/k_in)
-                                        - psi(fld, cx + ln, cy + p/k_in))
-                            else:
-                                acc -= (psi(fld, cx + (p+1)/k_in, cy + ln)
-                                        - psi(fld, cx + p/k_in, cy + ln))
-                        Wm[fi*k_in + p, m] = acc/self.KF
-                # per-filament net-zero: the load-bearing invariant
-                blk = slice(fi*k_in, (fi + 1)*k_in)
-                Wm[blk] -= Wm[blk].mean(axis=0, keepdims=True)
-            keep = np.abs(Wm).max(axis=0) > 1e-12
-            Wm = Wm[:, keep]/np.abs(Wm[:, keep]).max(axis=0)
-            pf_idx.append(idx)
-            pf_axis.append(fil_axis[idx])
-            pf_cell.append(fil_cell[idx])
-            pf_corner.append(np.full(idx.size, cn))
-            weights.append(Wm)
-        if not weights:
-            self.nmode = 0
-            self.sel = np.zeros(0, dtype=np.int64)
-            return
-        pf_idx = np.concatenate(pf_idx)
-        pf_axis = np.concatenate(pf_axis)
-        pf_cell = np.concatenate(pf_cell, axis=0)
-        pf_corner = np.concatenate(pf_corner)
-        npf = pf_idx.size
-        # block-diagonal mode weights over the union sub-bar space
-        self.nmode = sum(w.shape[1] for w in weights)
-        Wall = np.zeros((npf*k_in, self.nmode), dtype=complex)
-        self._blocks = []                   # (mode slice) per corner
-        r0, m0 = 0, 0
-        for w in weights:
-            nf, nm = w.shape[0]//k_in, w.shape[1]
-            Wall[r0:r0 + nf*k_in, m0:m0 + nm] = w
-            self._blocks.append(slice(m0, m0 + nm))
-            r0 += nf*k_in
-            m0 += nm
-
-        # ---- aggregate window (both in-plane axes, all z)
-        dx = self.dx
-        selm = np.zeros(len(fil_axis), dtype=bool)
-        for (Ix, Iy, sx, sy, Wc, zs) in corners:
-            Rw = 2*Wc + int(rc_cross)
-            selm |= ((np.abs(fil_cell[:, 0] - Ix + 0.5) <= Rw)
-                     & (np.abs(fil_cell[:, 1] - Iy + 0.5) <= Rw)
-                     & (fil_axis < 2))
-        self.sel = np.flatnonzero(selm)
-        nsel = self.sel.size
-        # ---- sub-bar boxes (in-plane split only, z unsplit) and the
-        # undivided window filaments, per orientation
-        d3 = np.asarray(model.d, dtype=float)
-        ns = npf*k_in
-        lo, hi = np.zeros((ns, 3)), np.zeros((ns, 3))
-        slo, shi = np.zeros((nsel, 3)), np.zeros((nsel, 3))
-        self._splits = {}
-        for ax in (0, 1):
-            n = [1, 1, 1]
-            n[1 - ax] = k_in            # the in-plane transverse axis
-            self._splits[ax] = Split(ax, n, d3)
-            fi = np.flatnonzero(pf_axis == ax)
-            if fi.size:
-                rows = (fi[:, None]*k_in + np.arange(k_in)[None, :]).ravel()
-                lo[rows], hi[rows] = self._splits[ax].boxes(pf_cell[fi])
-            gi = np.flatnonzero(np.asarray(fil_axis)[self.sel] == ax)
-            if gi.size:
-                slo[gi], shi[gi] = Split(ax, (1, 1, 1), d3).boxes(
-                    fil_cell[self.sel[gi]])
-
-        # ---- L blocks, per orientation (perpendicular pairs are zero)
-        sub_ax = np.repeat(pf_axis, k_in)
-        Lsub = np.zeros((ns, ns))
-        Lx = np.zeros((ns, nsel))
-        for ax in (0, 1):
-            si = np.flatnonzero(sub_ax == ax)
-            gi = np.flatnonzero(np.asarray(fil_axis)[self.sel] == ax)
-            if si.size == 0:
-                continue
-            both_lo = np.vstack([lo[si], slo[gi]])
-            both_hi = np.vstack([hi[si], shi[gi]])
-            Lb = tm.box_mutual_matrix(both_lo, both_hi, ax)
-            Lsub[np.ix_(si, si)] = Lb[:si.size, :si.size]
-            if gi.size:
-                Lx[np.ix_(si, gi)] = Lb[:si.size, si.size:]
-        self.Zuu = Wall.T @ (Lsub @ Wall)
-        self.Zcross = Wall.T @ Lx
-        r_sub = k_in/(self.sigma*dx)
-        self.Ru = sp.csr_matrix((Wall.T*r_sub) @ Wall)
-        self.nnz = (self.Zuu.size, self.Zcross.size)
-        self.ntable = len(self.ratios)
-        self.kk = (k_in, 1)
-        self._Wall = Wall
-        self._pf_idx = pf_idx
-        self._pf_axis = pf_axis
-        self._pf_cell = pf_cell
-        self._k_in = k_in
-        self._sub_ax = sub_ax
-
-    # -- solver interface ----------------------------------------------
-    def set_frequency(self, freq):
-        """Tables span the frequency band by construction; the solved
-        amplitudes retune, the shapes do not."""
-        return False
-
-    def mode_precond(self, jw):
-        """Per-corner block-Jacobi inverse of (Ru + jw Zuu)."""
-        A = self.Ru.toarray() + jw*self.Zuu
-        out = np.zeros_like(A)
-        for b in self._blocks:
-            out[b, b] = np.linalg.inv(A[b, b])
-        return out
-
-
-# ---------------------------------------------------------------- stack
-class ModeStack:
-    """Engine + corner modes as ONE duck-typed ``redist`` object.
-
-    u = [u_engine; u_corner]. The engine keeps its own apply path (FFT
-    or sparse); corner blocks are dense-small; the engine<->corner
-    mode-mode coupling Zec is INCLUDED (the C.2 lesson: dropping
-    mode-mode dipole couplings over-crowds) but truncated to engine
-    filaments INSIDE the corner patches -- beyond the patch the
-    coupling is dipole-dipole 1/r^3, the same class the engine itself
-    truncates at rc_uu. The raw geometry of Zec is cached; an engine
-    retune (conduction shapes track the solve frequency) only refolds
-    the weights.
-
-    The stack always advertises ``use_fft = True`` and routes the
-    engine inside :meth:`apply_fft`, so the solver's FFT branch is the
-    single integration point."""
-
-    use_fft = True
-
-    def __init__(self, engine, corner):
-        self.engine = engine
-        self.corner = corner
-        # aggregate window: union of the two sel sets
-        self.sel = np.union1d(engine.sel, corner.sel)
-        self._pe = np.searchsorted(self.sel, engine.sel)
-        self._pc = np.searchsorted(self.sel, corner.sel)
-        # engine<->corner cross geometry: corner sub-bars parallel to
-        # the engine axis x engine sub-bars of PATCH filaments
-        a0 = engine.axis
-        cs = np.flatnonzero(corner._sub_ax == a0)
-        self._cs = cs
-        epos = []
-        if cs.size:
-            pcell = corner._pf_cell
-            # engine.sel positions whose cell is a corner-patch cell
-            patch = {tuple(c) for c in pcell}
-            for p, c in enumerate(engine.cells):
-                if tuple(c) in patch:
-                    epos.append(p)
-        self._epos = np.asarray(epos, dtype=int)
-        self._Lec_raw = None
-        if cs.size and self._epos.size:
-            # corner sub-bars (rows, k_in contiguous per filament) x
-            # engine sub-bars of the patch filaments (cols, epos order),
-            # from the engine's shared separation tables
-            k_in = corner._k_in
-            ccell = corner._pf_cell[cs[::k_in] // k_in]
-            ecell = engine.cells[self._epos]
-            D = (ecell[None, :, :] - ccell[:, None, :]).reshape(-1, 3)
-            uniq, inv = unique_separations(D)
-            T = engine.tables(corner._splits[a0], engine.split, uniq)
-            ke = engine.k
-            self._Lec_raw = T[inv].reshape(
-                ccell.shape[0], ecell.shape[0], k_in, ke
-            ).transpose(0, 2, 1, 3).reshape(cs.size, ecell.shape[0]*ke)
-        self._restack()
-
-    def _restack(self):
-        """(Re)build everything that depends on the engine's W/km."""
-        import scipy.sparse as _sp
-        e, c = self.engine, self.corner
-        self.ne, self.nc = e.nmode, c.nmode
-        self.nmode = self.ne + self.nc
-        self.Ru = _sp.block_diag([e.Ru, c.Ru], format='csr')
-        self.Zt = None
-        if e.Zt is not None:
-            Zt_e = e.Zt.toarray() if _sp.issparse(e.Zt) else \
-                np.asarray(e.Zt)
-            self.Zt = np.vstack([Zt_e,
-                                 np.zeros((self.nc, Zt_e.shape[1]),
-                                          dtype=Zt_e.dtype)])
-        # fold Zec: (engine modes) x (corner modes)
-        self.Zec = None
-        if self._Lec_raw is not None:
-            ke, km = e.k, e.km
-            nes = self._epos.size
-            # per patch filament: W_e^T (km x ke) @ L^T (ke x ncs)
-            fold = np.zeros((nes*km, self._cs.size), dtype=complex)
-            for q in range(nes):
-                blk = self._Lec_raw[:, q*ke:(q + 1)*ke]
-                fold[q*km:(q + 1)*km] = e.W.T @ blk.T
-            Wc = c._Wall[self._cs]
-            Zec_full = np.zeros((e.nmode_full, c.nmode), dtype=complex)
-            rows = (np.repeat(self._epos*km, km)
-                    + np.tile(np.arange(km), nes))
-            Zec_full[rows] = fold @ Wc
-            self.Zec = Zec_full[e.mode_mask]
-        # print compatibility
-        self.kk = e.kk
-        self.nnz = (getattr(e, 'nnz', (0, 0))[0] + c.nnz[0],
-                    getattr(e, 'nnz', (0, 0))[1] + c.nnz[1])
-        self.ntable = getattr(e, 'ntable', 0) + c.ntable
-
-    def apply_fft(self, u, i_f):
-        """(Zuu@u + Zcross@i_f, Zcross.T@u) over the stacked layout;
-        ``i_f`` is the aggregate slice over the UNION sel."""
-        e, c = self.engine, self.corner
-        ue, uc = u[:self.ne], u[self.ne:]
-        if e.use_fft:
-            mue, mfe = e.apply_fft(ue, np.ascontiguousarray(
-                i_f[self._pe]))
-        else:
-            mue = e.Zuu @ ue + e.Zcross @ i_f[self._pe]
-            mfe = e.Zcross.T @ ue
-        muc = c.Zuu @ uc + c.Zcross @ i_f[self._pc]
-        mfc = c.Zcross.T @ uc
-        if self.Zec is not None:
-            mue = mue + self.Zec @ uc
-            muc = muc + self.Zec.T @ ue
-        mf = np.zeros(self.sel.size, dtype=np.complex128)
-        np.add.at(mf, self._pe, mfe)
-        np.add.at(mf, self._pc, mfc)
-        return np.concatenate([mue, muc]), mf
-
-    def set_frequency(self, freq):
-        changed = self.engine.set_frequency(freq)
-        if changed:
-            self._restack()
-        return bool(changed)
-
-    def mode_precond(self, jw):
-        """Block-diagonal: the engine's own preconditioner when it has
-        one (identity otherwise -- the coarse engine's status quo) and
-        the corner blocks' exact inverse."""
-        import scipy.sparse as _sp
-        Pc = self.corner.mode_precond(jw)
-        Pe = None
-        if hasattr(self.engine, 'mode_precond'):
-            Pe = self.engine.mode_precond(jw)
-        if Pe is None:
-            Pe = _sp.identity(self.ne, format='csr',
-                              dtype=np.complex128)
-        return _sp.block_diag([_sp.csr_matrix(Pe),
-                               _sp.csr_matrix(Pc)], format='csr')
+        Wm = np.zeros((idx.size, KF, len(fields)), dtype=complex)
+        for fi, f in enumerate(idx):
+            ax = int(fil_axis[f])
+            cx, cy = (fil_cell[f, 0] - Ix, fil_cell[f, 1] - Iy)
+            for m, fld in enumerate(fields):
+                for p in range(KF):
+                    acc = 0.0
+                    for s_ in range(KF):    # fine planes in the span
+                        ln = (0.5 + (s_ + 1.0)/KF)
+                        if ax == 0:
+                            acc += (psi(fld, cx + ln, cy + (p+1)/KF)
+                                    - psi(fld, cx + ln, cy + p/KF))
+                        else:
+                            acc -= (psi(fld, cx + (p+1)/KF, cy + ln)
+                                    - psi(fld, cx + p/KF, cy + ln))
+                    Wm[fi, p, m] = acc/KF
+            Wm[fi] -= Wm[fi].mean(axis=0, keepdims=True)   # net-zero
+        keep = np.abs(Wm).max(axis=(0, 1)) > 1e-12
+        Wm[:, :, keep] /= np.abs(Wm[:, :, keep]).max(axis=(0, 1))
+        Wm[:, :, ~keep] = 0.0
+        e0 = len(sel)
+        sel += list(idx)
+        Wf.append(Wm)
+        cols = np.flatnonzero(keep)
+        for j, m in enumerate(cols):
+            prow += list(np.arange(idx.size)*len(fields) + m + e0*len(fields))
+            pcol += [nmode + j]*idx.size
+        groups.append(np.arange(nmode, nmode + cols.size))
+        nmode += cols.size
+    if not sel:
+        return None
+    Wf = np.concatenate(Wf, axis=0)
+    P = sp.csr_matrix((np.ones(len(prow)), (prow, pcol)),
+                      shape=(Wf.shape[0]*Wf.shape[2], nmode))
+    pal = FixedPalette(sel, Wf, P, groups)
+    pal.corners = corners
+    pal.k_in = KF
+    return pal

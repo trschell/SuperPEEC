@@ -360,13 +360,14 @@ def main():
     check('mode weights net-zero', abs(rt.Wf.sum(axis=1)).max() < 1e-9,
           '%.2e' % abs(rt.Wf.sum(axis=1)).max())
     okr = True
-    rs = rt._sub_impedance().real
-    for f, key in enumerate(rt._tkey):
-        pc = rt._percell[key]
+    rr = rt._sub_impedance().real              # per entry, per sub-bar
+    rs = (rt._z*rt.d3[rt.axis]/rt.split.area).real   # a whole sub-bar
+    for f, key in enumerate(rt.palette.tkey):
+        pc = rt.palette.percell[key]
         if pc is None:
             continue
         sup = pc['fill'] > 1e-3
-        par = 1.0/np.sum(1.0/(rs*rt._rfac[f, sup]))
+        par = 1.0/np.sum(1.0/rr[f, sup])
         if abs(par - rs/(rt.k*pc['fill'].mean())) > 1e-12*rs:
             okr = False
     check('fill-weighted sub-bar R reproduces sigma_eff exactly', okr)

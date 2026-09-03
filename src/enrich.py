@@ -228,48 +228,27 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
     """Sparse partial-cell inductance correction (subpixel stage B).
 
     Stage A folds a partial cell's RESISTANCE into its material law;
-    this is the matching INDUCTANCE, an additive correction over near
-    pairs of parallel filaments
+    this is the matching INDUCTANCE, over near pairs of parallel
+    filaments::
 
         dL_ij = w_i' T(sep) w_j  -  u' T(sep) u
 
-    with ``T`` the exact box-mutual table over sub-prisms, ``w`` a
-    cell's normalised sub-fill shares (uniform current density over the
-    CLIPPED cross-section) and ``u`` the uniform whole-cell shares.
-    Both terms come from the same kernel, so dL vanishes identically on
-    whole cells and the Toeplitz far field is untouched -- the
-    correction is local by construction, decaying like the
-    shape-difference multipoles (measured on a z-cut at fill 0.5:
-    -21.8%% of the pair at one cell, -12.1%% at two, -8.2%% at three,
-    absolute 2.14 -> 0.60 -> 0.27 e-15 H, which is why a 2-cell window
-    is enough).
-
-    Two geometries, one formula: a ``[[cylinder]]`` model
-    (``model.subpixel``) corrects the filaments ALONG the cylinder over
-    its k x k transverse sub-fill bins; an axis-aligned slab cut
-    (``model.slab_fill``) corrects the two IN-PLANE orientations over a
-    1-D split along the cut. A filament running ACROSS a cut is a
-    length problem, not a cross-section one, and is not corrected.
-
-    The pair value depends only on (orientation, offset, w_i, w_j) and
-    the weight vectors are few (a layer stack quantises fills to n/N;
-    a cylinder has one vector per partial transverse cell), so the
-    values are computed once per distinct triple and gathered. Every
-    pair with AT LEAST ONE partial end is emitted: a partial cell
-    couples to the whole slab under it and to the ground plane, none of
-    which are partial, and pairing only partials recovered ~10%%.
-
-    ``max_pairs`` bounds the OUTPUT (about 16 B per emitted pair while
-    the COO arrays live); over it the function warns and returns
-    ``None``, and the solve proceeds with stage A alone -- a deliberate
-    degradation at a threshold that admits the RSFQ XNOR (~2.9 GB).
-
-    An imposed complex skin PROFILE in ``w`` (stage C.1, the Kelvin
-    Bessel average per sub-prism) was measured WORSE than this
-    geometry-only correction -- the lattice already carries the
-    between-cell phase evolution and imposing the intra-cell phase on
-    top double-counts it. Enrichment amplitudes are SOLVED (net-zero
-    modes over these same tables), never imposed.
+    with ``T`` the exact box-mutual table over sub-prisms, ``w`` the
+    cell's normalised sub-fill shares (uniform density over the CLIPPED
+    cross-section) and ``u`` the whole-cell shares. Both terms come
+    from the same kernel, so dL vanishes on whole cells and the
+    Toeplitz far field is untouched; the correction is local (decay
+    measured in docs/enrichment_history.md, a 2-cell window suffices).
+    A ``[[cylinder]]`` model corrects the filaments ALONG the cylinder
+    over its k x k sub-fill bins; an axis-aligned slab cut corrects the
+    two IN-PLANE orientations over a 1-D split. Values depend only on
+    (orientation, offset, w_i, w_j) and the weight vectors are few, so
+    they are computed once per distinct triple and gathered; every pair
+    with at least one partial end is emitted. ``max_pairs`` bounds the
+    OUTPUT (~16 B per pair); over it the function warns and returns
+    ``None`` and the solve keeps stage A. An imposed skin profile in
+    ``w`` measured WORSE (the lattice already carries the between-cell
+    phase; enrichment amplitudes are solved, never imposed).
 
     Returns a real symmetric CSR ``(efg, efg)`` matrix, or ``None``.
     """
@@ -615,128 +594,205 @@ def _near_surface(occ, cells, tr, reach):
     return e[c[:, 0], c[:, 1], c[:, 2]]
 
 
+class ConductionPalette:
+    """Shared weights: :func:`conduction_weights` on every filament of
+    one orientation; the rate moves with frequency."""
+    shared = True
+    moves = True
+
+    def __init__(self, kk, dt):
+        self.kk, self.dt = kk, dt
+
+    def weights(self, p):
+        return conduction_weights(self.kk, self.dt, p)
+
+
+class SurfacePalette:
+    """Per-cell weights anchored to a resolved cylinder surface
+    (:func:`surface_weights`); fill-share aggregates ``G`` and
+    fill-weighted sub-bar impedance factors ``rfac``; placement within
+    ``reach`` cells of the surface layer."""
+    shared = False
+    moves = True
+
+    def __init__(self, spx, cells, tr, kk, dx, reach):
+        self.tkey, self.percell = _surface_geometry(spx, cells, tr, kk, dx)
+        k = kk[0]*kk[1]
+        n = len(self.tkey)
+        self.k = k
+        self.G = np.full((n, k), 1.0/k)
+        self.rfac = np.ones((n, k))
+        self.bnd = np.zeros(n, dtype=bool)
+        lim = (float(reach) + 1.0)*dx if reach is not None else np.inf
+        for f, key in enumerate(self.tkey):
+            pc = self.percell[key]
+            if pc is None:
+                continue
+            sup = pc['fill'] > 1e-3
+            tot = pc['fill'].sum()
+            self.G[f] = pc['fill']/tot if tot > 0 else 0.0
+            self.rfac[f] = np.where(sup, 1.0/np.where(sup, pc['fill'], 1.0),
+                                    0.0)
+            self.bnd[f] = bool(np.any(np.abs(pc['d'][sup]) <= lim))
+
+    def weights(self, p):
+        Wf, cmask = surface_weights(self.percell, self.tkey, self.k, p)
+        return Wf, cmask & self.bnd[:, None]
+
+
+class FixedPalette:
+    """Frequency-independent per-entry weights tied into PATCH modes.
+
+    ``sel`` lists the filament of each entry (a filament may appear
+    under several patches), ``Wf`` is ``(nentry, k, kmf)`` with the
+    patch fields restricted to each entry's sub-bars, and ``P`` is the
+    ``(nentry*kmf, nmode)`` 0/1 prolongation that makes entry column
+    ``m`` of every entry of patch ``c`` the SAME unknown: the blocks a
+    family assembles per entry are folded as ``P' Z P``. ``groups``
+    are the mode index ranges per patch, the block-Jacobi cells."""
+    shared = False
+    moves = False
+
+    def __init__(self, sel, Wf, P, groups):
+        self.sel = np.asarray(sel, dtype=np.int64)
+        self.Wf = np.asarray(Wf)
+        self.P = sp.csr_matrix(P)
+        self.groups = groups
+
+    def weights(self, p):
+        return self.Wf, np.ones(self.Wf.shape[:1] + self.Wf.shape[2:],
+                                dtype=bool)
+
+
 # --------------------------------------------------------------- the family
 
 class Enrichment:
-    """Net-zero sub-cell redistribution modes on one filament orientation.
+    """Net-zero sub-cell redistribution modes on a set of filaments.
 
-    Each filament parallel to ``axis`` is cut into ``kk[0] x kk[1]``
-    sub-bars spanning THE SAME TWO NODES and the basis is changed to
-    (aggregate, redistribution)::
+    Each filament ENTRY (a filament under one palette; the same
+    filament may be entered under several corner patches) is cut into
+    ``kk[0] x kk[1]`` sub-bars spanning THE SAME TWO NODES and the
+    basis is changed to (aggregate, redistribution)::
 
         i_p = I*g_p + sum_m W_pm u_m ,      sum_p W_pm = 0
 
-    The aggregate ``I`` is exactly the original filament (``g`` uniform,
-    or the fill shares on a partial cell) -- ``W_agg' Z_sub W_agg ==
-    Z_full`` because the volume integral over the cross-section is the
-    sum over its pieces (validate_enrich D) -- so the Toeplitz near
-    field and the FMM far field are UNTOUCHED. The ``km`` modes carry
-    ZERO net current, hence zero incidence: no new nodes, invisible to
-    KCL and to the nodal Schur complement. Physically each mode is the
-    mesh current of the loop formed by two parallel branches and its
-    equation is KVL around that loop: at DC the branches are identical
-    and the modes vanish; at AC they couple differently to the rest of
-    the structure and do not. That asymmetry IS skin, proximity and
-    London screening, from extra circuit equations instead of extra
-    mesh. Net-zero modes are dipoles, so mode<->aggregate falls as
-    1/r^2 and mode<->mode as 1/r^3 and the blocks are truncated at the
-    radii ``rc = (rc_uu, rc_cross)``.
+    The aggregate ``I`` is exactly the original filament (``g``
+    uniform, or the fill shares on a partial cell): ``W_agg' Z_sub
+    W_agg == Z_full`` (validate_enrich D), so the Toeplitz near field
+    and the FMM far field are untouched. The modes carry ZERO net
+    current, hence zero incidence: no new nodes, invisible to KCL and
+    to the nodal Schur complement. Each mode is the mesh current of the
+    loop formed by two parallel branches; at DC the branches are
+    identical and the modes vanish, at AC they couple differently to
+    the rest of the structure -- that asymmetry IS skin, proximity,
+    London screening and current turning at a bend. Net-zero modes are
+    dipoles (mode-aggregate 1/r^2, mode-mode 1/r^3), so the blocks are
+    truncated at ``rc = (rc_uu, rc_cross)``.
 
-    Blocks, in the solver's augmented system ``[i_f; i_t; u]``: ``Ru``
-    (sub-bar series impedance ``z*l/a`` folded through W -- real
-    ``1/sigma`` for a normal conductor, ``j w mu lambda^2`` for a London
-    superconductor, whose w-proportionality makes the profile
-    frequency independent), ``Zuu`` (mode-mode), ``Zcross``
-    (mode-aggregate), ``Zt`` (mode-terminal). Two configurations of
-    the same fold:
-
-    * SHARED weights (the default): every filament carries the same
-      ``W`` from :func:`conduction_weights`, so the folded tables are
-      Toeplitz and the blocks apply as FFT convolutions (``use_fft``);
-      ``kk = (1, kz)`` is the thin-film palette.
-    * PER-CELL weights on a resolved cylinder (``model.subpixel``):
-      :func:`surface_weights` anchored to the true surface, fill-
-      weighted ``Ru`` and fill-share aggregates ``G``; the blocks are
-      sparse and truncated (a per-cell fold is exactly what a
-      convolution cannot represent).
-
-    Placement: modes live on filaments within ``reach`` cells of the
-    conductor surface (``reach=None``: everywhere). Interior modes
-    are unphysical -- a cell with metal on all sides has no surface to
-    crowd against -- and their spurious dipoles, mishandled by the
-    truncation, OVER-concentrate current: on a 20-cell-wide bar at
-    dx/delta = 4.8 modes-everywhere overstated loss by 70%% at 100 GHz
-    where reach 0 erred -7.7%%, the safe direction, and was cheaper.
-
-    Frequency: ``set_frequency`` recomputes the material's ``(p, z)``,
-    regenerates the weights only if the rate ``p`` moved (a normal
-    conductor's does, a London rate does not) and re-folds the cached
-    tables either way (``z`` moves for the superconductor). Returns
-    True when the weights moved -- pruning is rate-dependent, so
-    ``nmode`` may change and the caller rebuilds what sized itself on
-    it.
+    Blocks in the augmented system ``[i_f; i_t; u]``: ``Ru`` (sub-bar
+    series impedance ``z*l/a`` through W: ``1/sigma`` for a normal
+    conductor, ``j w mu lambda^2`` for a London one), ``Zuu``,
+    ``Zcross`` (modes <-> the aggregates ``agg``), ``Zt`` (terminals).
+    Three palettes, one fold: :class:`ConductionPalette` (shared W on
+    one orientation -> Toeplitz tables, FFT apply; ``kk = (1, kz)`` is
+    the thin-film palette), :class:`SurfacePalette` (per-cell weights
+    on a resolved cylinder, sparse), :class:`FixedPalette` (tabulated
+    corner fields on both in-plane orientations, tied into 3 unknowns
+    per patch by ``P``, sparse). Placement: entries within ``reach``
+    cells of the conductor surface (``None``: everywhere; interior
+    modes over-crowd, docs/enrichment_history.md). ``set_frequency``
+    recomputes ``(p, z)``, regenerates the weights only if the
+    palette's rate moved and re-folds the cached tables either way;
+    True means ``nmode`` may have changed.
     """
 
     def __init__(self, model, M, axis, fil_axis, fil_cell, kk, term=None,
                  rc=(3, 4), reach=0, use_fft=None, csr_max_gb=2.0,
-                 freq=None):
-        self.axis = int(axis)
-        self.tr = [c for c in range(3) if c != self.axis]
+                 freq=None, palette=None):
         kk = ((int(kk), int(kk)) if np.isscalar(kk)
               else tuple(int(v) for v in kk))
         if min(kk) < 1 or max(kk) < 2:
             raise ValueError("kk must give at least two sub-filaments")
         self.kk = kk
         d3 = np.asarray(model.d, dtype=float)
-        self.d3, self.dax = d3, float(d3[self.axis])
-        self.dt = (float(d3[self.tr[0]]), float(d3[self.tr[1]]))
-        self.split = Split.transverse(self.axis, kk, d3)
-        self.whole = Split(self.axis, (1, 1, 1), d3)
-        self.k = self.split.nsub
+        self.d3 = d3
+        fil_axis = np.asarray(fil_axis)
+        fil_cell = np.asarray(fil_cell)
         self._model = model
-        self.sel = np.flatnonzero(fil_axis == self.axis)
-        self.nfil = self.sel.size
-        self.cells = np.asarray(fil_cell)[self.sel]
         self.freq = float(freq) if freq else 0.0
         self._p, self._z = material_response(model, self.freq)
         spx = getattr(model, 'subpixel', None)
-        self.shared = not (spx is not None and spx['cells'])
-        self.reach = reach
-        if self.shared:
-            self.G = None
-            self._rfac = None
-            self._bnd = (np.ones(self.nfil, dtype=bool) if reach is None
-                         else _near_surface(np.asarray(model.struc())
-                                            .astype(bool), self.cells,
-                                            self.tr, reach))
+        if palette is None:
+            self.axis = int(axis)
+            self.sel = np.flatnonzero(fil_axis == self.axis)
+            self.cells = fil_cell[self.sel]
+            tr = [c for c in range(3) if c != self.axis]
+            if spx is not None and spx['cells']:
+                if int(spx['axis']) != self.axis:
+                    raise NotImplementedError(
+                        "surface modes: the terminal axis (%d) differs "
+                        "from the cylinder axis (%d) -- transverse mode "
+                        "families are future work"
+                        % (self.axis, int(spx['axis'])))
+                palette = SurfacePalette(spx, self.cells, tr, kk, model.dx,
+                                         reach)
+                bnd = palette.bnd
+            else:
+                palette = ConductionPalette(
+                    kk, (float(d3[tr[0]]), float(d3[tr[1]])))
+                bnd = (np.ones(self.sel.size, dtype=bool) if reach is None
+                       else _near_surface(np.asarray(model.struc())
+                                          .astype(bool), self.cells, tr,
+                                          reach))
         else:
-            if int(spx['axis']) != self.axis:
-                raise NotImplementedError(
-                    "surface modes: the terminal axis (%d) differs from "
-                    "the cylinder axis (%d) -- transverse mode families "
-                    "are future work" % (self.axis, int(spx['axis'])))
-            self._tkey, self._percell = _surface_geometry(
-                spx, self.cells, self.tr, kk, model.dx)
-            self.G = np.full((self.nfil, self.k), 1.0/self.k)
-            self._rfac = np.ones((self.nfil, self.k))
-            self._bnd = np.zeros(self.nfil, dtype=bool)
-            lim = (float(reach) + 1.0)*model.dx if reach is not None \
-                else np.inf
-            for f, key in enumerate(self._tkey):
-                pc = self._percell[key]
-                if pc is None:
-                    continue
-                sup = pc['fill'] > 1e-3
-                tot = pc['fill'].sum()
-                self.G[f] = pc['fill']/tot if tot > 0 else 0.0
-                self._rfac[f] = np.where(sup, 1.0/np.where(sup, pc['fill'],
-                                                          1.0), 0.0)
-                self._bnd[f] = bool(np.any(np.abs(pc['d'][sup]) <= lim))
+            self.sel = palette.sel
+            self.cells = fil_cell[self.sel]
+            axes = np.unique(fil_axis[self.sel])
+            self.axis = int(axes[0]) if axes.size == 1 else None
+            bnd = np.ones(self.sel.size, dtype=bool)
+        self.palette = palette
+        self.shared = palette.shared
+        self.fax = fil_axis[self.sel]
+        self.nfil = self.sel.size
+        self.splits = {int(a): Split.transverse(int(a), kk, d3)
+                       for a in np.unique(self.fax)}
+        self.wholes = {a: Split(a, (1, 1, 1), d3) for a in self.splits}
+        self.k = kk[0]*kk[1]
+        if self.shared and self.axis is None:
+            raise ValueError("shared weights need one orientation")
+        self.split = self.splits.get(self.axis)
+        self.whole = self.wholes.get(self.axis)
+        self.tr = ([c for c in range(3) if c != self.axis]
+                   if self.axis is not None else None)
+        self.dt = (self.split.d[self.tr[0]], self.split.d[self.tr[1]]) \
+            if self.split is not None else None
+        self._bnd = bnd
+        self.G = getattr(palette, 'G', None)
+        self._rfac = getattr(palette, 'rfac', None)
+        self.P = getattr(palette, 'P', None)
+        self.reach = reach
         self.use_fft = self.shared and (True if use_fft is None
                                         else bool(use_fft))
         self.csr_max_gb = float(csr_max_gb)
         self._term = term
         self._rc = (int(rc[0]), int(rc[1]))
+        # THE AGGREGATES the modes couple to (Zcross columns, the
+        # drive): every filament of the family's orientations within
+        # rc_cross of an entry -- for a whole-orientation family that
+        # is the entries themselves; a patch-subset family (corners)
+        # must still see the filaments just outside its patch, or its
+        # modes lose most of their drive (measured: the corner bands
+        # collapsed from x0.66 to x0.35 without them)
+        if palette is None:
+            self.agg = self.sel
+        else:
+            cand = np.flatnonzero(np.isin(fil_axis, list(self.splits)))
+            fa, fb = neighbour_pairs(self.cells, self._rc[1],
+                                     other=fil_cell[cand].astype(float))
+            same = self.fax[fa] == fil_axis[cand[fb]]
+            self.agg = cand[np.unique(fb[same])]
+        self.agg_cells = fil_cell[self.agg]
+        self.agg_axis = fil_axis[self.agg]
         self.tables = PairTables()
         self._pairs = {}
         self._set_weights()
@@ -748,7 +804,7 @@ class Enrichment:
         """(Re)generate the weights at the current rate and everything
         whose SHAPE follows km."""
         if self.shared:
-            self.W = conduction_weights(self.kk, self.dt, self._p)
+            self.W = self.palette.weights(self._p)
             self.Wf = None
             if np.abs(self.W.sum(axis=0)).max() > 1e-12:
                 raise ValueError("mode weights must be net-zero")
@@ -756,14 +812,22 @@ class Enrichment:
             self.mode_mask = np.repeat(self._bnd, self.km)
         else:
             self.W = None
-            self.Wf, cmask = surface_weights(self._percell, self._tkey,
-                                             self.k, self._p)
+            self.Wf, cmask = self.palette.weights(self._p)
             if np.abs(self.Wf.sum(axis=1)).max() > 1e-9:
-                raise RuntimeError("surface mode weights are not net-zero")
-            self.km = SURFACE_KM
+                raise RuntimeError("mode weights are not net-zero")
+            self.km = self.Wf.shape[2]
             self.mode_mask = (cmask & self._bnd[:, None]).ravel()
         self.nmode_full = self.nfil*self.km
-        self.nmode = int(self.mode_mask.sum())
+        self.nmode = (int(self.mode_mask.sum()) if self.P is None
+                      else self.P.shape[1])
+
+    def weights_of(self, idx):
+        """``(len(idx), k, km)`` weights of the given entries (broadcast
+        for a shared palette): what a cross block between families
+        folds."""
+        if self.shared:
+            return np.broadcast_to(self.W, (len(idx),) + self.W.shape)
+        return self.Wf[idx]
 
     def set_frequency(self, freq):
         freq = float(freq)
@@ -771,7 +835,7 @@ class Enrichment:
             return False
         self.freq = freq
         p, self._z = material_response(self._model, freq)
-        moved = (p != self._p)
+        moved = self.palette.moves and (p != self._p)
         self._p = p
         if moved:
             self._set_weights()
@@ -781,10 +845,24 @@ class Enrichment:
     # -- assembly ------------------------------------------------------
 
     def _sub_impedance(self):
-        """Series impedance of ONE whole sub-bar, ``z*l/a``; the same
-        value feeds ``Ru`` and ``mode_precond`` -- they must agree or the
-        preconditioner stops approximating its operator."""
-        return self._z*self.dax/self.split.area
+        """Series impedance of ONE whole sub-bar per entry, ``z*l/a``;
+        the same values feed ``Ru`` and ``mode_precond`` -- they must
+        agree or the preconditioner stops approximating its operator."""
+        r = np.array([self._z*self.d3[a]/self.splits[a].area
+                      for a in self.fax])
+        if self.shared:
+            return r
+        return r[:, None]*(np.ones(self.k) if self._rfac is None
+                           else self._rfac)
+
+    def _fold_modes(self, A, square):
+        """Restrict a per-entry mode block (rows, and columns too when
+        ``square``) to the retained modes: the mask, or the
+        prolongation."""
+        if self.P is None:
+            mk = self.mode_mask
+            return A[mk][:, mk] if square else A[mk]
+        return self.P.T @ A @ self.P if square else self.P.T @ A
 
     def _assemble(self):
         """Fold the current weights into every block. Geometry is
@@ -797,35 +875,35 @@ class Enrichment:
         self.nnz = (0, 0)
         if not self.use_fft:
             self._build_truncated()
-        r_sub = self._sub_impedance()
+        r = self._sub_impedance()
         if self.shared:
             self.Ru = sp.kron(sp.identity(self.nfil, format='csr'),
-                              r_sub*(self.W.T @ self.W), format='csr')
+                              r[0]*(self.W.T @ self.W), format='csr')
         else:
-            blocks = np.einsum('fpm,fp,fpr->fmr', self.Wf,
-                               r_sub*self._rfac, self.Wf)
+            blocks = np.einsum('fpm,fp,fpr->fmr', self.Wf, r, self.Wf)
             self.Ru = sp.block_diag(list(blocks), format='csr')
         self.Zt = None
-        if self._term is not None and self._term.axis == self.axis:
+        if self._term is not None and self._term.axis in self.splits:
             self._build_terminal()
         if self.use_fft:
             self.build_fft()
-        if self.nmode != self.nmode_full:
-            # drop the interior modes AFTER assembly, so Zcross keeps all
-            # its aggregate columns (the drive) while only mode ROWS go
-            mk = self.mode_mask
-            self.Ru = self.Ru[mk][:, mk]
-            if self.Zuu is not None:
-                self.Zuu = self.Zuu[mk][:, mk]
-            if self.Zcross is not None:
-                self.Zcross = self.Zcross[mk]
-            if self.Zt is not None:
-                self.Zt = self.Zt[mk]
+        # drop the interior modes AFTER assembly, so Zcross keeps all
+        # its aggregate columns (the drive) while only mode ROWS go
+        if self.P is not None or self.nmode != self.nmode_full:
+            for nm in ('Ru', 'Zuu', 'Zcross', 'Zt'):
+                v = getattr(self, nm)
+                if v is not None:
+                    setattr(self, nm, self._fold_modes(v, nm in ('Ru', 'Zuu')))
 
-    def _neighbour_pairs(self, radius, other=None):
+    def _neighbour_pairs(self, radius, other=None, other_axis=None):
+        """Entry pairs (or entry-``other`` pairs) within ``radius``
+        cells (inf-norm) and of the same orientation; cached."""
         ck = (float(radius), other is None)
         if ck not in self._pairs:
-            self._pairs[ck] = neighbour_pairs(self.cells, radius, other)
+            fa, fb = neighbour_pairs(self.cells, radius, other)
+            oax = self.fax if other is None else other_axis
+            same = self.fax[fa] == oax[fb]
+            self._pairs[ck] = (fa[same], fb[same])
         return self._pairs[ck]
 
     def _mode_tables(self, D):
@@ -840,45 +918,44 @@ class Enrichment:
         return Bu, Bc
 
     def _build_truncated(self):
-        """Zuu and Zcross as SPARSE, distance-truncated blocks.
-
-        Measured error vs untruncated on a uniform bar at dx/delta 4.8::
-
-            rc_uu, rc_cross    1,1     2,2     1,2     2,3     3,4
-            error              9.1e-2  2.7e-2  1.2e-2  5.2e-3  4.4e-4
-
-        The cross block needs reach, the mode-mode block does not --
-        the 1/r^2 vs 1/r^3 asymmetry directly. The (3,4) default is
-        chosen for the FFT apply, where a radius costs only padding;
-        under CSR pairs grow as (2rc+1)^3 (``_check_csr_size``).
-        """
+        """Zuu and Zcross as SPARSE, distance-truncated blocks (the
+        radii ladder is in docs/enrichment_history.md; under CSR pairs
+        grow as (2rc+1)^3, hence ``_check_csr_size``)."""
         km, mr = self.km, np.arange(self.km)
         rc_uu, rc_cross = self._rc
         fa_u, fb_u = self._neighbour_pairs(rc_uu)
-        fa_c, fb_c = self._neighbour_pairs(rc_cross)
+        fa_c, fb_c = self._neighbour_pairs(rc_cross, self.agg_cells.astype(float),
+                                           self.agg_axis)
         self._check_csr_size(fa_u.size, fa_c.size)
-        Du = self.cells[fb_u] - self.cells[fa_u]
-        Dc = self.cells[fb_c] - self.cells[fa_c]
-        D, inv = unique_separations(np.concatenate([Du, Dc]))
-        iu, ic = inv[:len(Du)], inv[len(Du):]
-        self.ntable = int(D.shape[0])
-        if self.shared:
-            Bu, Bc = self._mode_tables(D)
-            Bu, Bc = Bu[iu], Bc[ic]
-        else:
-            M = self.tables(self.split, self.split, D)
-            Wf, G = self.Wf, self.G
-            Bu = np.empty((fa_u.size, km, km))
-            Bc = np.empty((fa_c.size, km))
+        dt = float if self.shared else np.result_type(self.Wf, float)
+        Bu = np.empty((fa_u.size, km, km), dtype=dt)
+        Bc = np.empty((fa_c.size, km), dtype=dt)
+        self.ntable = 0
+        for a, split in self.splits.items():
+            su = self.fax[fa_u] == a
+            sc = self.fax[fa_c] == a
+            Du = self.cells[fb_u[su]] - self.cells[fa_u[su]]
+            Dc = self.agg_cells[fb_c[sc]] - self.cells[fa_c[sc]]
+            D, inv = unique_separations(np.concatenate([Du, Dc]))
+            iu, ic = inv[:len(Du)], inv[len(Du):]
+            self.ntable += int(D.shape[0])
+            if self.shared:
+                Tu, Tc = self._mode_tables(D)
+                Bu[su], Bc[sc] = Tu[iu], Tc[ic]
+                continue
+            M = self.tables(split, split, D)
+            G = (self.G if self.G is not None
+                 else np.full((self.agg.size, self.k), 1.0/self.k))
+            iu_, ic_ = np.flatnonzero(su), np.flatnonzero(sc)
             step = max(1, 20_000_000 // (self.k*self.k))
-            for a in range(0, fa_u.size, step):
-                s = np.s_[a:a + step]
-                Bu[s] = np.einsum('apm,apq,aqr->amr', Wf[fa_u[s]],
-                                  M[iu[s]], Wf[fb_u[s]])
-            for a in range(0, fa_c.size, step):
-                s = np.s_[a:a + step]
-                Bc[s] = np.einsum('apm,apq,aq->am', Wf[fa_c[s]],
-                                  M[ic[s]], G[fb_c[s]])
+            for s0 in range(0, iu_.size, step):
+                s = iu_[s0:s0 + step]
+                Bu[s] = np.einsum('apm,apq,aqr->amr', self.Wf[fa_u[s]],
+                                  M[iu[s0:s0 + step]], self.Wf[fb_u[s]])
+            for s0 in range(0, ic_.size, step):
+                s = ic_[s0:s0 + step]
+                Bc[s] = np.einsum('apm,apq,aq->am', self.Wf[fa_c[s]],
+                                  M[ic[s0:s0 + step]], G[fb_c[s]])
         rows = np.broadcast_to(fa_u[:, None, None]*km + mr[None, :, None],
                                Bu.shape).ravel()
         cols = np.broadcast_to(fb_u[:, None, None]*km + mr[None, None, :],
@@ -888,7 +965,7 @@ class Enrichment:
         rows = (fa_c[:, None]*km + mr[None, :]).ravel()
         cols = np.broadcast_to(fb_c[:, None], Bc.shape).ravel()
         self.Zcross = sp.csr_matrix((Bc.ravel(), (rows, cols)),
-                                    shape=(self.nmode_full, self.nfil))
+                                    shape=(self.nmode_full, self.agg.size))
         self.nnz = (int(self.Zuu.nnz), int(self.Zcross.nnz))
 
     def _check_csr_size(self, npair_uu, npair_cross):
@@ -904,16 +981,19 @@ class Enrichment:
                 "%.1f." % (gb, nnz, self._rc, self.k, self.csr_max_gb))
 
     def _build_terminal(self):
-        """Mode <-> terminal block, per (separation, face sign)."""
+        """Mode <-> terminal block, per (separation, face sign), over
+        the entries parallel to the terminal axis."""
         term, km = self._term, self.km
         tcell = np.array([f[0] for f in term.faces], dtype=np.int64)
-        fa, tb = self._neighbour_pairs(self._rc[1], other=tcell.astype(float))
+        fa, tb = neighbour_pairs(self.cells, self._rc[1], tcell.astype(float))
+        par = self.fax[fa] == term.axis
+        fa, tb = fa[par], tb[par]
         if fa.size == 0:
             self.Zt = sp.csr_matrix((self.nmode_full, term.n))
             return
+        split = self.splits[term.axis]
         D, inv = unique_separations(tcell[tb] - self.cells[fa])
-        Mct = np.stack([self.tables(self.split,
-                                    self.split.terminal(term.t_l, s),
+        Mct = np.stack([self.tables(split, split.terminal(term.t_l, s),
                                     D)[:, :, 0] for s in (-1, +1)], axis=-1)
         si = (term.sign[tb] > 0).astype(np.int64)
         if self.shared:
@@ -926,25 +1006,26 @@ class Enrichment:
         self.Zt = sp.csr_matrix((red.ravel(), (rows, cols)),
                                 shape=(self.nmode_full, term.n))
 
-    # -- the FFT apply (shared weights) ---------------------------------
+    # -- the apply -----------------------------------------------------
+
+    def apply(self, u, i_f):
+        """``(Zuu u + Zcross i_f, Zcross' u)`` with ``i_f`` the currents
+        of this family's aggregates (``agg``), by FFT or by the sparse
+        blocks."""
+        if self.use_fft:
+            return self.apply_fft(u, i_f)
+        return self.Zuu @ u + self.Zcross @ i_f, self.Zcross.T @ u
 
     def build_fft(self):
-        """Spectra for applying the mode blocks as CONVOLUTIONS.
-
-        The blocks are translation invariant, so ``out_u[f, m] = sum_g
-        sum_n Bu[cell_g - cell_f, m, n] u[g, n]`` is a 3-D correlation
-        of ``u`` with ``Bu`` per mode pair and its transpose the
-        matching convolution; the kernels are real, so ONE spectrum
-        serves both directions. Tabulated only over separations that
-        can occur (the stencil clipped per axis to the grid extent),
-        built one kernel at a time and stored single precision: the
+        """Spectra for applying the mode blocks as CONVOLUTIONS: the
+        blocks are translation invariant, the kernels real (one
+        spectrum serves correlation and convolution). Tabulated only
+        over separations that can occur (stencil clipped to the grid),
+        built one kernel at a time and stored single precision -- the
         spectra ARE the allocation (km^2 x pad complex, 19.8 GB on the
-        RSFQ XNOR against a 154 MB working slab) and they are smooth
-        O(1e-12..1e-7) mutual inductances nowhere near float32's floor.
-        ``SPPEEC_MODE_FP64=1`` restores double storage for A/B. NOTE
-        this is a whole-bounding-box transform: box-proportional, not
-        occupancy-proportional.
-        """
+        RSFQ XNOR) and are smooth mutual inductances far from float32's
+        floor; ``SPPEEC_MODE_FP64=1`` for A/B. Whole-bounding-box, so
+        box-proportional rather than occupancy-proportional."""
         import os
         from scipy import fft as sfft
         rc_uu, rc_cross = self._rc
@@ -1025,36 +1106,145 @@ class Enrichment:
     # -- preconditioning -------------------------------------------------
 
     def mode_precond(self, jw):
-        """Block-Jacobi inverse of ``Ru + jw*Zuu_self`` per filament, in
-        the masked mode numbering. The mesh preconditioner's mode block
+        """Block-Jacobi inverse of ``Ru + jw*Zuu_self`` per group of
+        modes (per filament; per patch for a prolonged palette), in the
+        retained mode numbering. The mesh preconditioner's mode block
         is the identity, so without this the mode equations run
         unpreconditioned and stall at high omega with a rich basis
-        (measured: 311-matvec cap on the engine-only ladder at 1e10;
-        2078 unconverged matvecs on the surface palette at dx/delta 6).
-        Shared weights: ONE km x km inverse, Kronecker'd."""
+        (docs/enrichment_history.md). Shared weights: ONE km x km
+        inverse, Kronecker'd."""
         if self.nmode == 0:
             return None
         if self.shared:
             Ls = self.tables(self.split, self.split,
                              np.zeros((1, 3), dtype=np.int64))[0]
             W = self.W
-            A = self._sub_impedance()*(W.T @ W) + jw*(W.T @ (Ls @ W))
+            A = self._sub_impedance()[0]*(W.T @ W) + jw*(W.T @ (Ls @ W))
             return sp.kron(sp.identity(int(self._bnd.sum()), format='csr'),
                            sp.csr_matrix(np.linalg.inv(A)), format='csr')
         A = (self.Ru + jw*self.Zuu).tocsr()
-        counts = self.mode_mask.reshape(self.nfil, self.km).sum(axis=1)
+        if self.P is not None:
+            groups = self.palette.groups
+        else:
+            counts = self.mode_mask.reshape(self.nfil, self.km).sum(axis=1)
+            ends = np.cumsum(counts)
+            groups = [np.arange(e - c, e) for c, e in zip(counts, ends)
+                      if c]
         data, rows, cols = [], [], []
-        pos = 0
-        for c in counts:
-            if c == 0:
-                continue
-            idx = np.arange(pos, pos + int(c))
+        for idx in groups:
+            idx = np.asarray(idx)
             inv = np.linalg.inv(A[idx][:, idx].toarray())
             rows.append(np.repeat(idx, len(idx)))
             cols.append(np.tile(idx, len(idx)))
             data.append(inv.ravel())
-            pos += int(c)
         return sp.csr_matrix(
             (np.concatenate(data), (np.concatenate(rows),
                                     np.concatenate(cols))),
             shape=(self.nmode, self.nmode))
+
+
+# ----------------------------------------------------------------- stacks
+
+class ModeStack:
+    """Several families as ONE ``redist`` object: ``u = [u_1; u_2; ...]``.
+
+    Each family keeps its own apply (FFT or sparse); the mode<->mode
+    coupling BETWEEN families is included (dropping mode-mode dipole
+    couplings over-crowds, the C.2 lesson) as sparse cross blocks over
+    parallel entry pairs within the larger of the two families'
+    ``rc_uu`` -- beyond that the coupling is dipole-dipole 1/r^3, the
+    class each family itself truncates. The raw pair tables are
+    cached; a retune of any family only re-folds the weights.
+    """
+
+    def __init__(self, families):
+        self.fam = list(families)
+        self.agg = np.unique(np.concatenate([f.agg for f in self.fam]))
+        self._pos = [np.searchsorted(self.agg, f.agg) for f in self.fam]
+        self._raw = {}
+        for a in range(len(self.fam)):
+            for b in range(a + 1, len(self.fam)):
+                A, B = self.fam[a], self.fam[b]
+                radius = max(A._rc[0], B._rc[0])
+                fa, fb = neighbour_pairs(A.cells, radius,
+                                         other=B.cells.astype(float))
+                same = A.fax[fa] == B.fax[fb]
+                fa, fb = fa[same], fb[same]
+                self._raw[a, b] = (fa, fb)
+        self._restack()
+
+    def _restack(self):
+        """(Re)fold everything that depends on the families' weights."""
+        self.n = [f.nmode for f in self.fam]
+        self.off = np.concatenate([[0], np.cumsum(self.n)])
+        self.nmode = int(self.off[-1])
+        self.Ru = sp.block_diag([f.Ru for f in self.fam], format='csr')
+        self.cross = {}
+        for (a, b), (fa, fb) in self._raw.items():
+            A, B = self.fam[a], self.fam[b]
+            Z = sp.csr_matrix((A.nmode_full, B.nmode_full))
+            if fa.size:
+                Wa, Wb = A.weights_of(fa), B.weights_of(fb)
+                vals = np.empty((fa.size, A.km, B.km),
+                                dtype=np.result_type(Wa, Wb, float))
+                for ax in np.unique(A.fax[fa]):
+                    s = np.flatnonzero(A.fax[fa] == ax)
+                    D, inv = unique_separations(B.cells[fb[s]] - A.cells[fa[s]])
+                    T = A.tables(A.splits[ax], B.splits[ax], D)
+                    vals[s] = np.einsum('apm,apq,aqr->amr', Wa[s], T[inv],
+                                        Wb[s])
+                rows = np.broadcast_to(
+                    fa[:, None, None]*A.km + np.arange(A.km)[None, :, None],
+                    vals.shape).ravel()
+                cols = np.broadcast_to(
+                    fb[:, None, None]*B.km + np.arange(B.km)[None, None, :],
+                    vals.shape).ravel()
+                Z = sp.csr_matrix((vals.ravel(), (rows, cols)), shape=Z.shape)
+            Z = A._fold_modes(Z.tocsr(), False) if A.P is not None or \
+                A.nmode != A.nmode_full else Z
+            Z = (Z @ B.P if B.P is not None
+                 else Z[:, B.mode_mask] if B.nmode != B.nmode_full else Z)
+            self.cross[a, b] = Z.tocsr()
+        self.kk = self.fam[0].kk
+        self.nnz = (sum(getattr(f, 'nnz', (0, 0))[0] for f in self.fam),
+                    sum(getattr(f, 'nnz', (0, 0))[1] for f in self.fam))
+        self.ntable = sum(getattr(f, 'ntable', 0) for f in self.fam)
+        Zts = [f.Zt for f in self.fam]
+        nt = next((z.shape[1] for z in Zts if z is not None), 0)
+        self.Zt = (None if nt == 0 else
+                   sp.vstack([z if z is not None else sp.csr_matrix((f.nmode, nt))
+                              for z, f in zip(Zts, self.fam)], format='csr'))
+
+    def apply(self, u, i_f):
+        """(Zuu@u + Zcross@i_f, Zcross.T@u) over the stacked layout;
+        ``i_f`` is the aggregate slice over the UNION of ``agg``."""
+        parts = [u[self.off[a]:self.off[a + 1]] for a in range(len(self.fam))]
+        out_u = []
+        mf = np.zeros(self.agg.size, dtype=np.complex128)
+        for a, f in enumerate(self.fam):
+            mu, mfa = f.apply(parts[a], np.ascontiguousarray(i_f[self._pos[a]]))
+            for (i, j), Z in self.cross.items():
+                if i == a:
+                    mu = mu + Z @ parts[j]
+                elif j == a:
+                    mu = mu + Z.T @ parts[i]
+            out_u.append(mu)
+            np.add.at(mf, self._pos[a], mfa)
+        return np.concatenate(out_u), mf
+
+    def set_frequency(self, freq):
+        changed = [f.set_frequency(freq) for f in self.fam]
+        if any(changed):
+            self._restack()
+        return any(changed)
+
+    def mode_precond(self, jw):
+        """Block-diagonal: each family's own preconditioner (identity
+        where it has none)."""
+        blocks = []
+        for f in self.fam:
+            Pf = f.mode_precond(jw)
+            blocks.append(sp.csr_matrix(Pf) if Pf is not None
+                          else sp.identity(f.nmode, format='csr',
+                                           dtype=np.complex128))
+        return sp.block_diag(blocks, format='csr')

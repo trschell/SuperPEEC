@@ -8,11 +8,8 @@ error at 3.2-19.1% of R):
 
  1. detection: exactly two corners, opposite handedness, W and z
     extents right;
- 2. per-filament net-zero of every mode column (the load-bearing
-    invariant: KCL-invisibility and the aggregate identity);
- 3. Zuu unconjugated symmetry;
- 4. augmented-operator reciprocity with modes ON: y^T(Zx) == x^T(Zy)
-    for random complex vectors (exercises Zcross vs Zcross^T wiring);
+ 2-4. (net-zero, Zuu symmetry and augmented reciprocity are generic
+    family invariants and live in validate_enrich J);
  5. DC decoupling: the resistive mode<->aggregate cross term is
     exactly zero, so the mode-induced dR/R vanishes as O(omega^2) --
     measured 1.47e-9 at 1e5 Hz falling to 1.46e-13 at 1e3 Hz (exactly
@@ -88,25 +85,6 @@ S1 = eq.EquiTerminalSolver(m, M, 0, corner_modes=True)    # modes ON
 r = S1.redist
 check("modes built", S1.nu == 6, "nu=%d" % S1.nu)
 
-# net-zero per filament: fold each mode column back per filament
-k = r._k_in
-Wall = r._Wall
-sums = Wall.reshape(-1, k, Wall.shape[1]).sum(axis=1)
-check("per-filament net-zero", np.abs(sums).max() < 1e-12,
-      "max %.1e" % np.abs(sums).max())
-check("Zuu unconjugated symmetry",
-      np.abs(r.Zuu - r.Zuu.T).max() < 1e-10*np.abs(r.Zuu).max())
-
-# reciprocity of the augmented operator with modes on
-m.prepare(M, 1e9)
-n = S1.efg + S1.term.n + S1.nu
-rng = np.random.default_rng(7)
-x = rng.standard_normal(n) + 1j*rng.standard_normal(n)
-y = rng.standard_normal(n) + 1j*rng.standard_normal(n)
-lhs, rhs = y @ S1.apply_Z(x), x @ S1.apply_Z(y)
-check("augmented reciprocity", abs(lhs - rhs) < 1e-9*abs(lhs),
-      "rel %.1e" % (abs(lhs - rhs)/abs(lhs)))
-
 res = {}
 for S, tag in ((S0, 'off'), (S1, 'on')):
     for f in (1e3, 1e5, 1e9, 1e10):
@@ -158,16 +136,8 @@ Sc = eq.EquiTerminalSolver(m, M, 0, corner_modes=True, **kw)
 check("composed stack built", Sc.nu == Se.nu + 6,
       "nu %d -> %d" % (Se.nu, Sc.nu))
 st = Sc.redist
-check("Zec cross block present", st.Zec is not None
-      and st.Zec.shape == (Se.nu, 6))
-
-m.prepare(M, 1e9)
-n = Sc.efg + Sc.term.n + Sc.nu
-x = rng.standard_normal(n) + 1j*rng.standard_normal(n)
-y = rng.standard_normal(n) + 1j*rng.standard_normal(n)
-lhs, rhs = y @ Sc.apply_Z(x), x @ Sc.apply_Z(y)
-check("composed reciprocity", abs(lhs - rhs) < 1e-9*abs(lhs),
-      "rel %.1e" % (abs(lhs - rhs)/abs(lhs)))
+check("engine<->corner cross block present",
+      st.cross[0, 1].shape == (Se.nu, 6) and st.cross[0, 1].nnz > 0)
 
 cres = {}
 for f in (1e5, 1e9, 1e10):

@@ -37,6 +37,14 @@ Phase 2 -- THE FAMILY (``Enrichment``), generic over its palettes:
      bulk kinetic inductance (symmetry pins the split) and the modes
      lift kinetic/bulk to ~1.42, toward the equal-area cylinder's 1.53.
 
+Phase 3 -- COMPOSITION (``ModeStack``), on the corner Z-trace:
+
+  J  per-entry net-zero of a prolonged (patch) palette, Zuu
+     unconjugated symmetry, augmented-operator reciprocity y'(Zx) ==
+     x'(Zy) with one family and with a two-family stack (exercises
+     every Zcross / Zcross' and cross-block wiring), and the stack's
+     mode count is the sum of its families'.
+
 Run: PYTHONPATH=src python3 validation/validate_enrich.py
 """
 import os as _op
@@ -330,6 +338,49 @@ freq = [1e10]
     check('modes lift kinetic/bulk toward the cylinder analog 1.53 '
           '(band 1.30..1.55)', 1.30 < ratio[1] < 1.55,
           'ratio %.4f' % ratio[1])
+
+    print('\nJ -- composition on the corner Z-trace')
+    import vhr
+    W_UM, T_UM, ARM_UM, SIG = 8.0, 8.0, 32.0, 5.8e7
+    nper = 0.25
+    dxc = 1e-6/nper
+    Wc, Tc = int(round(W_UM*nper)), int(round(T_UM*nper))
+    Ac = int(round(ARM_UM*nper))
+    nxc = int(round((2*ARM_UM - W_UM)*nper))
+    struc = np.zeros((nxc, Ac, Tc), dtype=np.int8)
+    struc[:Ac, :Wc, :] = 1
+    struc[Ac - Wc:Ac, :, :] = 1
+    struc[Ac - Wc:, Ac - Wc:, :] = 1
+    ports = ([('p1', 'P', 0, j, k, '-x') for j in range(Wc)
+              for k in range(Tc)]
+             + [('p1', 'N', nxc - 1, j, k, '+x')
+                for j in range(Ac - Wc, Ac) for k in range(Tc)])
+    path = _op.path.join(_op.environ.get('TMPDIR', '/tmp'), 've_corner.vhr')
+    vhr.write_vhr(path, struc, dxc, SIG, (1e9,), ports)
+    mc = vhr.read_vhr(path)
+    Mc = mc.build_tree()
+    mc.prepare(Mc, 1e9)
+    S1 = eq.EquiTerminalSolver(mc, Mc, 0, corner_modes=True)
+    r = S1.redist
+    check('patch palette: per-entry net-zero',
+          np.abs(r.Wf.sum(axis=1)).max() < 1e-12)
+    check('patch palette: 3 modes per corner',
+          S1.nu == 3*len(r.palette.corners))
+    check('Zuu unconjugated symmetry',
+          abs(r.Zuu - r.Zuu.T).max() < 1e-10*abs(r.Zuu).max())
+    Sc = eq.EquiTerminalSolver(mc, Mc, 0, subdivide=7, skin_freq=1e10,
+                               corner_modes=True)
+    Se = eq.EquiTerminalSolver(mc, Mc, 0, subdivide=7, skin_freq=1e10)
+    check('stack mode count = engine + corners',
+          Sc.nu == Se.nu + S1.nu and Sc.redist.cross[0, 1].nnz > 0)
+    for S, tag in ((S1, 'corners only'), (Sc, 'engine + corners')):
+        n = S.efg + S.term.n + S.nu
+        x = rng.standard_normal(n) + 1j*rng.standard_normal(n)
+        y = rng.standard_normal(n) + 1j*rng.standard_normal(n)
+        lhs, rhs = y @ S.apply_Z(x), x @ S.apply_Z(y)
+        check('augmented reciprocity, %s' % tag,
+              abs(lhs - rhs) < 1e-9*abs(lhs),
+              'rel %.1e' % (abs(lhs - rhs)/abs(lhs)))
 
     print('\n%d checks failed' % len(FAIL))
     return 1 if FAIL else 0
