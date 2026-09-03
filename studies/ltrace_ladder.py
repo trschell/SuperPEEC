@@ -113,8 +113,7 @@ def run(path):
     # composed acceptance, and the dZ differential is meaningful again.
     kw = dict(corner_modes=CORNER)
     if ENGINE:
-        kw.update(subdivide=7, mode_basis='conduction',
-                  boundary_only=True, skin_freq=max(FREQS))
+        kw.update(subdivide=7, skin_freq=max(FREQS))
     S = eq.EquiTerminalSolver(m, M, 0, **kw)
     out = {}
     for f in FREQS:

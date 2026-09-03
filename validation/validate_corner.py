@@ -152,8 +152,7 @@ for f in (1e9, 1e10):
 # the tabulation). Improvement bands measured 2026-08-19: the corner
 # modes cut the engine's REMAINING error to ~0.53x at both 1e9 and
 # 1e10 (dx/W = 1/2).
-kw = dict(subdivide=7, mode_basis='conduction', boundary_only=True,
-          skin_freq=1e10)
+kw = dict(subdivide=7, skin_freq=1e10)
 Se = eq.EquiTerminalSolver(m, M, 0, **kw)
 Sc = eq.EquiTerminalSolver(m, M, 0, corner_modes=True, **kw)
 check("composed stack built", Sc.nu == Se.nu + 6,

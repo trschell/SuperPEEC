@@ -46,8 +46,8 @@ superconductor from a normal metal at low f -- and it falls out of
 the diagonal z(w) with no extra machinery.
 
 PART E -- GUARDS. freq = 0 must raise (the superfluid shorts DC, the
-operator would be singular); skin subdivision on a superconductor must
-raise, INCLUDING subdivide=True (the `1 == True` trap).
+operator would be singular); skin subdivision on a uniform-lambda
+superconductor engages with the REAL London rate 1/lambda.
 
 Run inside the toolbox:  python3 validate_superconductor.py
 """
@@ -202,21 +202,8 @@ def part_e():
         check("DC raises", False, "prepare(freq=0) went through")
     except ValueError as e:
         check("DC raises", 'freq > 0' in str(e), str(e)[:50])
-    # The generic net-zero bases carry no London content, so they are
-    # still refused on a superconductor; the CONDUCTION palette is not,
-    # since 2026-08-29 its shapes take the Helmholtz rate 1/lambda
-    # directly (studies/london_crowding.py measures what that buys).
-    for sub in (3, True):
-        try:
-            eq.EquiTerminalSolver(m, M, 0, subdivide=sub)
-            check("subdivide=%r raises on the generic basis" % sub,
-                  False, "went through")
-        except NotImplementedError:
-            check("subdivide=%r raises on the generic basis" % sub,
-                  True, "")
     try:
-        S = eq.EquiTerminalSolver(m, M, 0, subdivide=3,
-                                  mode_basis='conduction', skin_freq=f)
+        S = eq.EquiTerminalSolver(m, M, 0, subdivide=3, skin_freq=f)
         p_used = getattr(S.redist, '_p', None)
         check("conduction basis is ALLOWED on uniform lambda",
               True, "rate = %.4g" % (abs(p_used) if p_used else 0.0))

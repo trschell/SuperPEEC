@@ -207,7 +207,7 @@ def main(argv=None):
         kin = ((q[(LENS[1], lam)] - q[(LENS[1], tiny)])
                - (q[(LENS[0], lam)] - q[(LENS[0], tiny)]))
         tgt = kin_exact/(MU0*H)*geo
-        print("%8.4g %8.3g | %9.4f pH | %8.4f %8.4f %9.1f%"
+        print("%8.4g %8.3g | %9.4f pH | %8.4f %8.4f %9.1f%%"
               % (dz*1e9, T/dz, geo*1e12, kin*1e12, tgt*1e12,
                  100*kin/tgt))
 

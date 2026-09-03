@@ -28,7 +28,7 @@ import sys
 import numpy as np
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
-from equiterminal import conduction_weights
+from enrich import conduction_weights
 
 MU0 = 4e-7*np.pi
 T = 200e-9
@@ -69,7 +69,7 @@ def solve(lam, nt, k, variant):
             cols.append(u); meta.append((fi, 'agg'))
             # modes on k sub-bars
             if variant == 'engine':
-                W = conduction_weights((1, k), (dz, dz), None, p=1.0/lam)
+                W = conduction_weights((1, k), (dz, dz), 1.0/lam)
             else:
                 # rebuild the same shape family with better sampling
                 zz = None

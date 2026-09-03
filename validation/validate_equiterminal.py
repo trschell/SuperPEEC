@@ -187,128 +187,6 @@ def part_e():
               "%.12g vs %.12g, ratio %.10f" % (Z.real, want, r))
 
 
-def part_f():
-    """PART F -- the skin-effect engine's mode bases (subdivide > 1).
-
-    Constructing ``Redistribution`` already runs its two build-time
-    guards -- the aggregate identity ``W_agg^T Z_sub W_agg == Z_full``
-    and net-zero mode weights -- as exceptions; they are re-asserted
-    here explicitly so a loosened guard cannot pass silently, and for
-    ALL THREE bases, since each fills ``W`` by a different rule.
-
-    The conduction basis gets a SPAN assertion on top: the shapes it was
-    built from (the Daniel/Sangiovanni-Vincentelli/White face and corner
-    exponentials at the build skin depth) are re-derived from the solver's
-    OWN sub-bar geometry (``Split.boxes`` centroids), not from the index
-    arithmetic ``conduction_weights`` uses, and must sit in span(W) to
-    the pruning tolerance. A wrong face-distance mapping, a swapped
-    split axis, or a dropped independent column shows up as a residual.
-    """
-    print("\nPART F -- skin-effect mode bases (subdivide > 1)")
-    freq = 1e10
-    m, M = build(STRAIGHT, freq)
-    delta = eq.skin_depth(m.uniform_sigma(), freq)
-    cond = None
-    for basis, k in (('diff', 3), ('linear', 4), ('conduction', 6)):
-        s = eq.EquiTerminalSolver(m, M, 0, subdivide=k, mode_basis=basis,
-                                  skin_freq=freq)
-        r = s.redist
-        nz = np.abs(r.W.sum(axis=0)).max()
-        check("net-zero  %s" % basis, nz < 1e-12, "max colsum %.2e" % nz)
-        if basis == 'conduction':
-            cond = s
-    r = cond.redist
-    lo, hi = r.split.boxes(r.cells[:1])
-    c = 0.5*(lo + hi)
-    x = c[:, r.tr[0]] - lo[:, r.tr[0]].min()
-    y = c[:, r.tr[1]] - lo[:, r.tr[1]].min()
-    dx, p = m.dx, (1 + 1j)/delta
-    pc = (1 + 1j)/(delta*np.sqrt(2.0))
-    shapes = np.stack(
-        [np.exp(-p*x) + np.exp(-p*(dx - x))
-         + np.exp(-p*y) + np.exp(-p*(dx - y)),
-         np.exp(-p*x) - np.exp(-p*(dx - x)),
-         np.exp(-p*y) - np.exp(-p*(dx - y)),
-         np.exp(-pc*(x + y)) + np.exp(-pc*(x + dx - y))
-         + np.exp(-pc*(dx - x + y)) + np.exp(-pc*(2*dx - x - y))],
-        axis=1)
-    P = np.concatenate([shapes.real, shapes.imag], axis=1)
-    P -= P.mean(axis=0, keepdims=True)            # the net-zero parts
-    keep = np.linalg.norm(P, axis=0) > 1e-10
-    P = P[:, keep]/np.linalg.norm(P[:, keep], axis=0)
-    res = P - r.W @ np.linalg.lstsq(r.W, P, rcond=None)[0]
-    rr = np.linalg.norm(res, axis=0).max()
-    check("span conduction", rr < 1e-6,
-          "max residual %.2e over %d shapes, km=%d" % (rr, P.shape[1], r.km))
-
-
-def part_g():
-    """PART G -- frequency-dependent conduction modes (set_frequency).
-
-    The conduction W depends on the skin depth, so ``solve`` retunes it
-    to the solve frequency on top of the cached geometric tables. The
-    check with teeth: a solver built at the WRONG frequency and retuned
-    must match a solver built fresh at the right one -- same W, same
-    folded blocks, same Z. Retuning from a LOW frequency also changes
-    km (the delta-dependent pruning), so the augmented-system rebuild
-    path is exercised, not just the re-fold. Both apply paths are
-    compared: FFT via the solved Z, CSR by the assembled blocks
-    themselves (bitwise -- same inputs, same arithmetic).
-    """
-    import time
-    print("\nPART G -- conduction set_frequency vs fresh build")
-    f_lo, f_hi = 1e7, 1e10
-    m, M = build(STRAIGHT, f_hi)
-    a = eq.EquiTerminalSolver(m, M, 0, subdivide=4, mode_basis='conduction',
-                              skin_freq=f_lo)
-    b = eq.EquiTerminalSolver(m, M, 0, subdivide=4, mode_basis='conduction',
-                              skin_freq=f_hi)
-    km_lo, nu_lo = a.redist.km, a.nu
-    Za, _, _ = a.solve(f_hi)             # retunes W from f_lo to f_hi
-    Zb, _, _ = b.solve(f_hi)
-    check("km retuned", a.redist.km == b.redist.km and a.nu == b.nu,
-          "km %d -> %d, nu %d -> %d" % (km_lo, a.redist.km, nu_lo, a.nu))
-    dz = abs(Za - Zb)/abs(Zb)
-    check("Z retuned == fresh (fft)", dz < 1e-10, "rel %.2e" % dz)
-    t0 = time.perf_counter()
-    a.redist.set_frequency(2.5e9)
-    t_re = time.perf_counter() - t0
-    print("         (retune %.3f s vs %.1f s first build)"
-          % (t_re, b.t_setup))
-    d = eq.EquiTerminalSolver(m, M, 0, subdivide=3, mode_basis='diff')
-    check("diff is frequency-independent",
-          not d.redist.set_frequency(2.5e9), "set_frequency no-op")
-
-    # km CHANGE across the retune (the pruning is delta-dependent), so
-    # nu shrinks and the augmented system -- mesh basis, Cholesky --
-    # must rebuild. setup3's k=3 grid gives km=5 at 1e2 Hz, km=4 at
-    # 1e9: cheap solves, and the path the STRAIGHT pair above misses.
-    m3, M3 = build(SETUP3, 1e9)
-    g1 = eq.EquiTerminalSolver(m3, M3, 0, subdivide=3,
-                               mode_basis='conduction', skin_freq=1e2)
-    nu0 = g1.nu
-    Zg1, _, _ = g1.solve(1e9)
-    g2 = eq.EquiTerminalSolver(m3, M3, 0, subdivide=3,
-                               mode_basis='conduction', skin_freq=1e9)
-    Zg2, _, _ = g2.solve(1e9)
-    dz = abs(Zg1 - Zg2)/abs(Zg2)
-    check("km-change rebuild", g1.nu == g2.nu and nu0 != g1.nu and dz < 1e-10,
-          "nu %d -> %d, rel %.2e" % (nu0, g1.nu, dz))
-    kw = dict(subdivide=3, mode_basis='conduction', use_fft=False,
-              rc_uu=1, rc_cross=2)
-    c1 = eq.EquiTerminalSolver(m3, M3, 0, skin_freq=f_lo, **kw)
-    c1.redist.set_frequency(f_hi)
-    c2 = eq.EquiTerminalSolver(m3, M3, 0, skin_freq=f_hi, **kw)
-    du = np.abs(c1.redist.Zuu - c2.redist.Zuu).max()
-    dc = np.abs(c1.redist.Zcross - c2.redist.Zcross).max()
-    dt = np.abs(c1.redist.Zt - c2.redist.Zt).max() \
-        if c2.redist.Zt is not None else 0.0
-    dr = np.abs(c1.redist.Ru - c2.redist.Ru).max()
-    check("csr blocks retuned == fresh", max(du, dc, dt, dr) == 0.0,
-          "max |diff| Zuu %.1e Zcross %.1e Zt %.1e Ru %.1e"
-          % (du, dc, dt, dr))
-
-
 def part_h():
     """PART H -- galvanically isolated multi-conductor models.
 
@@ -392,8 +270,6 @@ def main():
     part_c()
     part_d()
     part_e()
-    part_f()
-    part_g()
     part_h()
     print("\n%d checks failed" % len(fails))
     if fails:

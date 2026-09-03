@@ -299,9 +299,8 @@ def main():
     pe3 = sppeec_input.loads(equi_doc([1e7, 1.747e10]))
     me3 = pe3.model()
     swe3 = pe3.sweeper(me3, pe3.tree(me3))
-    check('subpixel model engages SubpixelModes under auto skin',
-          type(swe3.S.redist).__name__ == 'SubpixelModes',
-          type(swe3.S.redist).__name__)
+    check('subpixel model engages the surface palette under auto skin',
+          swe3.S.redist is not None and not swe3.S.redist.shared)
     zl, _, il = swe3.S.solve(1e7)
     zh3, _, ih3 = swe3.S.solve(1.747e10)
     # TRUE residual is the ground truth (the solver computes it
@@ -350,8 +349,8 @@ def main():
             keep[a*kmq:(a+1)*kmq, b*cper:(b+1)*cper] = True
         return np.where(keep, dense, 0.0)
     mk = rt.mode_mask
-    Zuu_o = masked(Wb.T @ Zs @ Wb, rt._rc_uu, kmq)[mk][:, mk]
-    Zc_o = masked(Wb.T @ Zs @ Gb, rt._rc_cross, 1)[mk]
+    Zuu_o = masked(Wb.T @ Zs @ Wb, rt._rc[0], kmq)[mk][:, mk]
+    Zc_o = masked(Wb.T @ Zs @ Gb, rt._rc[1], 1)[mk]
     e1 = abs(rt.Zuu.toarray() - Zuu_o).max()/abs(Zuu_o).max()
     e2 = abs(rt.Zcross.toarray() - Zc_o).max()/abs(Zc_o).max()
     check('mode-mode block matches dense oracle', e1 < 1e-9,
@@ -361,14 +360,14 @@ def main():
     check('mode weights net-zero', abs(rt.Wf.sum(axis=1)).max() < 1e-9,
           '%.2e' % abs(rt.Wf.sum(axis=1)).max())
     okr = True
+    rs = rt._sub_impedance().real
     for f, key in enumerate(rt._tkey):
         pc = rt._percell[key]
         if pc is None:
             continue
         sup = pc['fill'] > 1e-3
-        rr = (rt.k/(rt.sigma*rt.dx))/pc['fill'][sup]
-        if abs(1.0/np.sum(1.0/rr)
-               - 1.0/(rt.sigma*pc['fill'].mean()*rt.dx))                 > 1e-12/(rt.sigma*rt.dx):
+        par = 1.0/np.sum(1.0/(rs*rt._rfac[f, sup]))
+        if abs(par - rs/(rt.k*pc['fill'].mean())) > 1e-12*rs:
             okr = False
     check('fill-weighted sub-bar R reproduces sigma_eff exactly', okr)
 

@@ -101,7 +101,8 @@ PWC = {(0.25, 1e9): 0.0215517, (0.375, 1e9): 0.0256162,
        (0.5, 1e9): 0.0271256, (0.25, 1e10): 0.0215517,
        (0.375, 1e10): 0.0446211, (0.5, 1e10): 0.049023}
 
-_ship = eq.conduction_weights          # keep the shipped function
+import enrich
+_ship = enrich.conduction_weights      # keep the shipped function
 
 
 def _finish(shapes):
@@ -172,12 +173,11 @@ print("%-4s %-5s %-4s | %-6s %-11s %-9s %-9s | %s"
 for nper in LADDER:
     m, M = build(nper)
     for pal in ("P0", "P1"):
-        eq.conduction_weights = _ship if pal == 'P0' else \
+        enrich.conduction_weights = _ship if pal == 'P0' else \
             make_palette(pal)
         try:
             S = eq.EquiTerminalSolver(
-                m, M, 0, subdivide=KVAL, mode_basis='conduction',
-                boundary_only=True, skin_freq=max(FREQS))
+                m, M, 0, subdivide=KVAL, skin_freq=max(FREQS))
             km = S.redist.km
             for f in FREQS:
                 Z, _, info = S.solve(f, rtol=1e-8, maxiter=MAXITER)
@@ -197,6 +197,6 @@ for nper in LADDER:
                   % (pal, nper, type(e).__name__, str(e)[:70]),
                   flush=True)
         finally:
-            eq.conduction_weights = _ship
+            enrich.conduction_weights = _ship
 print("\ndelivered = share of the PWC->truth crowding correction; "
       "100 = truth.")

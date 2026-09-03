@@ -216,12 +216,65 @@ the scoped code is ~1300 lines from 3334, i.e. about -2000 on `src/`.
 | Phase | commit | `src/` | `validation/` | `studies/` | scoped src files | suite | anchors |
 |---|---|---|---|---|---|---|---|
 | 0 baseline | 9e672ff | 27127 | 12054 | 11054 | equiterminal 3398, cornermode 615, subpixel 444, voxmodel 1179, sppeec_input 1399 | 44 pass / 0 skip / 1 fail (`validate_aniso`, stale guard; fixed, 9/9 standalone) | setup1 1.0187104968887117e-30, setup2 3.740159228711359e-30, setup3 2.34153831468213e-31 |
-| 1 geometry + tables | 2f0e495 | 26826 | 12294 | 11054 | equiterminal 3165, cornermode 607, enrich 385 (new), subpixel 0 (deleted), voxmodel 1179, sppeec_input 1399 | 46 pass / 0 skip / 0 fail (incl. new `validate_enrich`) | all three BIT-IDENTICAL to phase 0 |
+| 1 geometry + tables | cea4b11 | 26826 | 12294 | 11054 | equiterminal 3165, cornermode 607, enrich 385 (new), subpixel 0 (deleted), voxmodel 1179, sppeec_input 1399 | 46 pass / 0 skip / 0 fail (incl. new `validate_enrich`) | all three BIT-IDENTICAL to phase 0 |
+| 2 the Enrichment class | (next commit) | 26278 | 12251 | 11050 | equiterminal 1943, cornermode 607, enrich 1060, voxmodel 1179, sppeec_input 1398 | 46 pass / 0 skip / 0 fail | all three BIT-IDENTICAL to phase 0 |
 
 Scoped validators at baseline: equiterminal 407, subpixel 380, corner
 202, superconductor 249, aniso 189, aniso_sigma 220, input_lppr 520.
 
 ## 8. Phase log
+
+### Phase 2 (2026-09-03): one Enrichment class
+
+* `enrich.Enrichment` replaces `Redistribution` and `SubpixelModes`:
+  one constructor, one weight setter, one assembly, one frequency
+  policy, one preconditioner, with the shared-weights (Toeplitz/FFT)
+  and per-cell (surface palette, CSR) configurations as a flag on the
+  same fold. `material_response`, `london_rate`, `conduction_weights`
+  moved into `enrich.py`; `netzero_prune` is the one net-zero /
+  normalise / pivoted-QR prune (was three); `surface_weights` and
+  `_surface_geometry` are the per-cell palette; `_near_surface` is the
+  one placement rule (`reach` cells beyond the exposed layer; the
+  surface palette's ring rule is the same rule on the resolved
+  surface -- reach 0 reproduces both old defaults).
+* DELETED: the `diff` and `linear` palettes (the one deliberate feature
+  removal; TOML `skin.basis` accepts only `conduction` until phase 5
+  drops the key), `split_axis`, `mode_basis`, `boundary_only`
+  (`reach` on the solver), the runtime aggregate self-check, the
+  superconductor `mode_basis` guard. The deleted measurement prose
+  lives in docs/enrichment_history.md.
+* Validators: `validate_equiterminal` parts F and G removed (F's
+  palettes are gone; G's retune-equals-fresh is `validate_enrich` H,
+  on TOML-built bars so it no longer needs the VoxHenry corpus);
+  `validate_superconductor` E no longer asserts that generic palettes
+  are refused; `validate_subpixel` reads `shared`, `_rc`, `_rfac`;
+  `validate_enrich` gains H (frequency policy: km-change rebuild, FFT
+  Z retune == fresh, CSR blocks bitwise, London Ru scales exactly with
+  w and the rate does not move) and I (the London bar: plain exactly
+  bulk, modes lift kinetic/bulk to 1.32 against a 1e-8 reference,
+  band 1.30..1.55).
+* A/B against a worktree of cea4b11 (same five models): every block,
+  spectrum and matvec agrees to <= 1.5e-11; the residual is last-bit
+  rounding of the rate (1e-15 in W, amplified to 1e-11 in the
+  spectra). One trap found and fixed: with 16 candidate columns on 9
+  sub-bars (k = 3) symmetric shapes tie in norm and the pivoted QR's
+  choice depends on the LAST BIT of the column mean and norm -- a 2-D
+  reduction rounds differently from the old per-column loop and picked
+  a different (equal-span) basis. The prune keeps the per-column
+  arithmetic on purpose.
+* Pre-existing defect found: `studies/london_film.py` could not print
+  its result line (a bare trailing `%`) since 4ca6684; fixed in place.
+  Benches, phase-1 worktree vs this tree (nt = 2, per-square
+  normalisation): modes off 54.1% / 54.1%; full palette 76.3% /
+  76.3% (geometric term 0.2323 vs 0.2324 pH, a 4e-4 shift from the
+  preconditioner's self block now coming from the D = 0 table, which
+  moves the Krylov path within the solve tolerance); film palette
+  83.6% / 83.6%. London bar with the 1e-8 reference: 1.3009 at two
+  cells, 1.3517 at four (no "before" exists: the old bench crashed on
+  its 1e-9 reference, every mode column pruned at that rate).
+* Ledger: src 26826 -> 26278 (-548 this phase, -849 total). NOTE the
+  phase-1 row first recorded the pre-amend hash; a phase's hash is now
+  stamped by the NEXT phase's commit.
 
 ### Phase 1 (2026-09-03): one geometry, one table cache
 

@@ -42,8 +42,7 @@ def sp_profile(path, freq, engine=False):
     M = m.build_tree()
     m.prepare(M, freq)
     S = eq.EquiTerminalSolver(m, M, 0, subdivide=engine,
-                              skin_freq=(freq if engine else None),
-                              mode_basis=('conduction' if engine else 'diff'))
+                              skin_freq=(freq if engine else None))
     Z, i, _info = S.solve(freq)
     J = vtkout.current_density(M, np.asarray(i)[:S.efg], m.dims)
     occ = np.asarray(m.struc(), dtype=bool)

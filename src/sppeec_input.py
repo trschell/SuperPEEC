@@ -484,7 +484,7 @@ class Problem:
             raise ValueError("skin.mode must be 'auto' (engage when "
                              "the cell size justifies it), 'on' or "
                              "'off', got %r" % self.skin['mode'])
-        if self.skin['basis'] not in ('conduction', 'linear', 'diff'):
+        if self.skin['basis'] != 'conduction':
             raise ValueError("skin.basis must be 'conduction' (the "
                              "measured best), 'linear' or 'diff', "
                              "got %r" % self.skin['basis'])
@@ -1196,7 +1196,7 @@ class _EquiSweep:
                     '"conduction" }')
         if getattr(m, 'subpixel', None) is not None:
             # fill models have mixed sigma_eff by construction, but the
-            # surface-anchored SubpixelModes engine handles exactly
+            # surface-anchored palette of the engine handles exactly
             # that -- supported, not degraded
             return None
         try:
@@ -1286,7 +1286,7 @@ class _EquiSweep:
                 # port axis is the mode-carrying axis, the width is
                 # transverse to it. Explicit values pass through.
                 # SCOPE: coarse-engine (FFT-path) models only --
-                # subpixel models run SubpixelModes' SPARSE path,
+                # subpixel models run the per-cell SPARSE path,
                 # whose cost grows as (2rc+1)^3 and whose Kelvin
                 # bands are validated at (3,4); they keep the small
                 # radii unless set explicitly.
@@ -1308,9 +1308,8 @@ class _EquiSweep:
                 rcu = au if rcu is None else int(rcu)
                 rcc = ac if rcc is None else int(rcc)
             self.skin_kwargs = dict(
-                subdivide=sub, mode_basis=sk['basis'],
-                rc_uu=rcu, rc_cross=rcc,
-                boundary_only=sk['boundary_only'])
+                subdivide=sub, rc_uu=rcu, rc_cross=rcc,
+                reach=0 if sk['boundary_only'] else None)
             if sk['f_ref'] is not None:
                 self.skin_kwargs['skin_freq'] = float(sk['f_ref'])
         kw.update(self.skin_kwargs)

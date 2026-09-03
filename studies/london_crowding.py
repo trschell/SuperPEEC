@@ -86,8 +86,7 @@ def imz(lam, freq, nx, nt, dx, modes=0):
     m, M = bar('%g_%d_%d' % (lam, nt, modes), lam, freq, nx, nt, dx)
     kw = {}
     if modes:
-        kw = dict(subdivide=int(modes), mode_basis='conduction',
-                  skin_freq=freq)
+        kw = dict(subdivide=int(modes), skin_freq=freq)
     S = eq.EquiTerminalSolver(m, M, 0, **kw)
     Z, _, _ = S.solve(freq)
     return Z.imag

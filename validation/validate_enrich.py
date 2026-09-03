@@ -25,6 +25,18 @@ modes and the partial-cell inductance correction all read the same
   F  partial_dL: None on a whole-cell model, exactly symmetric, zero on
      whole-whole pairs, and one slab pair against first principles.
 
+Phase 2 -- THE FAMILY (``Enrichment``), generic over its palettes:
+
+  H  frequency policy: a solver built at the WRONG frequency and
+     retuned matches one built fresh (same km, same Z on the FFT path,
+     BITWISE blocks on the CSR path, including a km change that
+     rebuilds the augmented system); a London rate does not move, so
+     set_frequency returns False and only Ru scales, exactly with w;
+  I  the London bar (studies/london_crowding.py): at two cells across
+     a lossless 360 nm niobium bar the plain mesh returns EXACTLY the
+     bulk kinetic inductance (symmetry pins the split) and the modes
+     lift kinetic/bulk to ~1.42, toward the equal-area cylinder's 1.53.
+
 Run: PYTHONPATH=src python3 validation/validate_enrich.py
 """
 import os as _op
@@ -233,6 +245,91 @@ freq = [1e10]
     U, inv = unique_separations(D)
     check('unique separations invert', np.array_equal(U[inv], D)
           and U.shape[0] == len({tuple(r) for r in D}))
+
+    print('\nH -- frequency policy (retune == fresh)')
+    import equiterminal as eq
+    faces = lambda i, sgn: ", ".join(                     # noqa: E731
+        '[%d, %d, %d, "%s"]' % (i, j, k, sgn) for j in range(4)
+        for k in range(4))
+    bar = '\n'.join([
+        '[grid]', 'dims = [24, 4, 4]', 'pitch = 10e-6', '[[block]]',
+        'from = [0, 0, 0]', 'to = [24, 4, 4]', 'sigma = 5.8e7', '[port]',
+        'equipotential = true', 'p_faces = [%s]' % faces(0, '-x'),
+        'n_faces = [%s]' % faces(23, '+x'), '[solve]', 'freq = [1e10]'])
+    pb = sppeec_input.loads(bar)
+    mb = pb.model()
+    Mb = pb.tree(mb)
+    f_lo, f_hi = 1e2, 1e10
+    mb.prepare(Mb, f_hi)
+    a = eq.EquiTerminalSolver(mb, Mb, 0, subdivide=4, skin_freq=f_lo)
+    b = eq.EquiTerminalSolver(mb, Mb, 0, subdivide=4, skin_freq=f_hi)
+    km_lo, nu_lo = a.redist.km, a.nu
+    Za, _, _ = a.solve(f_hi)             # retunes W from f_lo to f_hi
+    Zb, _, _ = b.solve(f_hi)
+    check('km retuned, augmented system rebuilt',
+          a.redist.km == b.redist.km and a.nu == b.nu and nu_lo != a.nu,
+          'km %d -> %d, nu %d -> %d' % (km_lo, a.redist.km, nu_lo, a.nu))
+    check('Z retuned == fresh (FFT path)', abs(Za - Zb)/abs(Zb) < 1e-10,
+          'rel %.2e' % (abs(Za - Zb)/abs(Zb)))
+    kw = dict(subdivide=3, use_fft=False, rc_uu=1, rc_cross=2)
+    c1 = eq.EquiTerminalSolver(mb, Mb, 0, skin_freq=f_lo, **kw)
+    c1.redist.set_frequency(f_hi)
+    c2 = eq.EquiTerminalSolver(mb, Mb, 0, skin_freq=f_hi, **kw)
+    diffs = [abs(getattr(c1.redist, nm) - getattr(c2.redist, nm)).max()
+             for nm in ('Zuu', 'Zcross', 'Zt', 'Ru')]
+    check('CSR blocks retuned == fresh, bitwise', max(diffs) == 0.0,
+          'max |diff| %s' % ' '.join('%.1e' % v for v in diffs))
+    lb = bar.replace('sigma = 5.8e7', 'lambda_l = 90e-9').replace(
+        'pitch = 10e-6', 'pitch = 200e-9')
+    pl = sppeec_input.loads(lb)
+    ml = pl.model()
+    Ml = pl.tree(ml)
+    ml.prepare(Ml, 1e9)
+    L1 = eq.EquiTerminalSolver(ml, Ml, 0, subdivide=3, skin_freq=1e9)
+    Ru1 = L1.redist.Ru.copy()
+    moved = L1.redist.set_frequency(2e9)
+    check('London rate does not move: set_frequency False, Ru ~ w exactly',
+          moved is False and abs(L1.redist.Ru - 2*Ru1).max() == 0.0
+          and np.imag(L1.redist._p) == 0.0)
+
+    print('\nI -- the London bar: modes lift kinetic/bulk at two cells')
+    MU0 = 4e-7*np.pi
+    side, ln, lam, fr = 3.6e-7, 3.6e-6, 9e-8, 2.5e9
+    nt = 2
+    dxb = side/nt
+    nx = int(round(ln/dxb))
+    fb = lambda i, sgn: ", ".join(                        # noqa: E731
+        '[%d, %d, %d, "%s"]' % (i, j, k, sgn) for j in range(nt)
+        for k in range(nt))
+
+    def imz(lam_v, modes):
+        doc = '\n'.join([
+            '[grid]', 'dims = [%d, %d, %d]' % (nx, nt, nt),
+            'pitch = %g' % dxb, '[[block]]', 'from = [0, 0, 0]',
+            'to = [%d, %d, %d]' % (nx, nt, nt), 'lambda_l = %g' % lam_v,
+            '[port]', 'equipotential = true',
+            'p_faces = [%s]' % fb(0, '-x'), 'n_faces = [%s]' % fb(nx - 1, '+x'),
+            '[solve]', 'freq = [%g]' % fr])
+        pz = sppeec_input.loads(doc)
+        mz = pz.model()
+        Mz = pz.tree(mz)
+        mz.prepare(Mz, fr)
+        kwz = dict(subdivide=3, skin_freq=fr) if modes else {}
+        Z, _, _ = eq.EquiTerminalSolver(mz, Mz, 0, **kwz).solve(fr)
+        return Z.imag
+    # lambda difference against a SMALL lambda (1e-8: at 1e-9 the rate
+    # 1/lambda prunes every mode column on a 180 nm cell), normalised
+    # by the bulk difference so the plain, symmetry-pinned mesh reads
+    # exactly 1
+    w = 2*np.pi*fr
+    lam2 = 1e-8
+    dbulk = MU0*(lam**2 - lam2**2)*ln/(side*side)
+    ratio = {md: (imz(lam, md) - imz(lam2, md))/w/dbulk for md in (0, 1)}
+    check('plain mesh returns exactly bulk (symmetry-pinned split)',
+          abs(ratio[0] - 1.0) < 2e-3, 'ratio %.4f' % ratio[0])
+    check('modes lift kinetic/bulk toward the cylinder analog 1.53 '
+          '(band 1.30..1.55)', 1.30 < ratio[1] < 1.55,
+          'ratio %.4f' % ratio[1])
 
     print('\n%d checks failed' % len(FAIL))
     return 1 if FAIL else 0

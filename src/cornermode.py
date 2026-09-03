@@ -11,7 +11,7 @@ The referee (studies/corner_referee.py) measured the fix: TABULATED
 per-corner-class correction fields at three skin depths, tapered to 2W
 support, deliver 91-99% of the corner error with 3 modes per corner.
 
-DESIGN. Follows the net-zero mode architecture (Redistribution / C.2):
+DESIGN. Follows the net-zero mode architecture (enrich.Enrichment):
 
 * A corner mode is a KCL-invisible current pattern over the SUB-BARS
   (in-plane transverse split, z unsplit) of the filaments in a compact
@@ -52,7 +52,7 @@ machinery is its natural home; docketed, not attempted here.
 V1 SCOPE: xy-plane corners with z-uniform occupancy through the patch,
 equal arm widths of 2..4 cells (wider corners have small error --
 ladder: <= 1.2% at 8 across), uniform sigma, engine off (composition
-with Redistribution/SubpixelModes = phase 2 -- NOTE phase 2 must
+with the engine = phase 2 -- NOTE phase 2 must
 re-tabulate against a coarse+engine baseline, or the tables
 double-count the near-corner crowding the engine fixes). Corners that
 fail a check are SKIPPED with a warning, never fatal.
@@ -86,7 +86,7 @@ def _tabulate(W_cells, dx, sigma, KF=6, ratios=(1e-3, 2.0, 4.0),
     baseline -- per-station transverse modes carrying the exact 1-D
     strip skin profile -- on the u-arm (world x) or v-arm (world y)
     respectively, matching the coarse engine's SINGLE-AXIS coverage
-    (Redistribution modes live only on port-axis-parallel filaments).
+    (engine modes live only on port-axis-parallel filaments).
     Without this the tables double-count the near-corner crowding the
     engine already fixes (phase-2 requirement)."""
     nz = W_cells if nz is None else int(nz)

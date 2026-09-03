@@ -334,7 +334,6 @@ def main():
     check("skin auto engages on equibar (resolution-aware k, "
           "conduction)",
           swe.S.skin_k == _kexp
-          and swe.skin_kwargs['mode_basis'] == 'conduction'
           and abs(swe.S.skin_freq - 1e9) < 1,
           'k=%d (expect %d) f_ref %.3g'
           % (swe.S.skin_k, _kexp, swe.S.skin_freq))
@@ -394,8 +393,8 @@ def main():
     # rho*L/(P*delta) ~2.8x (spurious interior excitation, the 2-D
     # study's warning confirmed in 3-D); boundary-only lands within
     # the physical band. Gate both facts.
-    check("default resolves boundary_only = true",
-          swe.skin_kwargs.get('boundary_only') is True)
+    check("default resolves boundary_only = true (reach 0)",
+          swe.skin_kwargs.get('reach') == 0)
     wide = '\n'.join([
         '[grid]', 'dims = [24, 20, 20]', 'pitch = 10e-6',
         '[[block]]', 'from = [0, 0, 0]', 'to = [24, 20, 20]',

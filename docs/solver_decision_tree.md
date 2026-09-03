@@ -59,7 +59,7 @@ flowchart TD
     M2 --> S
     M3 --> SZ[skip subdivision]
     S -- "cells < skin depth\nor DC/low f" --> SZ2[subdivide=False]
-    S -- "need in-cell profile\n(d > delta at fmax)" --> SK[subdivide='auto',\nmode_basis='conduction'\nCUBIC CELLS ONLY]
+    S -- "need in-cell profile\n(d > delta at fmax)" --> SK[subdivide='auto'\nconduction palette,\nper-axis cells]
     SZ2 --> BAS{cycle basis}
     SZ --> BAS
     SK --> BAS
@@ -77,7 +77,7 @@ Settings detail:
 |---|---|---|
 | conductivity | homogeneous vs mixed | automatic (`resistances()`); mixed needs cell scheme (guard) |
 | superconductor | any lambdaL | complex r via `impedance_density`; kinetic L exact; `subdivide` refused |
-| skin resolution | wires/conductors thicker than delta | `subdivide='auto', mode_basis='conduction'` (best basis, 93% delivered); frequency-retuning automatic; **cubic cells only** (aniso refused); use generous `rc` on staircased wires |
+| skin resolution | wires/conductors thicker than delta | `subdivide='auto'` (conduction palette, 93% delivered); frequency-retuning automatic; anisotropic cells supported; use generous `rc` on staircased wires |
 | anisotropic pitch | `VoxelModel.d` per-axis | native; aspect-compensating leaves automatic; accuracy ~1e-3 at 2:1, ~5e-3 floor at 4:1; skin engine refused |
 | multiply-connected conductor (holes: antipads, slots) | any | automatic since 2026-08-08: tree-cotree hole generators complete the overcomplete basis (`nholes` reported); `selected` always worked |
 | multi-conductor | separate components | spanning FOREST automatic; per-port component guard |
@@ -187,7 +187,7 @@ exact diagonal on dielectric rows) is the docketed path.
 ```python
 # LpR port solve
 S = EquiTerminalSolver(model, M, port, basis='auto',
-                       subdivide='auto', mode_basis='conduction')
+                       subdivide='auto')
 z, i, info = S.solve(freq)
 
 # LpPR port solve (dielectrics, PDN, capacitive)

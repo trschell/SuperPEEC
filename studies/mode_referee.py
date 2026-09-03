@@ -38,9 +38,9 @@ prob = sppeec_input.loads(doc())
 m = prob.model()
 sw = prob.sweeper(m, prob.tree(m))
 # the engine at k=4 for a tractable dense space (axis 0 = x)
-r2 = equiterminal.SubpixelModes(m, sw.S.M, 0, sw.S.fil_axis,
-                                sw.S.fil_cell, k=4, term=None,
-                                skin_freq=1e7)
+import enrich
+r2 = enrich.Enrichment(m, sw.S.M, 0, sw.S.fil_axis, sw.S.fil_cell, 4,
+                       freq=1e7)
 n, k = r2.nfil, r2.k
 ns = n*k
 print('%d filaments, %d sub-bars' % (n, ns), flush=True)
