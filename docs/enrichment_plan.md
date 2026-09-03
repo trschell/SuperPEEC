@@ -216,11 +216,56 @@ the scoped code is ~1300 lines from 3334, i.e. about -2000 on `src/`.
 | Phase | commit | `src/` | `validation/` | `studies/` | scoped src files | suite | anchors |
 |---|---|---|---|---|---|---|---|
 | 0 baseline | 9e672ff | 27127 | 12054 | 11054 | equiterminal 3398, cornermode 615, subpixel 444, voxmodel 1179, sppeec_input 1399 | 44 pass / 0 skip / 1 fail (`validate_aniso`, stale guard; fixed, 9/9 standalone) | setup1 1.0187104968887117e-30, setup2 3.740159228711359e-30, setup3 2.34153831468213e-31 |
+| 1 geometry + tables | 2f0e495 | 26826 | 12294 | 11054 | equiterminal 3165, cornermode 607, enrich 385 (new), subpixel 0 (deleted), voxmodel 1179, sppeec_input 1399 | 46 pass / 0 skip / 0 fail (incl. new `validate_enrich`) | all three BIT-IDENTICAL to phase 0 |
 
 Scoped validators at baseline: equiterminal 407, subpixel 380, corner
 202, superconductor 249, aniso 189, aniso_sigma 220, input_lppr 520.
 
 ## 8. Phase log
+
+### Phase 1 (2026-09-03): one geometry, one table cache
+
+* `src/enrich.py` (new): `Split` (one vectorised sub-prism box builder:
+  k x k transverse, 1-D film/slab, in-plane corner, whole cell,
+  terminal bar), `PairTables` (raw sub-prism mutual tables between any
+  two parallel splits, cached by separation set, chunked), the pure
+  `unique_separations` / `neighbour_pairs` helpers, and `partial_dL`:
+  subpixel stage B for cylinders AND slabs as one function -- the
+  aggregate-aggregate block of the fold, values computed once per
+  distinct (offset, w_i, w_j) and gathered, emitted exactly symmetric.
+* DELETED: `src/subpixel.py` (444 lines: `slab_dL`, `_build`,
+  `build_dZ`/`_profile_weights` -- the C.1 imposed-profile null is now
+  one paragraph in `partial_dL`'s docstring); from `Redistribution`:
+  `_sub_boxes`, `_full_boxes`, `_term_boxes`, `_terminal_boxes`,
+  `_raw_tables`, `_raw_terminal_table` (rebuilt as 5 lines on the
+  tables), `_uniq_sep`, `_check_aggregate` (its identity is now part D
+  of `validate_enrich`), the inline separation keying in
+  `_build_truncated`; from `cornermode.py`: the two box loops and
+  `ModeStack`'s private `_Lec_raw` kernel evaluation (now the same
+  tables, gathered).
+* The engine's transverse-axes list is `Redistribution.tr` now; `split`
+  is the `Split` object. `EquiTerminalSolver` and the LpPR sweeper call
+  one `partial_dL`; the LpPR path thereby gains slab stage B for free.
+* A/B GATE (scratchpad abdump/abcmp, baseline worktree at 5242dd1, five
+  models: equibar FFT conduction, equibar CSR diff, round-wire cylinder
+  dL + SubpixelModes, two-film slab dL, corner Z-trace ModeStack):
+  every mode block, FFT spectrum, Ru and Zt BIT-IDENTICAL; `apply_Z` on
+  a random vector identical to 1e-16..1e-19 on the engine paths. Not
+  bit-identical, all explained: corner<->engine cross block Zec and the
+  corner-stack matvec at 1.2e-11 (tables are evaluated at the origin
+  and translated; the closed-form kernel's cancellation amplifies
+  coordinate ulps -- validate_corner's physics bands are the gate);
+  slab dL at 3e-13 (einsum vs per-entry dots); cylinder dL drops 22670
+  entries that were all below 3e-29, rounding dust the old loop emitted
+  on full-cell pairs, and agrees to 5e-11 on every real entry.
+* `validate_enrich.py` (new, 27 checks): boxes tile, tables == explicit
+  `box_mutual_matrix`, reciprocity, the aggregate identity, terminal
+  bars, `partial_dL` symmetry/first-principles pair/whole-whole zero,
+  neighbour pairs. `validate_equiterminal` F drops the `aggregate_err`
+  check (moved here) and reads `Split.boxes`; `validate_subpixel` reads
+  `Split.boxes`.
+* Ledger: src 27127 -> 26826 (-301). validation +247, of which 242 is
+  the new validator.
 
 ### Phase 0 (2026-09-03)
 

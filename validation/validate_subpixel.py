@@ -115,10 +115,10 @@ def main():
           '%.1e' % info['true_residual'])
 
     # -- stage B: sparse partial-cell inductance ----------------------
-    import subpixel
+    import enrich
     from terminal import box_mutual_matrix
     M = prob.tree(m)          # the fill wire from the R gate above
-    dL = subpixel.build_dL(m, M)
+    dL = enrich.partial_dL(m, M)
     check('dL is exactly symmetric', abs(dL - dL.T).max() == 0.0)
     mf = sppeec_input.loads(
         '\n'.join(['[grid]', 'dims = [8, 4, 4]', 'pitch = 1e-6',
@@ -128,7 +128,7 @@ def main():
                    'n_faces = [[7, 1, 1, "+x"]]',
                    '[solve]', 'freq = [1e5]'])).model()
     check('full-cell model -> no dL',
-          subpixel.build_dL(mf, None) is None)
+          enrich.partial_dL(mf, None) is None)
     # oracle: one near pair from first principles
     spx = m.subpixel
     k, axis = spx['k'], spx['axis']
@@ -218,7 +218,7 @@ def main():
     # The A+B stack at 8 cells across the section delivers the exact
     # round-wire R_AC/R_DC to a few percent through dx/delta = 2 --
     # measured 2026-08-18, and the imposed-profile alternative
-    # (subpixel.build_dZ) measured WORSE (see its docstring), which
+    # measured WORSE (see enrich.partial_dL), which
     # is the recorded justification for solved-amplitude C.2 modes.
     from scipy.special import jv
     MU0 = 4e-7*math.pi
@@ -333,7 +333,7 @@ def main():
     rt = st.redist
     rt.set_frequency(1e10)
     nf, kq, kmq = rt.nfil, rt.k, rt.km
-    Zs = tmod.box_mutual_matrix(rt.lo, rt.hi, rt.axis)
+    Zs = tmod.box_mutual_matrix(*rt.split.boxes(rt.cells), rt.axis)
     Wb = np.zeros((nf*kq, nf*kmq))
     Gb = np.zeros((nf*kq, nf))
     for f in range(nf):

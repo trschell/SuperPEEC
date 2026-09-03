@@ -76,6 +76,8 @@ import meshgraph as mg
 import sppeec_status as _spstatus
 import terminal as tm
 import stencils as st
+from enrich import (Split, PairTables, unique_separations,
+                    neighbour_pairs, partial_dL)
 
 _AXIS_ORIENT = {0: 'f', 1: 'e', 2: 'g'}
 
@@ -672,7 +674,7 @@ def conduction_weights(kk, dx, delta, p=None):
               else (float(dx[0]), float(dx[1])))
     u = (np.arange(k0) + 0.5)/k0
     v = (np.arange(k1) + 0.5)/k1
-    U, V = np.meshgrid(u, v, indexing='ij')       # matches _sub_boxes
+    U, V = np.meshgrid(u, v, indexing='ij')       # matches Split.boxes
     x = U.ravel()*d0                              # distance from the low
     y = V.ravel()*d1                              # face, per split axis
     p = (1.0 + 1.0j)/delta if p is None else complex(p)
@@ -789,7 +791,7 @@ class Redistribution:
         kk = (int(k), int(k)) if np.isscalar(k) else tuple(int(v) for v in k)
         if min(kk) < 1 or max(kk) < 2:
             raise ValueError("k must give at least two sub-filaments")
-        self.split = others
+        self.tr = others
         self.kk = kk
         self.k = kk[0]*kk[1]
         # Per-axis pitch (2026-09-01): the filament's AXIAL step and
@@ -853,7 +855,7 @@ class Redistribution:
         if self.boundary_only:
             occ = np.asarray(model.struc()).astype(bool)
             cc = np.asarray(fil_cell)[self.sel]
-            s0, s1 = self.split
+            s0, s1 = self.tr
             keep = np.zeros(len(cc), dtype=bool)
             for t, d in ((s0, +1), (s0, -1), (s1, +1), (s1, -1)):
                 nb = cc.copy()
@@ -869,10 +871,8 @@ class Redistribution:
             self._bnd = keep
         self.nfil = self.sel.size
         self.cells = fil_cell[self.sel]
-        self.lo, self.hi = self._sub_boxes(self.cells)
-        self.flo, self.fhi = self._full_boxes(self.cells)
-        self.asub = (self.dt[0]/kk[0])*(self.dt[1]/kk[1])
-        self.afull = self.dt[0]*self.dt[1]
+        self.split = Split.transverse(self.axis, kk, d3)
+        self.whole = Split(self.axis, (1, 1, 1), d3)
         # Per-filament weights, IDENTICAL for every filament. Columns
         # span (part of) the NET-ZERO space -- that is the load-bearing
         # property: zero net current => zero incidence => invisible to
@@ -912,7 +912,7 @@ class Redistribution:
             k0, k1 = kk
             u = (np.arange(k0) + 0.5)/k0 - 0.5
             v = (np.arange(k1) + 0.5)/k1 - 0.5
-            U, V = np.meshgrid(u, v, indexing='ij')   # matches _sub_boxes
+            U, V = np.meshgrid(u, v, indexing='ij')   # matches Split.boxes
             W = np.stack([U.ravel(), V.ravel()], axis=1)
             W -= W.mean(axis=0, keepdims=True)        # enforce net-zero
         elif self.mode_basis == 'diff':
@@ -924,7 +924,6 @@ class Redistribution:
             raise ValueError("mode_basis must be 'diff', 'linear' or "
                              "'conduction', got %r" % (mode_basis,))
         self.csr_max_gb = float(csr_max_gb)
-        self._check_aggregate()
         self.use_fft = bool(use_fft)
         self._term = term
         self._rc_uu, self._rc_cross = int(rc_uu), int(rc_cross)
@@ -932,8 +931,7 @@ class Redistribution:
         # sub-bar coupling tables keyed by the separation set, and the
         # KDTree pair lists. They are what make set_frequency cheap --
         # the kernel evaluations dominate assembly and never change.
-        self._geom = {}
-        self._geom_t = {}
+        self.tables = PairTables()
         self._pairs = {}
         self._set_W(W)
         self._assemble()
@@ -1050,7 +1048,7 @@ class Redistribution:
         if self.nmode == 0:
             return None
         from terminal import box_mutual_matrix
-        lo, hi = self._sub_boxes(self.cells[:1])
+        lo, hi = self.split.boxes(self.cells[:1])
         Ls = box_mutual_matrix(lo, hi, self.axis)
         r_sub = self._sub_impedance()
         A = r_sub*(self.W.T @ self.W) + jw*(self.W.T @ (Ls @ self.W))
@@ -1072,88 +1070,16 @@ class Redistribution:
         operator it preconditions. Per-axis ``z*l/a_sub`` -- on a cubic
         model exactly the old ``z*k/dx``.
         """
-        return self._z*self.dax/self.asub
-
-    def _sub_boxes(self, cells):
-        """The parallel sub-bars of each filament: the cross-section cut
-        ``kk[0] x kk[1]`` over the two transverse axes, full length."""
-        d = self.axis
-        s0, s1 = self.split
-        k0, k1 = self.kk
-        d3, dax = self.d3, self.dax
-        d0, d1 = self.dt
-        h0, h1 = d0/k0, d1/k1
-        cells = np.atleast_2d(np.asarray(cells))
-        # VECTORISED (2026-08-29). This was a Python triple loop over
-        # cells x k0 x k1 building two 3-lists per sub-bar. It is pure
-        # index arithmetic with no cross-iteration dependence, and the
-        # engine calls it once over EVERY mode-carrying filament -- on
-        # a thin-film model, where boundary_only prunes almost nothing
-        # (94.7% of the RSFQ XNOR's cells are boundary cells), that is
-        # 3.1M x 36 = 111M iterations on one core, and it dominated
-        # the mode build. Same values, same sub-bar order
-        # (p*k1 + q within a filament).
-        c = cells.astype(float)
-        n = len(c)
-        pq = np.arange(self.k)
-        P = (pq//k1).astype(float)
-        Q = (pq % k1).astype(float)
-        lo = np.repeat((c*d3)[:, None, :], self.k, axis=1)
-        hi = np.repeat(((c + 1.0)*d3)[:, None, :], self.k, axis=1)
-        lo[:, :, d] = ((c[:, d] + 0.5)*dax)[:, None]  # centre to centre
-        hi[:, :, d] = ((c[:, d] + 1.5)*dax)[:, None]
-        lo[:, :, s0] = (c[:, s0]*d0)[:, None] + P[None, :]*h0
-        hi[:, :, s0] = (c[:, s0]*d0)[:, None] + (P[None, :] + 1.0)*h0
-        lo[:, :, s1] = (c[:, s1]*d1)[:, None] + Q[None, :]*h1
-        hi[:, :, s1] = (c[:, s1]*d1)[:, None] + (Q[None, :] + 1.0)*h1
-        lo = lo.reshape(n*self.k, 3)
-        hi = hi.reshape(n*self.k, 3)
-        return lo, hi
-
-    def _full_boxes(self, cells):
-        """The undivided filament of each subdivided cell."""
-        d = self.axis
-        d3, dax = self.d3, self.dax
-        cells = np.atleast_2d(np.asarray(cells))
-        lo = np.zeros((len(cells), 3))
-        hi = np.zeros((len(cells), 3))
-        for f, c in enumerate(cells):
-            lo[f] = [c[0]*d3[0], c[1]*d3[1], c[2]*d3[2]]
-            hi[f] = [(c[0]+1)*d3[0], (c[1]+1)*d3[1], (c[2]+1)*d3[2]]
-            lo[f][d] = (c[d] + 0.5)*dax
-            hi[f][d] = (c[d] + 1.5)*dax
-        return lo, hi
+        return self._z*self.dax/self.split.area
 
     def _neighbour_pairs(self, radius, other=None):
-        """Filament index pairs within ``radius`` cells (inf-norm).
-
-        Both directions plus the self pair, so the assembled block is
-        symmetric without a second pass. Cached: the cells never move,
-        so re-assembly (set_frequency) must not pay the KDTree again.
-        """
+        """Filament index pairs within ``radius`` cells (inf-norm),
+        cached: the cells never move, so a re-assembly (set_frequency)
+        must not pay the KDTree again."""
         ck = (float(radius), other is None)
-        hit = self._pairs.get(ck)
-        if hit is not None:
-            return hit
-        from scipy.spatial import cKDTree
-        a = cKDTree(self.cells.astype(float))
-        if other is None:
-            p = a.query_pairs(r=radius, p=np.inf, output_type='ndarray')
-            self_i = np.arange(self.nfil)
-            fa = np.concatenate([p[:, 0], p[:, 1], self_i])
-            fb = np.concatenate([p[:, 1], p[:, 0], self_i])
-            self._pairs[ck] = (fa, fb)
-            return fa, fb
-        b = cKDTree(np.asarray(other, dtype=float))
-        pairs = a.query_ball_tree(b, r=radius, p=np.inf)
-        fa = np.concatenate([np.full(len(v), i, dtype=np.int64)
-                             for i, v in enumerate(pairs)]) \
-            if any(pairs) else np.zeros(0, dtype=np.int64)
-        fb = np.concatenate([np.asarray(v, dtype=np.int64)
-                             for v in pairs if v]) \
-            if any(pairs) else np.zeros(0, dtype=np.int64)
-        self._pairs[ck] = (fa, fb)
-        return fa, fb
+        if ck not in self._pairs:
+            self._pairs[ck] = neighbour_pairs(self.cells, radius, other)
+        return self._pairs[ck]
 
     def _build_truncated(self, rc_uu, rc_cross):
         """Assemble Zuu and Zcross as SPARSE, distance-truncated blocks.
@@ -1194,20 +1120,10 @@ class Redistribution:
         # than the problem and blows up.
         Du = self.cells[fb_u] - self.cells[fa_u]
         Dc = self.cells[fb_c] - self.cells[fa_c]
-        span = int((self.cells.max(axis=0) - self.cells.min(axis=0)).max()) + 1
-        w = 2*span + 1
-
-        def key(D):
-            return ((D[:, 0] + span)*w + (D[:, 1] + span))*w + D[:, 2] + span
-
-        ku, kc = key(Du), key(Dc)
-        uniq, inv = np.unique(np.concatenate([ku, kc]), return_inverse=True)
-        iu, ic = inv[:ku.size], inv[ku.size:]
-        dz = uniq % w - span
-        dy = (uniq // w) % w - span
-        dx_ = uniq // (w*w) - span
-        Bu, Bc = self._mode_tables(np.stack([dx_, dy, dz], axis=1))
-        self.ntable = int(uniq.size)
+        D, inv = unique_separations(np.concatenate([Du, Dc]))
+        iu, ic = inv[:len(Du)], inv[len(Du):]
+        Bu, Bc = self._mode_tables(D)
+        self.ntable = int(D.shape[0])
 
         red = Bu[iu]
         rows = np.broadcast_to(fa_u[:, None, None]*km + mr[None, :, None],
@@ -1243,65 +1159,12 @@ class Redistribution:
         (set_frequency) then costs two einsums instead of ``len(D)*k**2``
         kernel evaluations.
         """
-        M, Mc = self._raw_tables(D)
+        M = self.tables(self.split, self.split, D)
+        Mc = self.tables(self.split, self.whole, D)[:, :, 0]
         W = self.W
         Bu = np.einsum('pm,dpq,qr->dmr', W, M, W)
         Bc = np.einsum('pm,dp->dm', W, Mc)
         return Bu, Bc
-
-    def _raw_tables(self, D):
-        """Raw (unfolded) sub-bar coupling tables, cached by separation
-        set: ``M[d, p, q]`` sub-bar p of the origin cell against sub-bar
-        q of the cell at separation ``D[d]``, and ``Mc[d, p]`` against
-        that cell's FULL bar. Geometry only -- weight folding happens in
-        the caller, so per-cell-weight subclasses can reuse the cache."""
-        D = np.asarray(D, dtype=np.int64)
-        key = D.tobytes()
-        cached = self._geom.get(key)
-        if cached is None:
-            from greens import box_pair_stencil_pairs as spair
-            k = self.k
-            nD = D.shape[0]
-            lo0, hi0 = self._sub_boxes(np.zeros((1, 3), dtype=np.int64))
-            M = np.empty((nD, k, k))
-            Mc = np.empty((nD, k))
-            # CHUNK the kernel evaluations. The pair arrays below are
-            # (n*k*k, 3), and an untruncated table pushes nD*k**2 into
-            # the tens of millions -- unchunked that is GBs of broadcast
-            # temporaries for a bounded-size answer.
-            step = max(1, 2_000_000 // (k*k))
-            with _spstatus.task('mode tables',
-                                ticks=(nD + step - 1)//step) as _t:
-                for a in range(0, nD, step):
-                    Dc = D[a:a + step]
-                    n = Dc.shape[0]
-                    loD, hiD = self._sub_boxes(Dc)
-                    floD, fhiD = self._full_boxes(Dc)
-                    # mode <-> mode: k x k sub-bar pairs per separation
-                    A_lo = np.broadcast_to(lo0[None, :, None, :],
-                                           (n, k, k, 3))
-                    A_hi = np.broadcast_to(hi0[None, :, None, :],
-                                           (n, k, k, 3))
-                    B_lo = np.broadcast_to(loD.reshape(n, 1, k, 3),
-                                           (n, k, k, 3))
-                    B_hi = np.broadcast_to(hiD.reshape(n, 1, k, 3),
-                                           (n, k, k, 3))
-                    S = spair(A_lo.reshape(-1, 3), A_hi.reshape(-1, 3),
-                              B_lo.reshape(-1, 3), B_hi.reshape(-1, 3))
-                    M[a:a + step] = (S/(self.asub*self.asub)
-                                     ).reshape(n, k, k)
-                    # mode <-> aggregate: k sub-bars against the full
-                    # bar
-                    A_lo = np.broadcast_to(lo0[None, :, :], (n, k, 3))
-                    A_hi = np.broadcast_to(hi0[None, :, :], (n, k, 3))
-                    Sc = spair(A_lo.reshape(-1, 3), A_hi.reshape(-1, 3),
-                               np.repeat(floD, k, axis=0),
-                               np.repeat(fhiD, k, axis=0))
-                    Mc[a:a + step] = (Sc/(self.asub*self.afull)
-                                      ).reshape(n, k)
-                    _t.tick()
-            cached = self._geom[key] = (M, Mc)
-        return cached
 
     def build_fft(self, rc_uu, rc_cross):
         """Spectra for applying the mode blocks as CONVOLUTIONS.
@@ -1449,7 +1312,7 @@ class Redistribution:
             self.Zt = sp.csr_matrix((self.nmode_full, term.n))
             self.ntable_t = 0
             return
-        D, inv = self._uniq_sep(tcell[tb] - self.cells[fa])
+        D, inv = unique_separations(tcell[tb] - self.cells[fa])
         Bt = self._terminal_table(D, term.t_l)
         self.ntable_t = int(D.shape[0])
         si = (term.sign[tb] > 0).astype(np.int64)
@@ -1487,17 +1350,6 @@ class Redistribution:
             "have the memory."
             % (gb, nnz, rc_uu, rc_cross, self.k, self.csr_max_gb))
 
-    def _uniq_sep(self, D):
-        """Distinct cell separations in ``D``, and the per-row index."""
-        span = int(np.abs(D).max()) + 1
-        w = 2*span + 1
-        key = ((D[:, 0] + span)*w + (D[:, 1] + span))*w + D[:, 2] + span
-        uniq, inv = np.unique(key, return_inverse=True)
-        dz = uniq % w - span
-        dy = (uniq // w) % w - span
-        dx_ = uniq // (w*w) - span
-        return np.stack([dx_, dy, dz], axis=1), inv
-
     def _terminal_table(self, D, t_l):
         """Mode<->terminal blocks per (separation, face sign).
 
@@ -1515,82 +1367,10 @@ class Redistribution:
 
     def _raw_terminal_table(self, D, t_l):
         """Raw sub-bar <-> terminal-bar table ``(nD, k, 2 signs)``,
-        cached by (separations, t_l). Geometry only, as _raw_tables."""
-        k = self.k
-        nD = D.shape[0]
-        key = (D.tobytes(), float(t_l))
-        cached = self._geom_t.get(key)
-        if cached is None:
-            from greens import box_pair_stencil_pairs as spair
-            lo0, hi0 = self._sub_boxes(np.zeros((1, 3), dtype=np.int64))
-            A_lo = np.broadcast_to(lo0[None, :, :], (nD, k, 3)).reshape(-1, 3)
-            A_hi = np.broadcast_to(hi0[None, :, :], (nD, k, 3)).reshape(-1, 3)
-            Mct = np.zeros((nD, k, 2))
-            for si, sgn in enumerate((-1, +1)):
-                tlo, thi = self._term_boxes(D, np.full(nD, sgn), t_l)
-                S = spair(A_lo, A_hi,
-                          np.repeat(tlo, k, axis=0), np.repeat(thi, k, axis=0))
-                Mct[:, :, si] = (S/(self.asub*self.afull)).reshape(nD, k)
-            cached = self._geom_t[key] = Mct
-        return cached
-
-    def _term_boxes(self, cells, signs, t_l):
-        """Terminal bars at the given cells and face signs."""
-        d = self.axis
-        d3, dax = self.d3, self.dax
-        cells = np.atleast_2d(np.asarray(cells))
-        lo = np.zeros((len(cells), 3))
-        hi = np.zeros((len(cells), 3))
-        for t, c in enumerate(cells):
-            lo[t] = [c[0]*d3[0], c[1]*d3[1], c[2]*d3[2]]
-            hi[t] = [(c[0]+1)*d3[0], (c[1]+1)*d3[1], (c[2]+1)*d3[2]]
-            mid = (c[d] + 0.5)*dax
-            if signs[t] > 0:
-                lo[t][d], hi[t][d] = mid, mid + t_l
-            else:
-                lo[t][d], hi[t][d] = mid - t_l, mid
-        return lo, hi
-
-    def _terminal_boxes(self, term):
-        d = self.axis
-        d3, dax = self.d3, self.dax
-        lo = np.zeros((term.n, 3))
-        hi = np.zeros((term.n, 3))
-        for t, (cell, sgn, _) in enumerate(term.faces):
-            a = [cell[0]*d3[0], cell[1]*d3[1], cell[2]*d3[2]]
-            b = [(cell[0]+1)*d3[0], (cell[1]+1)*d3[1], (cell[2]+1)*d3[2]]
-            mid = (cell[d] + 0.5)*dax
-            if sgn > 0:
-                a[d], b[d] = mid, mid + term.t_l
-            else:
-                a[d], b[d] = mid - term.t_l, mid
-            lo[t] = a
-            hi[t] = b
-        return lo, hi
-
-    def _check_aggregate(self):
-        """The aggregate block must BE the full filament operator.
-
-        ``W_agg^T Z_sub W_agg == Z_full`` holds because the volume
-        integral over a cross-section is the sum over its pieces. If it
-        failed, the change of basis would be wrong and the existing FFT
-        near field silently replaced rather than reused. Checked on a
-        small corner of the problem -- it is an algebraic identity, so a
-        subset suffices to catch a wiring error.
-        """
-        n = min(12, self.nfil)
-        ns = n*self.k
-        Zs = tm.box_mutual_matrix(self.lo[:ns], self.hi[:ns], self.axis)
-        Wa = np.zeros((ns, n))
-        for f in range(n):
-            Wa[f*self.k:(f + 1)*self.k, f] = 1.0/self.k
-        full = tm.box_mutual_matrix(self.flo[:n], self.fhi[:n], self.axis)
-        got = Wa.T @ Zs @ Wa
-        err = np.abs(got - full).max()/np.abs(full).max()
-        if err > 1e-10:
-            raise RuntimeError("aggregate block does not reproduce the full "
-                               "filament operator (rel %.3e)" % err)
-        self.aggregate_err = float(err)
+        geometry only, from the shared separation tables."""
+        return np.stack([self.tables(self.split,
+                                     self.split.terminal(t_l, s), D)[:, :, 0]
+                         for s in (-1, +1)], axis=-1)
 
 
 class SubpixelModes(Redistribution):
@@ -1651,12 +1431,10 @@ class SubpixelModes(Redistribution):
         kk = (int(k), int(k)) if np.isscalar(k) else tuple(int(v) for v in k)
         if min(kk) < 1 or max(kk) < 2:
             raise ValueError("k must give at least two sub-filaments")
-        self.split = others
+        self.tr = others
         self.kk = kk
         self.k = kk[0]*kk[1]
-        self.dx = model.dx
-        # inherited _sub_boxes/_full_boxes read the per-axis attrs;
-        # this engine is cubic-only (model.dx raised otherwise)
+        self.dx = model.dx        # cubic-only: model.dx raises otherwise
         self.d3 = np.asarray(model.d, dtype=float)
         self.dax = self.dx
         self.dt = (self.dx, self.dx)
@@ -1666,10 +1444,8 @@ class SubpixelModes(Redistribution):
         self.boundary_only = True
         self.nfil = self.sel.size
         self.cells = fil_cell[self.sel]
-        self.lo, self.hi = self._sub_boxes(self.cells)
-        self.flo, self.fhi = self._full_boxes(self.cells)
-        self.asub = (self.dx/kk[0])*(self.dx/kk[1])
-        self.afull = self.dx*self.dx
+        self.split = Split.transverse(self.axis, kk, self.d3)
+        self.whole = Split(self.axis, (1, 1, 1), self.d3)
         if skin_freq is None or float(skin_freq) <= 0:
             raise ValueError("SubpixelModes needs skin_freq > 0: the "
                              "shapes are exponentials in the skin depth")
@@ -1678,8 +1454,7 @@ class SubpixelModes(Redistribution):
         self.use_fft = False
         self._term = term
         self._rc_uu, self._rc_cross = int(rc_uu), int(rc_cross)
-        self._geom = {}
-        self._geom_t = {}
+        self.tables = PairTables()
         self._pairs = {}
         # -- per-transverse-cell geometry, shared down the extrusion --
         # sub-prism fills at the ENGINE subdivision (resampled from the
@@ -1846,9 +1621,9 @@ class SubpixelModes(Redistribution):
         self._check_csr_size(fa_u.size, fa_c.size, rc_uu, rc_cross)
         Du = self.cells[fb_u] - self.cells[fa_u]
         Dc = self.cells[fb_c] - self.cells[fa_c]
-        D, inv = self._uniq_sep(np.concatenate([Du, Dc]))
+        D, inv = unique_separations(np.concatenate([Du, Dc]))
         iu, ic = inv[:len(Du)], inv[len(Du):]
-        M, _ = self._raw_tables(D)
+        M = self.tables(self.split, self.split, D)
         self.ntable = int(D.shape[0])
         Wf, G = self.Wf, self.G
         mr = np.arange(km)
@@ -1886,7 +1661,7 @@ class SubpixelModes(Redistribution):
             self.Zt = sp.csr_matrix((self.nmode_full, term.n))
             self.ntable_t = 0
             return
-        D, inv = self._uniq_sep(tcell[tb] - self.cells[fa])
+        D, inv = unique_separations(tcell[tb] - self.cells[fa])
         Mct = self._raw_terminal_table(D, term.t_l)
         self.ntable_t = int(D.shape[0])
         si = (term.sign[tb] > 0).astype(np.int64)
@@ -2206,20 +1981,12 @@ class EquiTerminalSolver:
         self.C = None
         self.coupler = None
         self.fmm_reason = None
-        # subpixel stage B: attach the sparse partial-cell dL (the
-        # C.2 mode machinery will ride the same tables)
-        self.dL_near = None
-        if getattr(model, 'subpixel', None):
-            from subpixel import build_dL
-            self.dL_near = build_dL(model, M)
-        elif getattr(model, 'slab_fill', None):
-            # axis-aligned subpixel: stage A made the material law exact,
-            # this is the geometric footprint the mutual tables still
-            # have wrong (a half-filled cell presents a full-cell bar)
-            from subpixel import slab_dL
-            sf = model.slab_fill
-            with _spstatus.task('subpixel dL'):
-                self.dL_near = slab_dL(model, M, sf['fill'], sf['axis'])
+        # subpixel stage B: stage A made the material law exact; this is
+        # the geometric footprint the mutual tables still have wrong (a
+        # half-filled cell presents a full-cell bar). None on whole-cell
+        # models.
+        with _spstatus.task('subpixel dL'):
+            self.dL_near = partial_dL(model, M)
         with _spstatus.task('terminal coupler'):
             if fmm:
                 try:

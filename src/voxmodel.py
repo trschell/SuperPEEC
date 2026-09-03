@@ -186,7 +186,7 @@ class VoxelModel:
         # OPTIONAL {'fill': array, 'axis': int} for an axis-aligned
         # subpixel model: what `laminate_sigma` was built from, kept so
         # the solver can raise the matching partial-cell inductance
-        # correction (subpixel.slab_dL). None on every ordinary model.
+        # correction (enrich.partial_dL). None on every ordinary model.
         self.slab_fill = None
         # thin-film declaration ([[block]] film = "x|y|z" in the TOML):
         # the normal axis of declared films, or None. A hint consumed by

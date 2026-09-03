@@ -66,6 +66,7 @@ import numpy as np
 import scipy.sparse as sp
 
 import terminal as tm
+from enrich import Split, unique_separations
 
 MU0 = 4e-7*np.pi
 _TABLES = {}                # (W_cells, dx, sigma, KF, ratios) -> fields
@@ -395,26 +396,8 @@ class CornerModes:
             r0 += nf*k_in
             m0 += nm
 
-        # ---- sub-bar boxes (in-plane split only, z unsplit)
-        dx = self.dx
-        ns = npf*k_in
-        lo = np.zeros((ns, 3))
-        hi = np.zeros((ns, 3))
-        for fi in range(npf):
-            ax = int(pf_axis[fi])
-            tr = 1 - ax                     # the in-plane transverse axis
-            c = pf_cell[fi]
-            for p in range(k_in):
-                a = [c[0]*dx, c[1]*dx, c[2]*dx]
-                b = [(c[0]+1)*dx, (c[1]+1)*dx, (c[2]+1)*dx]
-                a[ax] = (c[ax] + 0.5)*dx
-                b[ax] = (c[ax] + 1.5)*dx
-                a[tr] = c[tr]*dx + p*dx/k_in
-                b[tr] = c[tr]*dx + (p + 1)*dx/k_in
-                lo[fi*k_in + p] = a
-                hi[fi*k_in + p] = b
-
         # ---- aggregate window (both in-plane axes, all z)
+        dx = self.dx
         selm = np.zeros(len(fil_axis), dtype=bool)
         for (Ix, Iy, sx, sy, Wc, zs) in corners:
             Rw = 2*Wc + int(rc_cross)
@@ -423,15 +406,25 @@ class CornerModes:
                      & (fil_axis < 2))
         self.sel = np.flatnonzero(selm)
         nsel = self.sel.size
-        slo = np.zeros((nsel, 3))
-        shi = np.zeros((nsel, 3))
-        for si, f in enumerate(self.sel):
-            c = fil_cell[f]
-            d = int(fil_axis[f])
-            slo[si] = [c[0]*dx, c[1]*dx, c[2]*dx]
-            shi[si] = [(c[0]+1)*dx, (c[1]+1)*dx, (c[2]+1)*dx]
-            slo[si][d] = (c[d] + 0.5)*dx
-            shi[si][d] = (c[d] + 1.5)*dx
+        # ---- sub-bar boxes (in-plane split only, z unsplit) and the
+        # undivided window filaments, per orientation
+        d3 = np.asarray(model.d, dtype=float)
+        ns = npf*k_in
+        lo, hi = np.zeros((ns, 3)), np.zeros((ns, 3))
+        slo, shi = np.zeros((nsel, 3)), np.zeros((nsel, 3))
+        self._splits = {}
+        for ax in (0, 1):
+            n = [1, 1, 1]
+            n[1 - ax] = k_in            # the in-plane transverse axis
+            self._splits[ax] = Split(ax, n, d3)
+            fi = np.flatnonzero(pf_axis == ax)
+            if fi.size:
+                rows = (fi[:, None]*k_in + np.arange(k_in)[None, :]).ravel()
+                lo[rows], hi[rows] = self._splits[ax].boxes(pf_cell[fi])
+            gi = np.flatnonzero(np.asarray(fil_axis)[self.sel] == ax)
+            if gi.size:
+                slo[gi], shi[gi] = Split(ax, (1, 1, 1), d3).boxes(
+                    fil_cell[self.sel[gi]])
 
         # ---- L blocks, per orientation (perpendicular pairs are zero)
         sub_ax = np.repeat(pf_axis, k_in)
@@ -460,7 +453,6 @@ class CornerModes:
         self._pf_axis = pf_axis
         self._pf_cell = pf_cell
         self._k_in = k_in
-        self._lo, self._hi = lo, hi
         self._sub_ax = sub_ax
 
     # -- solver interface ----------------------------------------------
@@ -499,10 +491,8 @@ class ModeStack:
     use_fft = True
 
     def __init__(self, engine, corner):
-        import greens
         self.engine = engine
         self.corner = corner
-        self._greens = greens
         # aggregate window: union of the two sel sets
         self.sel = np.union1d(engine.sel, corner.sel)
         self._pe = np.searchsorted(self.sel, engine.sel)
@@ -523,17 +513,19 @@ class ModeStack:
         self._epos = np.asarray(epos, dtype=int)
         self._Lec_raw = None
         if cs.size and self._epos.size:
-            elo, ehi = engine._sub_boxes(engine.cells[self._epos])
-            clo, chi = corner._lo[cs], corner._hi[cs]
-            ncs, nes = cs.size, elo.shape[0]
-            ii = np.repeat(np.arange(ncs), nes)
-            jj = np.tile(np.arange(nes), ncs)
-            S = greens.box_pair_stencil_pairs(clo[ii], chi[ii],
-                                              elo[jj], ehi[jj])
-            oth = [c for c in range(3) if c != a0]
-            ca = ((chi - clo)[:, oth[0]]*(chi - clo)[:, oth[1]])
-            ea = ((ehi - elo)[:, oth[0]]*(ehi - elo)[:, oth[1]])
-            self._Lec_raw = (S/(ca[ii]*ea[jj])).reshape(ncs, nes)
+            # corner sub-bars (rows, k_in contiguous per filament) x
+            # engine sub-bars of the patch filaments (cols, epos order),
+            # from the engine's shared separation tables
+            k_in = corner._k_in
+            ccell = corner._pf_cell[cs[::k_in] // k_in]
+            ecell = engine.cells[self._epos]
+            D = (ecell[None, :, :] - ccell[:, None, :]).reshape(-1, 3)
+            uniq, inv = unique_separations(D)
+            T = engine.tables(corner._splits[a0], engine.split, uniq)
+            ke = engine.k
+            self._Lec_raw = T[inv].reshape(
+                ccell.shape[0], ecell.shape[0], k_in, ke
+            ).transpose(0, 2, 1, 3).reshape(cs.size, ecell.shape[0]*ke)
         self._restack()
 
     def _restack(self):

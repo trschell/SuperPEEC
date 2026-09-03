@@ -2413,14 +2413,13 @@ class LpPRSolver:
         jw = 1j*2*np.pi*freq
         S.jomega = jw
         M.jomega = jw
-        if getattr(m, 'subpixel', None):
+        if getattr(m, 'subpixel', None) or getattr(m, 'slab_fill', None):
             # subpixel stage B: the pure-geometry dL, scaled jw per
-            # point. The imposed-profile variant (build_dZ) measured
-            # WORSE -- see subpixel.py's docstring; enrichment
-            # amplitudes must be SOLVED (stage C.2), not imposed.
+            # point (enrich.partial_dL; an imposed skin profile was a
+            # measured null, see there)
             if self._dz_static is None:
-                from subpixel import build_dL
-                self._dz_static = build_dL(m, M)
+                from enrich import partial_dL
+                self._dz_static = partial_dL(m, M)
             S.dZ_near = None if self._dz_static is None \
                 else jw*self._dz_static
         if self._precond == 'diagschur':

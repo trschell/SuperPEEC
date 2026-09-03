@@ -266,7 +266,7 @@ written today still means the same thing after the next refactor.
     at 15 nm where it is 5 cells exactly: R error 16.67% → 0.00%, L error
     2.42% → 0.30%. The remaining L error is the partial cell's geometric
     footprint in the mutual tables, corrected in turn by
-    `subpixel.slab_dL`, which the solver raises automatically.
+    `enrich.partial_dL`, which the solver raises automatically.
 
     SCOPE, and these are hard errors rather than silent approximations:
     ONE cut axis per model, and at most one off-grid axis per block — a

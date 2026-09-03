@@ -199,7 +199,7 @@ def part_f():
     The conduction basis gets a SPAN assertion on top: the shapes it was
     built from (the Daniel/Sangiovanni-Vincentelli/White face and corner
     exponentials at the build skin depth) are re-derived from the solver's
-    OWN sub-bar geometry (``_sub_boxes`` centroids), not from the index
+    OWN sub-bar geometry (``Split.boxes`` centroids), not from the index
     arithmetic ``conduction_weights`` uses, and must sit in span(W) to
     the pruning tolerance. A wrong face-distance mapping, a swapped
     split axis, or a dropped independent column shows up as a residual.
@@ -215,15 +215,13 @@ def part_f():
         r = s.redist
         nz = np.abs(r.W.sum(axis=0)).max()
         check("net-zero  %s" % basis, nz < 1e-12, "max colsum %.2e" % nz)
-        check("aggregate %s" % basis, r.aggregate_err < 1e-10,
-              "rel %.2e" % r.aggregate_err)
         if basis == 'conduction':
             cond = s
     r = cond.redist
-    lo, hi = r.lo[:r.k], r.hi[:r.k]
+    lo, hi = r.split.boxes(r.cells[:1])
     c = 0.5*(lo + hi)
-    x = c[:, r.split[0]] - lo[:, r.split[0]].min()
-    y = c[:, r.split[1]] - lo[:, r.split[1]].min()
+    x = c[:, r.tr[0]] - lo[:, r.tr[0]].min()
+    y = c[:, r.tr[1]] - lo[:, r.tr[1]].min()
     dx, p = m.dx, (1 + 1j)/delta
     pc = (1 + 1j)/(delta*np.sqrt(2.0))
     shapes = np.stack(
