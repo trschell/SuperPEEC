@@ -26,7 +26,8 @@ PART C -- SAME PHYSICAL BAR, cubic vs anisotropic mesh: identical
 R_dc; inductance at mild frequency within discretisation distance.
 
 PART D -- GUARDS AND REGRESSION: ``dx`` raises on anisotropic models;
-skin subdivision raises; cubic corpus partition choices are UNCHANGED.
+skin subdivision ENGAGES per axis (since 296bcdb); cubic corpus
+partition choices are UNCHANGED.
 
 Run inside the toolbox:  python3 validate_aniso.py
 """
@@ -160,11 +161,17 @@ def part_d():
     leaf, levels = m.partition()
     M = m.build_tree(leaf, levels)
     m.prepare(M, 1e8)
-    try:
-        eq.EquiTerminalSolver(m, M, 0, subdivide=3)
-        check("skin guard raises", False, "went through")
-    except NotImplementedError:
-        check("skin guard raises", True, '')
+    # The skin engine ACCEPTS anisotropic cells since 296bcdb
+    # (2026-09-01): boxes, sub-bar areas and shapes are per-axis. This
+    # check used to expect NotImplementedError and went stale with that
+    # commit (caught by the enrichment-plan phase-0 baseline).
+    S = eq.EquiTerminalSolver(m, M, 0, subdivide=3)
+    r = S.redist
+    check("skin engine engages on anisotropic cells",
+          r is not None and r.nmode > 0
+          and tuple(r.dt) == (1e-6, 2e-6),
+          "nmode %d dt %s" % (0 if r is None else r.nmode,
+                              None if r is None else tuple(r.dt)))
     mc = vhr.read_vhr('VoxHenry/Input_files/'
                       'straight_cond1_len30.0u_wid10.0u_dist20.0u'
                       '-two_freq.vhr')

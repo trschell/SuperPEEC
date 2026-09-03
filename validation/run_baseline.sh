@@ -93,13 +93,32 @@ rm -f _anchor_tmp.py
 # serial on fixed data. Previous values (2026-08-16 build):
 # 1.0141635224321326e-30 / 3.6833436970020444e-30 /
 # 2.7418785553237524e-31.
-echo "expected (this machine, stock env, binaries as built fresh in"
-echo "the SuperPEEC tree 2026-08-25 with -fopenmp; a rebuild or"
-echo "another machine re-bases these -- record your own values on"
-echo "first green run):"
+# Anchor lineage (enrichment plan phase 0, 2026-09-03): with NO src/
+# change at all (only validators and this runner touched), setup1 came
+# back bit-identical while setup2 moved 3.7557e-30 -> 3.7402e-30 and
+# setup3 2.6802e-31 -> 2.3415e-31; setup3 reproduces bit-identically on
+# a standalone rerun, so the new values are stable on this machine and
+# the 2026-08-25 values were simply stale for the current environment
+# (numpy 2.3.5 / scipy 1.16.3). Rounding dust, not an answer change; the
+# physics gate was 44 validators green. Previous values:
+# 1.0187104968887117e-30 / 3.755716373280479e-30 / 2.680201690959317e-31.
+echo "expected (this machine, stock env, measured 2026-09-03 at the"
+echo "enrichment-plan phase-0 baseline; a rebuild or another machine"
+echo "re-bases these -- record your own values on first green run):"
 echo "          setup1 1.0187104968887117e-30"
-echo "          setup2 3.755716373280479e-30"
-echo "          setup3 2.680201690959317e-31"
+echo "          setup2 3.740159228711359e-30"
+echo "          setup3 2.34153831468213e-31"
+# LINE COUNTS. The enrichment unification (docs/enrichment_plan.md) is
+# gated on src/ SHRINKING; this prints the numbers the plan's ledger
+# records per phase so a green suite and the size are read together.
+echo "=== LINES (wc -l, *.py) ==="
+for d in src validation studies; do
+  printf '%-12s %6d\n' "$d" "$(cat $d/*.py | wc -l)"
+done
+for f in src/equiterminal.py src/cornermode.py src/subpixel.py \
+         src/enrich.py src/voxmodel.py src/sppeec_input.py; do
+  [ -f "$f" ] && printf '  %-24s %6d\n' "$f" "$(wc -l < $f)"
+done
 echo ALL DONE
 # Non-zero exit on any FAIL so CI and callers can gate on this script.
 # Skips deliberately do NOT fail the run -- they are legitimate when the
