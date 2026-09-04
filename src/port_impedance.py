@@ -2413,7 +2413,7 @@ class LpPRSolver:
         jw = 1j*2*np.pi*freq
         S.jomega = jw
         M.jomega = jw
-        if getattr(m, 'subpixel', None) or getattr(m, 'slab_fill', None):
+        if getattr(m, 'cut', None) is not None:
             # subpixel stage B: the pure-geometry dL, scaled jw per
             # point (enrich.partial_dL; an imposed skin profile was a
             # measured null, see there)

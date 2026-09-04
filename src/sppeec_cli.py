@@ -222,7 +222,7 @@ def _run(opts, status):
         if opts.verbose:
             print('%s: %s, dims %s, %.1f%% fill'
                   % (os.path.basename(opts.input), prob.formulation,
-                     tuple(m.dims), m.fill()), flush=True)
+                     tuple(m.dims), m.fill_pct()), flush=True)
         sw = prob.sweeper(m, M, verbose=opts.verbose)
     # the sweeper published the file's declared sweep; narrow it to
     # what this run will actually solve (--freq)

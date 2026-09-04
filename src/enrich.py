@@ -252,14 +252,13 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
 
     Returns a real symmetric CSR ``(efg, efg)`` matrix, or ``None``.
     """
-    spx = getattr(model, 'subpixel', None)
-    sf = getattr(model, 'slab_fill', None)
-    if spx and spx['cells']:
-        fams = [(int(spx['axis']), 'cylinder')]
-    elif sf:
-        fams = [(o, 'slab') for o in range(3) if o != int(sf['axis'])]
-    else:
+    cut = getattr(model, 'cut', None)
+    if cut is None:
         return None
+    if cut['kind'] == 'cylinder':
+        fams = [(int(cut['axis']), 'cylinder')]
+    else:
+        fams = [(o, 'slab') for o in range(3) if o != int(cut['axis'])]
     from equiterminal import filament_cells
     fil_axis, fil_cell = filament_cells(M)
     d = np.asarray(model.d, dtype=float)
@@ -272,7 +271,7 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
             continue
         cells = np.asarray(fil_cell[sel], dtype=np.int64)
         if kind == 'cylinder':
-            k = int(spx['k'])
+            k = int(cut['k'])
             t1, t2 = [c for c in range(3) if c != orient]
             split = Split.transverse(orient, (k, k), d)
             # a filament's weights: its transverse cell's normalised
@@ -280,7 +279,7 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
             W = np.full((cells.shape[0], k*k), 1.0/(k*k))
             partial = np.zeros(cells.shape[0], dtype=bool)
             for f, c in enumerate(cells):
-                bins = spx['cells'].get((int(c[t1]), int(c[t2])))
+                bins = cut['cells'].get((int(c[t1]), int(c[t2])))
                 if bins is not None:
                     b = np.asarray(bins, dtype=float).ravel()
                     W[f] = b/b.sum()
@@ -288,10 +287,9 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
         else:
             k = 8
             n = [1, 1, 1]
-            n[int(sf['axis'])] = k
+            n[int(cut['axis'])] = k
             split = Split(orient, n, d)
-            fv = np.asarray(sf['fill'])[cells[:, 0], cells[:, 1],
-                                        cells[:, 2]]
+            fv = np.asarray(model.fill)[cells[:, 0], cells[:, 1], cells[:, 2]]
             W = np.full((cells.shape[0], k), 1.0/k)
             partial = np.zeros(cells.shape[0], dtype=bool)
             for f, fill in enumerate(fv):
@@ -365,67 +363,6 @@ def _pair_correction(sel, cells, W, partial, split, window, dims, tables):
 
 
 # ------------------------------------------------------------------ material
-
-MU0 = 4e-7*np.pi
-
-
-def base_sigma(model):
-    """The metal's conductivity: the single value of a uniform model, or
-    the cylinder metal of a fill model (whose per-cell ``sigma`` carries
-    ``sigma*fill`` and is mixed by construction)."""
-    spx = getattr(model, 'subpixel', None)
-    if spx and spx['geom']:
-        sigs = {float(g[3]) for g in spx['geom'].values()}
-        if len(sigs) != 1:
-            raise ValueError("cylinders with different sigma in one model "
-                             "(%d values)" % len(sigs))
-        return sigs.pop()
-    return model.uniform_sigma()
-
-
-def london_rate(model):
-    """``1/lambda`` for a uniform London model, else None (mixed or
-    absent: the caller decides)."""
-    lam = getattr(model, 'lambdaL', None)
-    if lam is None or not getattr(model, 'superconductor', False):
-        return None
-    vals = np.unique(np.asarray(lam, dtype=float)[np.asarray(lam) > 0.0])
-    return 1.0/float(vals[0]) if vals.size == 1 else None
-
-
-def material_response(model, freq):
-    """``(p, z)`` -- the ONLY two things the mode engine asks of a material.
-
-    ``p`` is the decay rate of the Helmholtz equation the interior
-    current obeys (it sets the palette's face/corner exponentials);
-    ``z`` is the series impedance density in ohm*m (it sets the sub-bar
-    impedance ``z*l/a``)::
-
-        normal conductor   grad^2 J = j w mu sigma J   p = (1+j)/delta
-                                                       z = 1/sigma
-        London supercond.  grad^2 J = J/lambda^2       p = 1/lambda
-                                                       z = j w mu lambda^2
-
-    Two slots, one material law each, and no superconductor branch
-    anywhere below: ``p`` moves with frequency for a normal conductor
-    and not for a superconductor, ``z`` the other way round, and
-    :meth:`Enrichment.set_frequency` recomputes both and rebuilds what
-    moved. Passing ``delta = lambda`` into the complex rate is the trap
-    worth naming: ``(1+j)/lambda`` spans ``exp(-x/lam)cos/sin``, which
-    does NOT contain the London profile ``cosh((x-t/2)/lambda)``
-    (residual 1.2e-2 against 2.2e-15 for the two real-rate columns).
-    """
-    if not freq or float(freq) <= 0.0:
-        raise ValueError("the mode shapes are exponentials in the "
-                         "material's Helmholtz rate and need freq > 0 "
-                         "(got %r)" % (freq,))
-    w = 2.0*np.pi*float(freq)
-    lam_inv = london_rate(model)
-    if lam_inv is not None:
-        return lam_inv, 1j*w*MU0/lam_inv**2
-    sigma = base_sigma(model)
-    return (1.0 + 1.0j)/np.sqrt(2.0/(w*MU0*sigma)), 1.0/sigma
-
 
 # ------------------------------------------------------------------ palettes
 
@@ -720,14 +657,15 @@ class Enrichment:
         fil_cell = np.asarray(fil_cell)
         self._model = model
         self.freq = float(freq) if freq else 0.0
-        self._p, self._z = material_response(model, self.freq)
-        spx = getattr(model, 'subpixel', None)
+        self._p, self._z = model.material_response(self.freq)
+        cut = getattr(model, 'cut', None)
+        spx = cut if cut is not None and cut['kind'] == 'cylinder' else None
         if palette is None:
             self.axis = int(axis)
             self.sel = np.flatnonzero(fil_axis == self.axis)
             self.cells = fil_cell[self.sel]
             tr = [c for c in range(3) if c != self.axis]
-            if spx is not None and spx['cells']:
+            if spx is not None:
                 if int(spx['axis']) != self.axis:
                     raise NotImplementedError(
                         "surface modes: the terminal axis (%d) differs "
@@ -834,7 +772,7 @@ class Enrichment:
         if freq <= 0 or freq == self.freq:
             return False
         self.freq = freq
-        p, self._z = material_response(self._model, freq)
+        p, self._z = self._model.material_response(freq)
         moved = self.palette.moves and (p != self._p)
         self._p = p
         if moved:

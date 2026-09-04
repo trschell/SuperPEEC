@@ -20,7 +20,7 @@ for f in sorted(glob.glob('VoxHenry/Input_files/*.vhr')):
         m.uniform_sigma()
     except Exception as e:
         blk.append("MIXED SIGMA")
-    rows.append((b, "%dx%dx%d" % tuple(d), "%d (%.1f%%)" % (nvox, m.fill()), frs,
+    rows.append((b, "%dx%dx%d" % tuple(d), "%d (%.1f%%)" % (nvox, m.fill_pct()), frs,
                  str(len(m.ports)), "; ".join(blk) or "buildable"))
 w = [max(len(str(r[i])) for r in rows) for i in range(6)]
 for r in rows:

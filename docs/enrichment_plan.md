@@ -218,12 +218,54 @@ the scoped code is ~1300 lines from 3334, i.e. about -2000 on `src/`.
 | 0 baseline | 9e672ff | 27127 | 12054 | 11054 | equiterminal 3398, cornermode 615, subpixel 444, voxmodel 1179, sppeec_input 1399 | 44 pass / 0 skip / 1 fail (`validate_aniso`, stale guard; fixed, 9/9 standalone) | setup1 1.0187104968887117e-30, setup2 3.740159228711359e-30, setup3 2.34153831468213e-31 |
 | 1 geometry + tables | cea4b11 | 26826 | 12294 | 11054 | equiterminal 3165, cornermode 607, enrich 385 (new), subpixel 0 (deleted), voxmodel 1179, sppeec_input 1399 | 46 pass / 0 skip / 0 fail (incl. new `validate_enrich`) | all three BIT-IDENTICAL to phase 0 |
 | 2 the Enrichment class | d306965 | 26278 | 12251 | 11050 | equiterminal 1943, cornermode 607, enrich 1060, voxmodel 1179, sppeec_input 1398 | 46 pass / 0 skip / 0 fail | all three BIT-IDENTICAL to phase 0 |
-| 3 corner generator + n-ary stack | (next commit) | 26235 | 12275 | 11050 | equiterminal 1938, cornermode 379, enrich 1250, voxmodel 1179, sppeec_input 1398 | 45 pass / 0 skip / 1 fail in the gate (`validate_subpixel` read a validator attribute moved in this phase; fixed, green standalone; no src change) | all three BIT-IDENTICAL to phase 0 |
+| 3 corner generator + n-ary stack | 4fe8028 | 26235 | 12275 | 11050 | equiterminal 1938, cornermode 379, enrich 1250, voxmodel 1179, sppeec_input 1398 | 45 pass / 0 skip / 1 fail in the gate (`validate_subpixel` read a validator attribute moved in this phase; fixed, green standalone; no src change) | all three BIT-IDENTICAL to phase 0 |
+| 4 fill record + material merge | (next commit) | 26018 | 12161 | 11050 | equiterminal 1929, cornermode 379, enrich 1188, voxmodel 1057, sppeec_input 1374 | 44 pass / 0 skip / 1 fail in the gate (`validate_vhr` compared the filament resistance as a scalar; validator-only fix, green standalone) | all three BIT-IDENTICAL to phase 0 |
 
 Scoped validators at baseline: equiterminal 407, subpixel 380, corner
 202, superconductor 249, aniso 189, aniso_sigma 220, input_lppr 520.
 
 ## 8. Phase log
+
+### Phase 4 (2026-09-04): one fill record, one material accessor
+
+* `VoxelModel.fill` (covered fraction per cell) + `VoxelModel.cut`
+  (`{'kind': 'slab', 'axis'}` or `{'kind': 'cylinder', 'axis', 'k',
+  'cells', 'geom'}`) replace `fill_frac`, the fill-scaled `sigma`,
+  `z_scale`, `slab_fill`, the `subpixel` dict, `sigma_axis` and
+  `laminate_sigma`. `sigma` is the BULK metal everywhere now; the
+  per-orientation consequence is one method, `impedance_scale()`
+  (1/fill along the layers of a slab cut, bulk across it; every
+  orientation for a cylinder), read by one `resistances()` (the scalar
+  fast path and `_complex_resistances` are gone: every model goes
+  through the per-filament `(l/2)/A (z_a + z_b)` with the cell's
+  impedance density), by `sigma_along()` / `impedance_along()` for the
+  terminals (per face, effective along the port axis -- the slab path
+  used bulk at a partial port cell before, the cylinder path
+  sigma*fill; now both use the effective value), and by the mode
+  engine. `london_rate` and `material_response` are `VoxelModel`
+  methods; `base_sigma` is gone (a fill model is uniform-sigma now).
+  `fill()` the percent-occupancy method became `fill_pct()`.
+* Front end: the cylinder painter and the slab coverage pass write the
+  one record; the equipotential port-on-whole-cell rule applies to
+  cylinder cuts only (a slab port MAY touch a partial cell, as before);
+  near-whole coverage (1 - 7e-16 from the coverage arithmetic) snaps to
+  exactly 1.
+* Validators: `validate_partial` (488) replaces `validate_subpixel`
+  (380) and `validate_aniso_sigma` (220): the cylinder sections as
+  they were, plus the slab laminate rule per orientation (in-plane R
+  doubles in a half cell, the cut axis keeps bulk, the London path
+  scales the same way) and the 75 nm film end-to-end headline.
+  `laminate_sigma`'s own checks (two means, crack, open_floor) died
+  with it.
+* A/B vs the phase-3 snapshot: every block bit-identical; matvecs
+  within 7e-11 (the cylinder path no longer stores sigma*fill as
+  float32).
+* Gate: `validate_vhr` asserted the filament resistance as ONE scalar
+  (the removed fast path); it now checks every filament. Also found:
+  `spaiinit` in tree.py still adds a scalar `r` -- dead code (one
+  commented-out caller), left for the study prune.
+* Ledger: src 26235 -> 26018 (-217; -1109 total). Threshold 25927:
+  phase 5 must deliver >= 91 net.
 
 ### Phase 3 (2026-09-03): corner modes as a palette, n-ary stack
 

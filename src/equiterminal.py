@@ -76,7 +76,7 @@ import meshgraph as mg
 import sppeec_status as _spstatus
 import terminal as tm
 import stencils as st
-from enrich import Enrichment, ModeStack, london_rate, partial_dL
+from enrich import Enrichment, ModeStack, partial_dL
 
 _AXIS_ORIENT = {0: 'f', 1: 'e', 2: 'g'}
 
@@ -350,24 +350,14 @@ class Terminals:
             # the real thing before any apply
             self.R = np.zeros(self.n, dtype=np.complex128)
         else:
-            # per-face sigma, read from the cell each terminal
-            # half-filament actually sits in (self.faces is already in
-            # that order) -- the same indexing the superconductor
-            # branch of set_frequency has always used for z
-            cells = np.array([c for c, _, _ in self.faces],
-                             dtype=np.int64)
-            sig = np.asarray(self._model.sigma, dtype=float)[
-                cells[:, 0], cells[:, 1], cells[:, 2]]
-            self.R = np.array([tm.terminal_resistance(l, self.orient,
-                                                      sv, self.t_l)
-                               for sv in sig])
+            self.set_frequency(None)
         self._build_kernel(M)
 
     def set_frequency(self, freq):
         """Install the terminal series impedances for ``freq``.
 
-        No-op for normal conductors, whose R is real and frequency
-        independent. For superconductors the terminal filament -- full
+        For normal conductors R is real and frequency independent (one
+        call at build). For superconductors the terminal filament -- full
         cross-section, length ``t_l``, living entirely in its end cell
         -- has ``R = z(w)*t_l/A`` with that CELL's impedance density,
         complex (the kinetic inductance rides in the imaginary part)
@@ -375,9 +365,12 @@ class Terminals:
         solve. Per-cell lookup rather than a global value, so a mixed
         normal/superconducting model keeps each port face honest.
         """
-        if not self.superconductor:
+        if self.superconductor and not freq:
             return
-        z = self._model.impedance_density(freq)
+        # per face, from the cell each terminal half-filament sits in,
+        # effective along the port axis (a partial cell presents a
+        # partial section)
+        z = self._model.impedance_along(self.axis, freq)
         cells = np.array([c for c, _, _ in self.faces], dtype=np.int64)
         zc = z[cells[:, 0], cells[:, 1], cells[:, 2]]
         ot = [c for c in range(3) if c != self.axis]
@@ -860,7 +853,7 @@ class EquiTerminalSolver:
         # carries the bulk kinetic term: no double count); several
         # lambdas have no single rate and still raise.
         if (getattr(model, 'superconductor', False) and not skin_off
-                and london_rate(model) is None):
+                and model.london_rate() is None):
             raise NotImplementedError(
                 "skin-effect subdivision on a superconductor with no "
                 "single London depth: the mode palette is exponentials "
@@ -871,7 +864,6 @@ class EquiTerminalSolver:
             fref = float(np.max(model.freq)) if len(model.freq) else 0.0
         self.skin_freq = fref
         self.skin_k = 1
-        spx = getattr(model, 'subpixel', None)
         # THIN-FILM PALETTE ([[block]] film = "x|y|z", 2026-09-01). The
         # declared normal is the stiff axis: in-plane current varies on
         # the lambda/delta scale THROUGH the film, and (measured,
@@ -895,7 +887,7 @@ class EquiTerminalSolver:
         if film:
             fnorm = int(fnorm)
         if subdivide is True or subdivide == 'auto':
-            lp = london_rate(model)
+            lp = model.london_rate()
             if lp is not None:
                 # A London conductor's screening length is lambda, and
                 # it does not depend on frequency, so the skin-depth
@@ -915,8 +907,7 @@ class EquiTerminalSolver:
             else:
                 # fill models have no uniform sigma, but the base METAL
                 # sigma (what the skin depth is made of) is well defined
-                sig0 = (next(iter(spx['geom'].values()))[3] if spx
-                        else model.uniform_sigma())
+                sig0 = model.uniform_sigma()
                 dtc = (float(model.d[fnorm]) if film
                        else max(float(v) for c, v in enumerate(model.d)
                                 if c != self.term.axis))

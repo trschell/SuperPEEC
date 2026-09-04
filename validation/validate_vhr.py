@@ -209,27 +209,28 @@ for name in sorted(ref):
     # single-material values and equals one of them wherever a filament
     # sits inside one material.
     if m.superconductor:
-        # Uniform superconductor (all corpus SC files are): r is ONE
-        # COMPLEX scalar, z(w)/dx with z the two-fluid impedance
-        # density -- the kinetic inductance rides in Im(r). The
-        # frequency is the prepare() frequency, the shipped maximum.
+        # Uniform superconductor (all corpus SC files are): every r is
+        # z(w)/dx with z the two-fluid impedance density -- the kinetic
+        # inductance rides in Im(r). The frequency is the prepare()
+        # frequency, the shipped maximum.
         zv = np.unique(m.impedance_density(m.freq[-1])[
             m.struc().astype(bool)])
         want_r = zv[0]/m.dx if zv.size else 0.0
         ok &= check(name + ' superconductor r == z(w)/dx',
                     zv.size == 1
-                    and abs(M.e.r - want_r) <= 1e-12*abs(want_r)
-                    and abs(M.f.r - want_r) <= 1e-12*abs(want_r)
-                    and abs(M.g.r - want_r) <= 1e-12*abs(want_r),
-                    "r = %s, want %s" % (M.e.r, want_r))
+                    and all(np.all(np.abs(np.asarray(r) - want_r)
+                                   <= 1e-12*abs(want_r))
+                            for r in (M.e.r, M.f.r, M.g.r)),
+                    "r = %s, want %s" % (np.ravel(M.e.r)[0], want_r))
     elif m.sigma_values().size == 1:
         want_r = 1.0/(m.dx*m.uniform_sigma())
         ok &= check(name + ' resistance',
-                    close(M.e.r, want_r, 1e-12)
-                    and close(M.f.r, want_r, 1e-12)
-                    and close(M.g.r, want_r, 1e-12),
+                    all(np.all(np.abs(np.asarray(r) - want_r)
+                               <= 1e-12*want_r)
+                        for r in (M.e.r, M.f.r, M.g.r)),
                     "e %.6g f %.6g g %.6g, want %.6g"
-                    % (M.e.r, M.f.r, M.g.r, want_r))
+                    % (np.ravel(M.e.r)[0], np.ravel(M.f.r)[0],
+                       np.ravel(M.g.r)[0], want_r))
     else:
         rr = np.concatenate([np.atleast_1d(M.e.r), np.atleast_1d(M.f.r),
                              np.atleast_1d(M.g.r)])

@@ -1,14 +1,25 @@
 # -*- coding: utf-8 -*-
 # SPDX-License-Identifier: MIT
-"""Gate for subpixel stage A: the [[cylinder]] fill-fraction primitive.
+"""PARTIAL CELLS: the fill record (``model.fill`` + ``model.cut``) on
+both primitives that produce it.
 
-Covers the geometry (fill areas match pi*R^2 across radii), the
-schema contract (loud rejections), and the physics headline: on the
-round-wire example's cross-section the center-in staircase reads DC
-resistance -11.6% low (the recorded 24um-wire error class) while the
-fill-corrected model lands within ~1.5% of L/(sigma*pi*R^2) -- with
-zero solver changes (sigma_eff = sigma*fill rides the per-cell-
-conductivity machinery). Lp remains full-cell until stage B.
+CYLINDER ([[cylinder]]): the geometry (fill areas match pi*R^2 across
+radii), the schema contract, the DC headline (the center-in staircase
+reads R -11.6% low while the fill-corrected model lands within ~1.5%
+of L/(sigma*pi*R^2)), stage B (the sparse partial-cell dL: exactly
+symmetric, one near pair against first principles, L errors strictly
+improving staircase > A > A+B), the Kelvin skin razor on the LpR path,
+the equipotential path on fill models and the surface palette's
+solved modes against a dense oracle.
+
+SLAB ([grid] subpixel = true with off-grid block bounds): a z-cut cell
+is a LAMINATE -- the in-plane orientations carry sigma*fill exactly
+(the arithmetic mean, exact for a layered medium) and the cut axis
+stays at bulk (no filament passes all the way through a cell); the
+London path scales its impedance density the same way; and the
+end-to-end headline, a 75 nm film at 30 nm pitch (2.5 cells) against
+the same film at 15 nm where it is 5 cells exactly: R error 16.67% ->
+well under 1%.
 """
 import os as _op
 import sys as _sp
@@ -67,15 +78,15 @@ def main():
         dt = 14 if Rc > 4 else 8
         prob = sppeec_input.loads(wire_doc(R, dims_t=dt, nx=4))
         m = prob.model()
-        area = float(m.fill_frac[0].sum())*1e-12
+        area = float(m.fill[0].sum())*1e-12
         rel = abs(area - math.pi*R*R)/(math.pi*R*R)
         check('fill area == pi*R^2 (R = %.1f cells)' % Rc,
               rel < 5e-4, 'rel %.1e' % rel)
-    check('.fill() percent method survives the fill_frac attribute',
-          0.0 < m.fill() < 100.0, '%.1f%%' % m.fill())
+    check('.fill_pct() survives the fill attribute',
+          0.0 < m.fill_pct() < 100.0, '%.1f%%' % m.fill_pct())
     check('fill_frac values in (0, 1]',
-          float(m.fill_frac.max()) <= 1.0
-          and float(m.fill_frac[m.fill_frac > 0].min()) >= 1e-3)
+          float(m.fill.max()) <= 1.0
+          and float(m.fill[m.fill > 0].min()) >= 1e-3)
 
     # -- schema contract ---------------------------------------------
     expect_error('cylinder missing radius rejected',
@@ -130,7 +141,7 @@ def main():
     check('full-cell model -> no dL',
           enrich.partial_dL(mf, None) is None)
     # oracle: one near pair from first principles
-    spx = m.subpixel
+    spx = m.cut
     k, axis = spx['k'], spx['axis']
     t1, t2 = [c for c in range(3) if c != axis]
     from equiterminal import filament_cells
@@ -195,7 +206,7 @@ def main():
         pr = sppeec_input.loads(doc)
         mm = pr.model()
         if strip_b:
-            mm.subpixel = None
+            mm.cut = None
         sw2 = pr.sweeper(mm, pr.tree(mm))
         Z2, _ = sw2.solve(1e5)
         return Z2.real, Z2.imag/(2*math.pi*1e5)
@@ -371,6 +382,102 @@ def main():
         if abs(par - rs/(rt.k*pc['fill'].mean())) > 1e-12*rs:
             okr = False
     check('fill-weighted sub-bar R reproduces sigma_eff exactly', okr)
+
+    # -- slab cut: the laminate rule, per orientation ------------------
+    import voxmodel
+    from voxmodel import MU0 as _MU0
+
+    def slab_model(lam=None):
+        mm = voxmodel.VoxelModel('slab')
+        mm.dims = (6, 6, 6)
+        mm.d = np.full(3, 1e-7)
+        mm.sigma = np.full(mm.dims, 5.8e7, dtype=np.float32)
+        if lam is not None:
+            mm.lambdaL = np.full(mm.dims, lam)
+            mm.superconductor = True
+        mm.freq = np.array([1e10])
+        f = np.ones(mm.dims)
+        f[:, :, 5] = 0.5                      # top layer half filled
+        mm.fill, mm.cut = f, dict(kind='slab', axis=2)
+        return mm
+    ms0 = slab_model()
+    ms0.fill = None
+    ms0.cut = None
+    Ms = ms0.build_tree(*ms0.partition())
+    r0 = ms0.resistances(Ms)                  # (re=y, rf=x, rg=z)
+    r1 = slab_model().resistances(Ms)
+    top = [np.asarray(voxmodel.filament_cells(Ms, lf))[:, 2] == 5
+           for lf in (Ms.e, Ms.f, Ms.g)]
+    check('z-cut: in-plane R doubles in the half cell, nowhere else',
+          np.allclose(r1[0][top[0]], 2*r0[0][top[0]])
+          and np.allclose(r1[1][top[1]], 2*r0[1][top[1]])
+          and np.allclose(r1[0][~top[0]], r0[0][~top[0]])
+          and np.allclose(r1[1][~top[1]], r0[1][~top[1]]))
+    check('z-cut: the cut axis keeps the bulk value',
+          np.allclose(r1[2], r0[2]))
+    rl0 = slab_model(lam=9e-8)
+    rl0.fill = None
+    rl0.cut = None
+    zl0 = rl0.resistances(Ms, freq=1e10)
+    zl1 = slab_model(lam=9e-8).resistances(Ms, freq=1e10)
+    check('London path carries the same anisotropy sense',
+          np.allclose(zl1[1][top[1]], 2*zl0[1][top[1]])
+          and np.allclose(zl1[2], zl0[2])
+          and abs(np.imag(zl0[1][0])/(2*np.pi*1e10)
+                  - _MU0*(9e-8)**2*1e-7/1e-14) < 1e-6*abs(zl0[1][0]))
+
+    # -- slab cut end to end: a 2.5-cell film vs the same film at 5 ----
+    body = """
+[grid]
+dims  = [%d, %d, %d]
+pitch = %g
+%s
+
+[[block]]
+from_m = [0.0, 0.0, 0.0]
+to_m   = [6.0e-7, 1.8e-7, 6.0e-8]
+sigma  = 5.8e7
+
+[[block]]
+from_m = [0.0, 0.0, 1.2e-7]
+to_m   = [6.0e-7, 1.8e-7, 1.95e-7]
+sigma  = 5.8e7
+
+[port]
+p_faces = [%s]
+n_faces = [%s]
+equipotential = true
+
+[solve]
+freq = [1e10]
+"""
+
+    def run(pitch, nx, ny, nz, zlo, zhi, sub):
+        pf = ", ".join('[0, %d, %d, "-x"]' % (j, k)
+                       for j in range(ny) for k in range(zlo, zhi))
+        nf = ", ".join('[%d, %d, %d, "+x"]' % (nx - 1, j, k)
+                       for j in range(ny) for k in range(zlo, zhi))
+        prob = sppeec_input.loads(body % (nx, ny, nz, pitch,
+                                          "subpixel = true" if sub else "",
+                                          pf, nf))
+        mm = prob.model()
+        MM = prob.tree(mm)
+        Z, _ = prob.sweeper(mm, MM).solve(prob.freqs[0])
+        return Z, mm
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        Zr, _ = run(1.5e-8, 40, 12, 16, 8, 13, False)     # exact
+        Zs, _ = run(3.0e-8, 20, 6, 8, 4, 7, False)        # staircase
+        Za, ma = run(3.0e-8, 20, 6, 8, 4, 7, True)        # subpixel
+    er = abs(Zs.real/Zr.real - 1.0)
+    ea = abs(Za.real/Zr.real - 1.0)
+    check("subpixel is declared per grid and reaches the model",
+          ma.fill is not None and ma.cut == dict(kind='slab', axis=2))
+    check("a 2.5-cell film: staircase R is badly wrong",
+          er > 0.10, "%.2f%% off the exact-pitch reference" % (100*er))
+    check("subpixel recovers R to well under 1%",
+          ea < 0.01, "%.3f%% (from %.1f%%)" % (100*ea, 100*er))
 
     print('\n%d checks failed' % len(FAIL))
     raise SystemExit(1 if FAIL else 0)

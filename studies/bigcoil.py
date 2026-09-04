@@ -23,7 +23,7 @@ basis = sys.argv[2] if len(sys.argv) > 2 else 'overcomplete'
 F = 2.5e9
 m = vhr.read_vhr('VoxHenry/Input_files/' + name)
 print("%s: dims=%s  voxels=%d  fill=%.1f%%"
-      % (name, tuple(np.asarray(m.dims, int)), int(m.struc().sum()), m.fill()),
+      % (name, tuple(np.asarray(m.dims, int)), int(m.struc().sum()), m.fill_pct()),
       flush=True)
 t0 = time.perf_counter()
 M = m.build_tree()

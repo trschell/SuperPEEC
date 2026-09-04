@@ -26,7 +26,7 @@ import sppeec_input  # noqa: E402
 prob = sppeec_input.load('examples/dbc_halfbridge.toml')
 m = prob.model()
 print("dbc_halfbridge: dims %s, pitch %s, fill %.1f%%"
-      % (m.dims, list(m.d), m.fill()))
+      % (m.dims, list(m.d), m.fill_pct()))
 t0 = time.perf_counter()
 M = m.build_tree()
 print("tree: %d levels, built %.1f s" % (M.numlevels,

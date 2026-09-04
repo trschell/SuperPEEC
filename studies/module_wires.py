@@ -40,7 +40,7 @@ m = prob.model()
 nleaf, numlevels = [5, 5, 3], 2   # auto partition would go single-level
 M = m.build_tree(nleaf=nleaf, numlevels=numlevels)
 print("module3wire: dims %s, %.0f%% fill, tree %s x %d levels"
-      % (m.dims, m.fill(), nleaf, numlevels))
+      % (m.dims, m.fill_pct(), nleaf, numlevels))
 
 rows = []
 for f in prob.freqs:

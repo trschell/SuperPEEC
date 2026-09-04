@@ -207,8 +207,8 @@ freq = [1e10]
     # layer against the x-filament directly below it
     from equiterminal import filament_cells
     fa, fc = filament_cells(Ms)
-    fill = ms.slab_fill['fill']
-    cz = int(ms.slab_fill['axis'])
+    fill = ms.fill
+    cz = int(ms.cut['axis'])
     xs = np.flatnonzero(fa == 0)
     cells = fc[xs]
     part = [n for n, c in enumerate(cells)

@@ -748,35 +748,17 @@ class Problem:
                                         float(deps), fl, fh))
         if subpix and cut_axis is not None:
             np.clip(cover, 0.0, 1.0, out=cover)
-            # ONE pass, after every block has painted. Z_SCALE rather
-            # than laminate_sigma: this model may be ohmic (z = 1/sigma)
-            # or London (z = j w mu lambda^2), and in BOTH the partial
-            # cell's impedance density scales as 1/f in the plane of the
-            # cut. One multiplier serves both, where a sigma array
-            # cannot describe a lossless superconductor at all -- its
-            # sigma is legitimately zero everywhere.
+            cover[np.abs(cover - 1.0) < 1e-9] = 1.0    # coverage roundoff
+            # ONE pass, after every block has painted: the fill record
+            # (VoxelModel.impedance_scale gives each orientation its
+            # laminate factor, ohmic or London alike)
             occ = np.asarray(m.struc()) > 0
             if np.any((cover > 0.0) & (cover < 1.0) & ~occ):
                 raise ValueError(
                     "a partial cell carries no material -- subpixel "
                     "coverage and the painted blocks disagree")
-            zs = np.ones(tuple(m.dims) + (3,), dtype=np.float64)
-            inv = np.where(cover > 0.0,
-                           1.0/np.maximum(cover, 1e-300), 1.0)
-            for a in range(3):
-                if a != cut_axis:
-                    zs[..., a] = np.where(occ, inv, 1.0)
-            # The CUT AXIS keeps the bulk value. The laminate's harmonic
-            # mean is the through-plane figure for a path passing all
-            # the way THROUGH a cell, and no filament does that: the
-            # half-pair rule gives a filament the top half of one cell
-            # and the bottom half of the next, so the through-plane
-            # value is a HALF-CELL quantity this array cannot express
-            # (see VoxelModel.laminate_sigma). In-plane is exact and is
-            # what is measured; the cut axis is left alone rather than
-            # given a value that was never tested.
-            m.z_scale = zs
-            m.slab_fill = dict(fill=cover, axis=int(cut_axis))
+            m.fill = cover
+            m.cut = dict(kind='slab', axis=int(cut_axis))
         for k, cy in enumerate(self._doc.get('cylinder', [])):
             axis = 'xyz'.index(str(cy['axis']))
             t1, t2 = [ax for ax in range(3) if ax != axis]
@@ -818,14 +800,16 @@ class Problem:
             sub = inside.reshape(inside.shape[0], inside.shape[1],
                                  ks, 64//ks, ks, 64//ks
                                  ).mean(axis=(3, 5))
-            if m.fill_frac is None:
-                m.fill_frac = (m.sigma != 0).astype(np.float32)
-            if not hasattr(m, 'subpixel') or m.subpixel is None:
-                m.subpixel = dict(axis=axis, k=ks, cells={}, geom={})
-            elif m.subpixel['axis'] != axis:
+            if m.fill is None:
+                m.fill = (m.sigma != 0).astype(np.float64)
+            if m.cut is None:
+                m.cut = dict(kind='cylinder', axis=axis, k=ks, cells={},
+                             geom={})
+            elif m.cut['kind'] != 'cylinder' or m.cut['axis'] != axis:
                 raise ValueError(
-                    "cylinder %d: mixed cylinder axes in one model "
-                    "are not supported in subpixel v1" % k)
+                    "cylinder %d: one cut per model -- mixed cylinder "
+                    "axes, or a cylinder with a slab cut, are not "
+                    "supported" % k)
             span = [slice(None)]*3
             span[axis] = slice(a0, a1)
             for i1, i2 in zip(*np.nonzero(fill >= 1e-3)):
@@ -839,14 +823,13 @@ class Problem:
                         "cells -- subpixel v1 keeps primitives "
                         "disjoint (transverse cell %d,%d)"
                         % (k, i1, i2))
-                m.sigma[pos] = np.float32(sig*fill[i1, i2])
-                m.fill_frac[pos] = np.float32(fill[i1, i2])
-                m.subpixel['cells'][(int(i1), int(i2))] = \
+                m.sigma[pos] = np.float32(sig)
+                m.fill[pos] = fill[i1, i2]
+                m.cut['cells'][(int(i1), int(i2))] = \
                     sub[i1, i2].astype(np.float64)
-                # stage C needs the resolved surface: each cell
-                # remembers its cylinder's (center, R, sigma)
-                m.subpixel['geom'][(int(i1), int(i2))] = \
-                    (c1, c2, R, sig)
+                # the surface palette needs the resolved surface: each
+                # cell remembers its cylinder's (center, R, sigma)
+                m.cut['geom'][(int(i1), int(i2))] = (c1, c2, R, sig)
         if eps_blocks:
             cplx = any(np.iscomplexobj(ec) for _, _, ec in eps_blocks)
             eps = np.ones(m.dims,
@@ -1100,7 +1083,7 @@ def _status_meta(prob, m, M, **params):
         lat = int(np.prod(np.asarray(m.dims, dtype=np.int64)))
         model.update(dims=[int(v) for v in m.dims],
                      cells=occ, cells_occupied=occ, cells_lattice=lat,
-                     fill_pct=float(m.fill()),
+                     fill_pct=float(m.fill_pct()),
                      nports=len(getattr(m, 'ports', []) or []),
                      tree_levels=int(getattr(M, 'numlevels', 0)))
     except Exception:                 # metadata must never break setup
@@ -1194,11 +1177,6 @@ class _EquiSweep:
             return ('superconductor -- sub-cell London modes are '
                     'opt-in; set skin = { mode = "on", basis = '
                     '"conduction" }')
-        if getattr(m, 'subpixel', None) is not None:
-            # fill models have mixed sigma_eff by construction, but the
-            # surface-anchored palette of the engine handles exactly
-            # that -- supported, not degraded
-            return None
         try:
             m.uniform_sigma()
         except ValueError:
@@ -1207,8 +1185,8 @@ class _EquiSweep:
 
     def __init__(self, prob, m, M, verbose=False):
         from equiterminal import EquiTerminalSolver
-        if getattr(m, 'fill_frac', None) is not None:
-            # equipotential terminals on subpixel models need every
+        if m.cut is not None and m.cut['kind'] == 'cylinder':
+            # equipotential terminals on cylinder fills need every
             # port face on a FULL cell: partial rim cells carry
             # distinct sigma_eff values, and the terminal machinery
             # wants one port conductivity (and full terminal
@@ -1216,7 +1194,7 @@ class _EquiSweep:
             bad = []
             for pname, pf, nf in prob.ports_faces:
                 for (ix, iy, iz, ax, sg) in pf + nf:
-                    if m.fill_frac[ix, iy, iz] < 1.0:
+                    if m.fill[ix, iy, iz] < 1.0:
                         bad.append((ix, iy, iz))
             if bad:
                 raise ValueError(
@@ -1262,9 +1240,7 @@ class _EquiSweep:
                     skin_depth
                 fref = (float(sk['f_ref']) if sk['f_ref'] is not None
                         else max(prob.freqs) if prob.freqs else 0.0)
-                spx = getattr(m, 'subpixel', None)
-                sig0 = (next(iter(spx['geom'].values()))[3] if spx
-                        else m.uniform_sigma())
+                sig0 = m.uniform_sigma()
                 if recommend_subdivision(m.dx, sig0, fref) > 1:
                     # RESOLUTION-AWARE k (2026-08-20, palette_ablation
                     # + xsection_tabulated): once the shape family is
@@ -1300,7 +1276,7 @@ class _EquiSweep:
                     # 1-D split makes these radii affordable (tables
                     # cost rc^3 * kz, not rc^3 * kz^2-squared).
                     au, ac = 12, 16
-                elif getattr(m, 'subpixel', None) is None:
+                elif m.cut is None or m.cut['kind'] != 'cylinder':
                     pax = int(prob.ports_faces[0][1][0][3])
                     au, ac = _auto_rc(m.struc(), pax)
                 else:
