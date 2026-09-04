@@ -562,3 +562,38 @@ Scoped validators at baseline: equiterminal 407, subpixel 380, corner
   engage with per-axis `dt`); standalone 9/9 ok. This is the "invert"
   item the plan had scheduled for phase 4, pulled forward because a
   baseline with a known-stale red is not a baseline.
+
+### Post-program: the diagonal-trace ladder (2026-09-04)
+
+The user's concern: diagonal PCB traces are common and a voxel code
+staircases them. `studies/diagonal_bar.py` measures the cost on one
+copper bar (100 x 50 um x 1.6 mm) solved axis-aligned and rotated 45
+degrees at the same cubic pitch; inductance is rotation invariant, so
+the aligned solve is the reference (it reproduces the DC closed form
+to six digits at every pitch). Prescribed-current face ports, plain
+basis (this path carries no enrichment).
+
+    cells across           4        8       16     observed order
+    DC   R diag/aligned  1.420    1.132    1.029   1.7 / 2.2
+    DC   L diag/aligned  1.061    1.021    1.005   1.6 / 2.1
+    1e8  R               1.632    1.171    1.044   1.9 / 2.0
+    1e9  R (deep skin)   1.690    1.385    1.204   0.84 / 0.91
+    1e9  L               1.060    1.017    1.003
+
+Rasterised area is -11 / -2.7 / +1.6% of w*L at the three pitches; the
+rest of the DC excess is the staircase edge layer (a corner cell has
+two links, not four). DC and L converge at roughly second order; deep
+skin (delta << h) converges FIRST order and is still +20% at 16 cells
+across because the current sits in the outermost cells, whose
+staircase shape is the wrong shape (perimeter sqrt(2) too long, a
+corner per cell). L is benign below 1% at 16 across.
+
+Shipped for the instrument: the prescribed-current face port accepts
+faces of mixed orientation (`port_impedance.terminal_impedance` sums
+per orientation; `terminal_interior_coupling` returns `{axis: lp}`;
+`_terminal_slots` is per axis). A staircased diagonal end cut
+alternates x- and y-faces, so this was required. The equipotential
+terminal remains single-axis. Structural recommendation: strip-shaped
+elements on the wire path (the `wirekernel` prisms already have
+arbitrary orientation and exact/quadratured kernels), not a two-axis
+subpixel cut; a rotated square loop becomes a four-segment strip wire.

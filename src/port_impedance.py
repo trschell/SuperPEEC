@@ -1587,10 +1587,11 @@ def impedance_matrix(model, M, solver, freq, current=1.0, weight='corner',
         emf = None
         lp = None
         if terminals:
-            lp, axis = terminal_interior_coupling(model, M, j, weight)
-            lo = {1: 0, 0: esz, 2: efsz}[axis]
+            lps = terminal_interior_coupling(model, M, j, weight)
             emf = np.zeros(efgsz, dtype=np.complex128)
-            emf[lo:lo+lp.size] = jw*current*lp
+            for axis, lp in lps.items():
+                lo = {1: 0, 0: esz, 2: efsz}[axis]
+                emf[lo:lo+lp.size] = jw*current*lp
         if potentials:
             i, v, info = solver.solve(src, emf=emf,
                                       ihat_method=ihat_method, **kw)
@@ -1608,7 +1609,9 @@ def impedance_matrix(model, M, solver, freq, current=1.0, weight='corner',
             # terminal <-> terminal, plus the transpose gather of the
             # terminal <-> interior coupling (same operator, by symmetry)
             Z[j, j] += terminal_impedance(model, M, j, freq, weight)
-            Z[j, j] += jw*np.dot(lp, i[lo:lo+lp.size])/current
+            for axis, lp in lps.items():
+                lo = {1: 0, 0: esz, 2: efsz}[axis]
+                Z[j, j] += jw*np.dot(lp, i[lo:lo+lp.size])/current
     return Z, infos
 
 
@@ -2037,31 +2040,36 @@ def terminal_impedance(model, M, port=0, freq=1.0, weight='corner',
                           int(e[4]), share))
     if not faces:
         return 0.0
-    axis = faces[0][3]
-    orient = _AXIS_ORIENT[axis]
-    others = [c for c in range(3) if c != axis]
-    rt = tm.terminal_resistance(l, orient, sigma, t_l=t_l)
-    # axial half-slot: cell c spans [2c, 2c+2); the terminal occupies the
-    # half next to its face
-    slots = []
-    for (ix, iy, iz, ax, sign, share) in faces:
-        cell = (ix, iy, iz)
-        slot = 2*cell[axis] + (1 if sign > 0 else 0)
-        slots.append((slot, cell[others[0]], cell[others[1]], share))
-    span = max(s[0] for s in slots) - min(s[0] for s in slots) + 2
-    ncell = [int(v) for v in model.dims]
-    n = [0, 0, 0]
-    n[axis] = span//2 + 2
-    n[others[0]] = ncell[others[0]] + 1
-    n[others[1]] = ncell[others[1]] + 1
-    kern = tm.axial_halfstep_kernel(l, orient, n)
+    # A port's faces may carry several orientations (a staircased
+    # diagonal cut alternates x and y faces); perpendicular terminal
+    # filaments have zero mutual, so the sum is per orientation.
     z = 0j
-    for (sa, ta0, ta1, ua) in slots:
-        z += ua*ua*rt
-        for (sb, tb0, tb1, ub) in slots:
-            z += jw*ua*ub*tm.mutual_segments(
-                kern, orient, (sa, 1), (sb, 1),
-                transverse=(ta0 - tb0, ta1 - tb1))
+    ncell = [int(v) for v in model.dims]
+    for axis in sorted({f[3] for f in faces}):
+        orient = _AXIS_ORIENT[axis]
+        others = [c for c in range(3) if c != axis]
+        rt = tm.terminal_resistance(l, orient, sigma, t_l=t_l)
+        # axial half-slot: cell c spans [2c, 2c+2); the terminal
+        # occupies the half next to its face
+        slots = []
+        for (ix, iy, iz, ax, sign, share) in faces:
+            if ax != axis:
+                continue
+            cell = (ix, iy, iz)
+            slot = 2*cell[axis] + (1 if sign > 0 else 0)
+            slots.append((slot, cell[others[0]], cell[others[1]], share))
+        span = max(s[0] for s in slots) - min(s[0] for s in slots) + 2
+        n = [0, 0, 0]
+        n[axis] = span//2 + 2
+        n[others[0]] = ncell[others[0]] + 1
+        n[others[1]] = ncell[others[1]] + 1
+        kern = tm.axial_halfstep_kernel(l, orient, n)
+        for (sa, ta0, ta1, ua) in slots:
+            z += ua*ua*rt
+            for (sb, tb0, tb1, ub) in slots:
+                z += jw*ua*ub*tm.mutual_segments(
+                    kern, orient, (sa, 1), (sb, 1),
+                    transverse=(ta0 - tb0, ta1 - tb1))
     return complex(z)
 
 
@@ -2080,6 +2088,8 @@ def _terminal_slots(model, port, axis):
             continue
         share = 1.0/len(arr)
         for e in arr:
+            if int(e[3]) != axis:
+                continue
             cell = (int(e[0]), int(e[1]), int(e[2]))
             slot = 2*cell[axis] + (1 if int(e[4]) > 0 else 0)
             out.append((slot, cell[others[0]], cell[others[1]], share))
@@ -2137,26 +2147,32 @@ def terminal_interior_coupling(model, M, port=0, weight='corner'):
 
     Returns
     -------
-    lp : ndarray
-        ``sum_t u_t Lp(j, t)`` for every filament ``j`` of the port's
+    dict
+        ``{axis: lp}`` -- for each orientation among the port's faces,
+        ``sum_t u_t Lp(j, t)`` over every filament ``j`` of that
         orientation, in that leaf's compressed order. Multiply by
         ``jw*I`` for the EMF; contract with the solved currents for the
         gather.
-    axis : int
-        The port axis, so the caller knows which leaf block ``lp``
-        indexes.
     """
     import terminal as tm
     p = model.port(port)
     if len(p.pos) == 0:
         raise ValueError("port %r has no positive terminal" % port)
-    axis = int(p.pos[0][3])
-    orient = _AXIS_ORIENT[axis]
-    dx = model.dx
-    l = (dx, dx, dx)
-    terms = _terminal_slots(model, port, axis)
-    s0, t0, t1 = _interior_slots(M, axis)
+    l = tuple(float(v) for v in model.d)
     dims = [int(v) for v in model.dims]
+    out = {}
+    # one coupling per orientation among the port's faces (a staircased
+    # diagonal cut alternates x and y faces; perpendicular filaments do
+    # not couple, so each orientation is its own block)
+    for axis in sorted({int(e[3]) for arr in (p.pos, p.neg) for e in arr}):
+        out[axis] = _coupling_axis(model, M, p, axis, l, dims, tm)
+    return out
+
+
+def _coupling_axis(model, M, p, axis, l, dims, tm):
+    orient = _AXIS_ORIENT[axis]
+    terms = _terminal_slots(model, p.name, axis)
+    s0, t0, t1 = _interior_slots(M, axis)
     others = [c for c in range(3) if c != axis]
     n = [0, 0, 0]
     n[axis] = dims[axis] + 2
@@ -2183,7 +2199,9 @@ def terminal_interior_coupling(model, M, port=0, weight='corner'):
     # coupling backwards, which is worth exactly twice the correction
     # and is invisible to reciprocity (both uses share lp, so the
     # result stays symmetric either way).
-    sign = -float(p.pos[0][4])
+    pf = [e for e in p.pos if int(e[3]) == axis]
+    nf = [e for e in p.neg if int(e[3]) == axis]
+    sign = -float(pf[0][4]) if pf else float(nf[0][4])
     lp = np.zeros(s0.size, dtype=np.float64)
     for (st_, a0, a1, u) in terms:
         d0 = np.abs(t0 - a0)
@@ -2196,7 +2214,7 @@ def terminal_interior_coupling(model, M, port=0, weight='corner'):
             sel[others[0]] = d0[ok]
             sel[others[1]] = d1[ok]
             lp[ok] += sign*u*kern[sel[0], sel[1], sel[2]]
-    return lp, axis
+    return lp
 
 
 # kernel axis order per port axis: (own, other0, other1) -> (x, y, z)
