@@ -660,6 +660,7 @@ class Enrichment:
         self._p, self._z = model.material_response(self.freq)
         cut = getattr(model, 'cut', None)
         spx = cut if cut is not None and cut['kind'] == 'cylinder' else None
+        subset = palette is not None      # a patch family, not a whole orientation
         if palette is None:
             self.axis = int(axis)
             self.sel = np.flatnonzero(fil_axis == self.axis)
@@ -720,8 +721,10 @@ class Enrichment:
         # is the entries themselves; a patch-subset family (corners)
         # must still see the filaments just outside its patch, or its
         # modes lose most of their drive (measured: the corner bands
-        # collapsed from x0.66 to x0.35 without them)
-        if palette is None:
+        # collapsed from x0.66 to x0.35 without them). A whole-orientation
+        # family's aggregates ARE its entries -- never searched for (an
+        # all-pairs query at radius 16 over 4.5M filaments was 40 GB).
+        if not subset:
             self.agg = self.sel
         else:
             cand = np.flatnonzero(np.isin(fil_axis, list(self.splits)))

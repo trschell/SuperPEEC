@@ -228,6 +228,31 @@ Scoped validators at baseline: equiterminal 407, subpixel 380, corner
 
 ## 8. Phase log
 
+### After the program (2026-09-04): the RSFQ XNOR on the new interface
+
+* `examples/rsfq_xnor.toml`: `film = "z"` on the 1760 wiring-layer
+  blocks (M0-M7, as the converter now emits) and
+  `enrich = { families = ["section"] }` (London modes are opt-in).
+  Resolved: k 7, kk (1, 7), rc (12, 16), reach 0, f_ref 1e10 -- the
+  film palette, 6.29M modes on 17.6M loops.
+* FIRST RUN OOM-KILLED at 48.4 GB inside the engine build. A probe
+  under an address-space cap found the allocation: the phase-3
+  constructor tested "patch-subset family?" on the `palette` variable
+  AFTER assigning the default palette to it, so every whole-orientation
+  engine since phase 3 searched its aggregate set with an all-pairs
+  KDTree query at radius rc_cross over every filament -- 1.6e11 pairs
+  here, 40 GB; on the validator models merely slow, and the result was
+  identical to the shortcut (`agg = sel`), which is why the phase-3
+  A/B and every gate stayed green. Fixed (`subset` decided before the
+  default palette exists); validate_enrich and validate_corner green.
+* Second run, 621 x 721 x 49 cells at 100 x 100 x 67.5 nm, 22.5% fill:
+  setup 988 s (assembly + GeoMG preconditioner the bulk), solve 2896 s
+  for 137 matvecs to residual 8.0e-5 (rtol 1e-4, flag 0), wall
+  1:05:38, peak RSS 28.2 GB, 250% CPU. P1: L = 1.66421 pH,
+  R = 7.4e-7 ohm at 10 GHz. The 200 nm-in-plane film-palette number
+  was 1.7304 pH (2026-09-02); in-plane refinement moves L down, as the
+  film bench predicted (the geometric term converges downward).
+
 ### Phase 6 (2026-09-04): the study prune, and 1000 dormant lines
 
 * Studies removed (21 files, 1444 lines), per section 5: the
