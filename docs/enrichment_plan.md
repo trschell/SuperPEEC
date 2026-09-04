@@ -566,7 +566,7 @@ Scoped validators at baseline: equiterminal 407, subpixel 380, corner
 ### Post-program: the diagonal-trace ladder (2026-09-04)
 
 The user's concern: diagonal PCB traces are common and a voxel code
-staircases them. `studies/diagonal_bar.py` measures the cost on one
+staircases them. `scratch/diagonal_bar.py` (local, not tracked) measures the cost on one
 copper bar (100 x 50 um x 1.6 mm) solved axis-aligned and rotated 45
 degrees at the same cubic pitch; inductance is rotation invariant, so
 the aligned solve is the reference (it reproduces the DC closed form

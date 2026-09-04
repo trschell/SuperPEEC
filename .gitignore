@@ -39,3 +39,11 @@ studies/*.vhr
 studies/*.log
 validation/studies/
 .ipynb_checkpoints/
+
+# local-only trees (moved here from the retired ~/Documents/octree
+# sibling, 2026-09-04): throwaway studies, reference papers, the
+# whitepaper sources, and the 2018 sphinx build. None are distributed.
+scratch/
+papers/
+docs_local/
+doc_legacy/
