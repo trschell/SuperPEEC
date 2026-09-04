@@ -48,6 +48,7 @@ import numpy as np
 
 import vhr
 import equiterminal as eq
+from enrich import skin_depth
 
 SIG = 5.8e7
 RHO = 1.0/SIG
@@ -111,9 +112,10 @@ def run(path):
     # ENGINE=1: the shipped conduction engine (k=7, boundary-only) on
     # BOTH geometries -- with CORNER_MODES too this is the phase-2
     # composed acceptance, and the dZ differential is meaningful again.
-    kw = dict(corner_modes=CORNER)
+    fam = ['corner'] if CORNER else []
     if ENGINE:
-        kw.update(subdivide=7, skin_freq=max(FREQS))
+        fam.append('section')
+    kw = dict(enrich=dict(families=fam, k=7, f_ref=max(FREQS))) if fam else {}
     S = eq.EquiTerminalSolver(m, M, 0, **kw)
     out = {}
     for f in FREQS:
@@ -157,7 +159,7 @@ print("Z-trace corner ladder (2 corners): W=%g T=%g um, arms %g um, "
       "centreline %g um, copper"
       % (W_UM, T_UM, ARM_UM, 3*ARM_UM - 2*W_UM))
 for f in FREQS:
-    d = eq.skin_depth(SIG, f)
+    d = skin_depth(SIG, f)
     print("  f=%.3g Hz: delta=%.4g um, W/delta=%.2f"
           % (f, d*1e6, W_UM*1e-6/d))
 print("ladder (cells/um): %s   rtol %g\n" % (LADDER, RTOL))

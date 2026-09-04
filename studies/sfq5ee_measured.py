@@ -133,7 +133,7 @@ def toml_text(w, ln, dx, dz, freq):
     out += ["[port]", 'name = "P"', "equipotential = true",
             "p_faces = " + fmt(pf), "n_faces = " + fmt(nf), "",
             "[solve]", "freq = [%g]" % freq,
-            'skin = { mode = "on", basis = "conduction" }', ""]
+            'enrich = { families = ["section"] }', ""]
     return "\n".join(out)
 
 

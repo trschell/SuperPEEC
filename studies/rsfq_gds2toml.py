@@ -357,14 +357,11 @@ def convert(args):
     # keeps the two views of "which cells hold metal" identical; the
     # 1e-6-cell guards keep an exactly-on-boundary layer from growing
     # a zero-fill sliver either side. Non-subpixel ports keep zc.
-    if args.subpixel:
-        zp = {}
-        for name, (zlo, zhi) in zm.items():
+    zp = {}
+    for name, (zlo, zhi) in zm.items():
             c0 = int(np.floor(zlo/pitch[2] + 1e-6))
             c1 = int(np.ceil(zhi/pitch[2] - 1e-6))
             zp[name] = (c0, max(c1, c0 + 1))
-    else:
-        zp = zc
     drive = args.drive
     if drive not in ports:
         raise SystemExit("drive port %r not in layout ports %s"
@@ -411,14 +408,11 @@ def convert(args):
         w("pitch = %g" % pitch[0])
     else:
         w("pitch = [%g, %g, %g]" % pitch)
-    if args.subpixel:
-        w("subpixel = true")
     w("")
     for (name, x0, y0, z0, x1, y1, z1, m, zlo, zhi) in blocks:
         w("[[block]]")
         w("name = \"%s\"" % name)
-        if args.subpixel:
-            # PHYSICAL z bounds, so the layer keeps its true thickness
+        if True:  # PHYSICAL z bounds: the layer keeps its true thickness
             # at any pitch and [grid] subpixel handles the boundary
             # cells. x/y stay on the grid: the rasteriser works in whole
             # cells there, and subpixel v1 cuts ONE axis.
@@ -426,9 +420,6 @@ def convert(args):
               % (x0*pitch[0], y0*pitch[1], zlo))
             w("to_m   = [%.12g, %.12g, %.12g]"
               % (x1*pitch[0], y1*pitch[1], zhi))
-        else:
-            w("from = [%d, %d, %d]" % (x0, y0, z0))
-            w("to   = [%d, %d, %d]" % (x1, y1, z1))
         if m == 'nb':
             w("lambda_l = %g" % LAMBDA_NB)
         else:
@@ -488,10 +479,6 @@ def main(argv=None):
                          'the whole plane edge')
     ap.add_argument('--freq', type=float, default=1e10)
     ap.add_argument('--rtol', type=float, default=None)
-    ap.add_argument('--subpixel', action='store_true',
-                    help='emit PHYSICAL z bounds and [grid] subpixel = '
-                         'true, so a layer keeps its real thickness at '
-                         'a pitch that does not divide it')
     ap.add_argument('--margin', type=float, default=1e-6,
                     help='empty margin around the layout, m (xy)')
     ap.add_argument('--zmargin', type=int, default=2,

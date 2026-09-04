@@ -318,83 +318,63 @@ def main():
           'R %.3g->%.3g, L %.4g->%.4g'
           % (zlo.real, zhi.real, zlo.imag/(2*np.pi*1e5),
              zhi.imag/(2*np.pi*1e9)))
-    # -- the sub-cell skin engine, TOML-exposed (2026-08-17) ----------
-    # auto default: conduction basis, engaged only when the cell size
-    # justifies it (the engine's recommend_subdivision). k is
-    # RESOLUTION-AWARE since 2026-08-20 (palette_ablation +
-    # xsection_tabulated studies: once the shape family is not the
-    # binder, the piecewise-constant sub-bar grid is -- a sub-bar
-    # <= delta/2 recovers it, +4 delivered points at dx/delta = 6 at
-    # unchanged matvecs): k = min(12, max(7, ceil(2 dx/delta(fref)))).
-    # Equibar sits at dx/delta = 4.79 -> k = 10. Gate the RULE, not
-    # the constant, so the expected value tracks the geometry.
-    from equiterminal import skin_depth as _sd
+    # -- sub-cell enrichment: [solve] enrich, resolved by enrich.resolve --
+    # auto engages the section family only when the cell size justifies
+    # it, with the resolution-aware k = min(12, max(7, ceil(2 dx/delta)))
+    # (a sub-bar <= delta/2; measured +4 delivered points at dx/delta = 6
+    # for k 7 -> 12). Equibar sits at dx/delta = 4.79 -> k = 10. Gate
+    # the RULE, not the constant.
+    from enrich import skin_depth as _sd
+    cfg = swe.S.enrich
     _kexp = int(min(12, max(7, np.ceil(
-        2*me.dx/_sd(me.uniform_sigma(), swe.S.skin_freq)))))
-    check("skin auto engages on equibar (resolution-aware k, "
-          "conduction)",
-          swe.S.skin_k == _kexp
-          and abs(swe.S.skin_freq - 1e9) < 1,
-          'k=%d (expect %d) f_ref %.3g'
-          % (swe.S.skin_k, _kexp, swe.S.skin_freq))
-    # rc is WIDTH-SCALED since 2026-08-20 (rc ~ 1.5-2x the section
-    # width off the median transverse run length; measured: (3,4)
-    # silently truncates ~20 delivered points at 4 cells across where
-    # (6,8) recovers +14 at unchanged apply cost; guards keep wide
-    # sections OUT of the rc-ladder's measured mid-shell damage zone
-    # by falling back to (3,4)). Equibar is 4x4 across -> (6, 8).
-    check("skin auto rc is width-scaled ((6,8) on the 4x4 bar)",
-          swe.skin_kwargs['rc_uu'] == 6
-          and swe.skin_kwargs['rc_cross'] == 8,
-          'rc=(%s,%s)' % (swe.skin_kwargs['rc_uu'],
-                          swe.skin_kwargs['rc_cross']))
-    prc = sppeec_input.loads(
-        eqtxt + '\nskin = { rc_uu = 3, rc_cross = 4 }')
+        2*me.dx/_sd(me.uniform_sigma(), cfg.f_ref)))))
+    check("enrich auto engages on equibar (resolution-aware k)",
+          cfg.k == _kexp and abs(cfg.f_ref - 1e9) < 1
+          and cfg.families == ['section'],
+          'k=%d (expect %d) f_ref %.3g' % (cfg.k, _kexp, cfg.f_ref))
+    # rc is WIDTH-SCALED (rc ~ 1.5-2x the section width off the median
+    # transverse run; (3,4) silently truncates ~20 delivered points at 4
+    # cells across where (6,8) recovers +14). Equibar is 4x4 -> (6, 8).
+    check("auto rc is width-scaled ((6,8) on the 4x4 bar)",
+          cfg.rc == (6, 8), 'rc=%s' % (cfg.rc,))
+    prc = sppeec_input.loads(eqtxt + '\nenrich = { rc = [3, 4] }')
     mrc = prc.model()
     swrc = prc.sweeper(mrc, prc.tree(mrc))
-    check("explicit skin rc override respected",
-          swrc.skin_kwargs['rc_uu'] == 3
-          and swrc.skin_kwargs['rc_cross'] == 4)
-    # skin resolves the sub-cell crowding: R(1e9) well above the
-    # unsubdivided value (recommend_subdivision's measured +90%-class
-    # correction at this dx/delta), which mode = "off" reproduces
-    poff = sppeec_input.loads(
-        eqtxt + '\nskin = { mode = "off" }')
+    check("explicit rc override respected", swrc.S.enrich.rc == (3, 4))
+    poff = sppeec_input.loads(eqtxt + '\nenrich = "off"')
     moff = poff.model()
     zoff, _ = poff.sweeper(moff, poff.tree(moff)).solve(1e9)
-    check("mode 'off' reproduces the unsubdivided solve",
+    check("enrich 'off' reproduces the unsubdivided solve",
           abs(zoff.real - 0.00591384)/0.00591384 < 1e-3,
           'R %.6g' % zoff.real)
-    check("auto skin raises R(1e9) well above unsubdivided",
+    check("auto enrichment raises R(1e9) well above unsubdivided",
           zhi.real > 1.5*zoff.real,
           '%.6g vs %.6g (%+.0f%%)'
           % (zhi.real, zoff.real, 100*(zhi.real/zoff.real - 1)))
-    expect_error("skin.k = 2 rejected (measured-blind split)",
-                 eqtxt + '\nskin = { k = 2 }', 'BLIND')
-    expect_error("skin table without equipotential rejected",
-                 doc(extra='skin = { mode = "on" }'),
+    expect_error("enrich.k = 2 rejected (measured-blind split)",
+                 eqtxt + '\nenrich = { k = 2 }', 'BLIND')
+    expect_error("enrich table without equipotential rejected",
+                 doc(extra='enrich = { k = 7 }'),
                  'equipotential-terminal path')
+    expect_error("unknown enrich key rejected",
+                 eqtxt + '\nenrich = { basis = "diff" }', 'unknown key')
     # equivalence: the TOML route is EXACTLY the direct solver given
-    # the same resolved skin kwargs
+    # the same resolved config
     from equiterminal import EquiTerminalSolver
     m2 = pe.model()
     M2 = pe.tree(m2)
     m2.prepare(M2, 1e7)
-    zd, _, _ = EquiTerminalSolver(m2, M2, 0,
-                                  **swe.skin_kwargs).solve(
+    zd, _, _ = EquiTerminalSolver(m2, M2, 0, enrich=cfg).solve(
         1e7, rtol=pe.rtol, method=pe.method)
     zt, _ = swe.solve(1e7)
     check("TOML equipotential == direct EquiTerminalSolver",
           abs(zt - zd)/abs(zd) < 1e-9,
           'rel %.1e' % (abs(zt - zd)/abs(zd)))
-    # boundary_only default: modes only where the physics is. The
-    # referee measurement (2026-08-17): on a WIDE cross-section,
-    # modes-everywhere overshoots the physical skin limit
-    # rho*L/(P*delta) ~2.8x (spurious interior excitation, the 2-D
-    # study's warning confirmed in 3-D); boundary-only lands within
-    # the physical band. Gate both facts.
-    check("default resolves boundary_only = true (reach 0)",
-          swe.skin_kwargs.get('reach') == 0)
+    # reach 0 by default: modes only where the physics is. On a WIDE
+    # cross-section modes-everywhere overshoots the physical skin limit
+    # rho*L/(P*delta) ~2.8x (spurious interior excitation); the exposed
+    # layer lands within the physical band. Gate both facts.
+    check("default resolves reach = 0", cfg.reach == 0)
     wide = '\n'.join([
         '[grid]', 'dims = [24, 20, 20]', 'pitch = 10e-6',
         '[[block]]', 'from = [0, 0, 0]', 'to = [24, 20, 20]',
@@ -407,17 +387,15 @@ def main():
             '[23, %d, %d, "+x"]' % (y, z)
             for y in range(20) for z in range(20)),
         '[solve]', 'freq = [1e9]'])
-    import equiterminal as eqt
-    delta = eqt.skin_depth(5.8e7, 1e9)
+    delta = _sd(5.8e7, 1e9)
     r_skin = (24*10e-6)/(5.8e7*(4*20*10e-6)*delta)
     pw = sppeec_input.loads(wide)
     mw = pw.model()
     zw, _ = pw.sweeper(mw, pw.tree(mw)).solve(1e9)
-    check("wide bar: default skin R within the physical band",
+    check("wide bar: default enrichment R within the physical band",
           0.6*r_skin < zw.real < 1.4*r_skin,
           'R %.4g vs rho*L/(P*delta) %.4g' % (zw.real, r_skin))
-    pv = sppeec_input.loads(
-        wide + '\nskin = { boundary_only = false }')
+    pv = sppeec_input.loads(wide + '\nenrich = { reach = "all" }')
     mv = pv.model()
     zv, _ = pv.sweeper(mv, pv.tree(mv)).solve(1e9)
     check("volume placement still overshoots (the recorded "
@@ -425,8 +403,8 @@ def main():
           zv.real > 2*r_skin, 'R %.4g' % zv.real)
 
     # lambda_l + equipotential is the VALIDATED superconductor combo;
-    # auto skin must degrade GRACEFULLY there (the engine's loud
-    # guard fires only on explicit mode = "on"/k)
+    # auto must degrade GRACEFULLY there (London modes are opt-in: an
+    # explicit table engages them)
     psc2 = sppeec_input.loads(
         bar_doc('lambda_l = 90e-9').replace(
             '[port]', '[port]\nequipotential = true'))
@@ -434,8 +412,8 @@ def main():
           psc2.formulation == 'LpR' and psc2.equipotential)
     msc = psc2.model()
     swsc = psc2.sweeper(msc, psc2.tree(msc))
-    check("auto skin degrades gracefully on the superconductor",
-          swsc.S.skin_k == 1)
+    check("auto enrichment degrades gracefully on the superconductor",
+          swsc.S.enrich is None)
     zsc2, _ = swsc.solve(1e9)
     check("equipotential London bar: lossless inductor",
           zsc2.imag > 0 and abs(zsc2.real) < 1e-6*zsc2.imag,

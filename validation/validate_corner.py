@@ -81,7 +81,7 @@ if len(cs) == 2:
           (sx1, sy1) == (-sx2, -sy2))
 
 S0 = eq.EquiTerminalSolver(m, M, 0)                       # modes OFF
-S1 = eq.EquiTerminalSolver(m, M, 0, corner_modes=True)    # modes ON
+S1 = eq.EquiTerminalSolver(m, M, 0, enrich=dict(families=['corner']))
 r = S1.redist
 check("modes built", S1.nu == 6, "nu=%d" % S1.nu)
 
@@ -111,7 +111,7 @@ for f, band in ((1e9, (0.50, 0.80)), (1e10, (0.60, 0.88))):
 # ---------------------------------------------------------- dx/W = 1/3
 m3, M3 = build(0.375)
 S3o = eq.EquiTerminalSolver(m3, M3, 0)
-S3 = eq.EquiTerminalSolver(m3, M3, 0, corner_modes=True)
+S3 = eq.EquiTerminalSolver(m3, M3, 0, enrich=dict(families=['corner']))
 check("dx/W=1/3 modes built", S3.nu == 6, "nu=%d" % S3.nu)
 for f in (1e9, 1e10):
     Z0, _, i0 = S3o.solve(f, rtol=1e-8)
@@ -130,9 +130,9 @@ for f in (1e9, 1e10):
 # the tabulation). Improvement bands measured 2026-08-19: the corner
 # modes cut the engine's REMAINING error to ~0.53x at both 1e9 and
 # 1e10 (dx/W = 1/2).
-kw = dict(subdivide=7, skin_freq=1e10)
-Se = eq.EquiTerminalSolver(m, M, 0, **kw)
-Sc = eq.EquiTerminalSolver(m, M, 0, corner_modes=True, **kw)
+Se = eq.EquiTerminalSolver(m, M, 0, enrich=dict(k=7, f_ref=1e10))
+Sc = eq.EquiTerminalSolver(m, M, 0, enrich=dict(
+    families=['section', 'corner'], k=7, f_ref=1e10))
 check("composed stack built", Sc.nu == Se.nu + 6,
       "nu %d -> %d" % (Se.nu, Sc.nu))
 st = Sc.redist

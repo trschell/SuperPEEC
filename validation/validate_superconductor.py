@@ -203,7 +203,7 @@ def part_e():
     except ValueError as e:
         check("DC raises", 'freq > 0' in str(e), str(e)[:50])
     try:
-        S = eq.EquiTerminalSolver(m, M, 0, subdivide=3, skin_freq=f)
+        S = eq.EquiTerminalSolver(m, M, 0, enrich=dict(k=3, f_ref=f))
         p_used = getattr(S.redist, '_p', None)
         check("conduction basis is ALLOWED on uniform lambda",
               True, "rate = %.4g" % (abs(p_used) if p_used else 0.0))

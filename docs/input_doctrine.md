@@ -195,145 +195,63 @@ written today still means the same thing after the next refactor.
     rtol 1e-8). `EquiTerminalSolver.solve(readout='lsqr')` keeps the
     old path for comparison.
 
-13. **The sub-cell skin engine is on by default, where it counts**
-    (added 2026-08-17; equipotential path only). `[solve]
-    skin = { ... }` controls the cross-section redistribution modes:
-    `mode = "auto"` (default) engages the engine with the
-    `conduction` basis — the measured-best basis, 93% of the
-    skin-depth correction delivered, geometry-independent — but ONLY
-    when the cell size justifies it: the engine's own
-    `recommend_subdivision` at the sweep's highest frequency returns
-    k = 1 when the mesh already resolves the skin depth, so the
-    default costs nothing where it buys nothing. When it does engage
-    with the conduction basis, the default is k = 7: conduction's k
-    is pure quadrature (the mode count is fixed), and k = 7 measured
-    19 points of skin-correction gap better than the generic cap of
-    3 -- at zero additional unknowns, though the stiffer mode system
-    does cost Krylov iterations at the highest frequencies. Auto degrades
-    gracefully (to off, with a verbose note) on models where
-    subdivision is undefined — anisotropic cells, superconductors,
-    mixed conductivities — while `mode = "on"` or an explicit `k`
-    lets the solver's loud guards fire instead. Exposed knobs:
-    `basis` (`conduction`/`linear`/`diff`), `k` (>= 3; k = 2 is
-    rejected — a 2x2 split is provably blind to axially symmetric
-    neighbourhoods), `f_ref` (skin-shape reference frequency;
-    defaults to the sweep maximum, and the shapes retune per solve
-    point regardless), `rc_uu`/`rc_cross` (mode-coupling truncation
-    radii — READ THIS before touching them or trusting wire skin
-    numbers. Since 2026-08-20 the default is WIDTH-SCALED: rc =
-    (ceil(1.5 W), ceil(2 W)) with W the median transverse run
-    length of the conductor perpendicular to the port axis,
-    floored at (3, 4), capped at (12, 16), and falling back to
-    (3, 4) whenever the scaled radii would land in the mid-shell
-    damage zone of a wider dimension (measured: fixed (3, 4) was
-    fine at 2 cells across yet silently truncated ~20 delivered
-    points at 4 across, where (6, 8) — 1.5–2x the width —
-    recovers +14 of them at unchanged apply cost). Explicit
-    values are honoured as given. Fixed small radii remain
-    measured-correct for THIN rectangular sections, but on
-    round/staircase sections
-    they deliver only 5–36% of the skin correction; full delivery
-    there needs rc ≈ 2x the section diameter, at close to
-    untruncated cost, because a net-zero mode's distant couplings
-    nearly cancel and axial coupling matters out to ~2 diameters.
-    Do NOT split the difference: intermediate rc on wide sections
-    is NON-MONOTONICALLY WRONG — measured worse than the small
-    default, stable under solve tolerance — a hard cutoff mid-shell
-    leaves an unbalanced residue rather than dropping negligible
-    terms), `boundary_only` (default
-    TRUE: modes live only on filaments with an exposed face in the
-    split plane, which is where the physics is — measured on a
-    20x20-cell bar at dx/delta = 4.8, modes-everywhere overshoots
-    the physical skin limit rho*L/(P*delta) by ~2.8x through
-    spurious interior-mode excitation, while boundary-only lands
-    within ~15%; on few-cell cross-sections the two agree and
-    boundary-only is simply cheaper. Set false only to reproduce
-    the historical volume placement). Solver
-    internals (FFT toggles, memory guards, factorization modes) are
-    deliberately not exposed. HONEST LIMIT: the engine delivers ~93%
-    of the correction; the residual is staircase voxelization of
-    curved cross-sections, not the mode basis.
+13. **Sub-cell enrichment: one `[solve] enrich` table, on by default
+    where it counts** (equipotential path only; rewritten 2026-09-04,
+    no compatibility with the former `skin` table). `enrich = "auto"`
+    (the default) engages the SECTION family -- net-zero conduction
+    modes on every filament along the port axis, the measured-best
+    palette (93% of the skin-depth correction, geometry-independent)
+    -- only when a transverse cell exceeds half the skin depth at the
+    sweep's highest frequency, so it costs nothing where it buys
+    nothing; it never engages by itself on a superconductor (London
+    modes are opt-in). `enrich = "off"` disables it. A table is
+    explicit and engages per the same rules, raising where the model
+    cannot be served (several London depths, mixed conductivities):
 
-14b. **`[grid] subpixel = true` represents partial cells instead of
-    rounding them away** (added 2026-08-31). A `[[block]]` whose
-    `from_m`/`to_m` do not land on cell boundaries is otherwise snapped
-    to the nearest boundary with a warning — a 135 nm layer on a 100 nm
-    pitch simply becomes a different object. With subpixel on, the
-    boundary cells keep their exact fractional coverage and carry the
-    LAMINATE effective conductivity: arithmetic mean along the layers,
-    which for a layered medium is exact rather than a bound. Measured on
-    a 75 nm film at 30 nm pitch (2.5 cells) against the same film solved
-    at 15 nm where it is 5 cells exactly: R error 16.67% → 0.00%, L error
-    2.42% → 0.30%. The remaining L error is the partial cell's geometric
-    footprint in the mutual tables, corrected in turn by
-    `enrich.partial_dL`, which the solver raises automatically.
+        [solve.enrich]
+        families = ["section", "corner"]   # default ["section"]
+        k        = 7        # sub-bars per split axis; auto = min(12, max(7, ceil(2 dx/delta)))
+        reach    = 0        # cells beyond the exposed layer that carry modes; "all"
+        rc       = [6, 8]   # coupling radii (mode-mode, mode-aggregate); auto = width-scaled
+        f_ref    = 1e9      # shape reference frequency; auto = sweep maximum
 
-    SCOPE, and these are hard errors rather than silent approximations:
-    ONE cut axis per model, and at most one off-grid axis per block — a
-    cell cut on two axes at once is not a laminate and neither mean
-    applies to it. The CUT AXIS itself keeps the bulk sigma: the
-    laminate's harmonic mean is the value for a path passing all the way
-    through a cell, and no filament does that — the half-pair rule gives
-    a filament the top half of one cell and the bottom half of the next,
-    so the through-plane value is a HALF-CELL quantity the per-cell array
-    cannot express. In-plane is exact and is what is measured; the cut
-    axis is left alone rather than given an untested value.
+    `k` is quadrature, not unknowns (the mode count is fixed by the
+    palette), and k = 2 is refused -- a 2x2 split is blind to axially
+    symmetric neighbourhoods. `reach` defaults to the exposed layer:
+    modes-everywhere overshoots the physical skin limit ~2.8x on a wide
+    section through spurious interior excitation. `rc` defaults to
+    (ceil 1.5W, ceil 2W) off the section width, floored (3,4), capped
+    (12,16), with the mid-shell damage-zone fallback; (12,16) on
+    declared films; (3,4) on cylinder fills. A block with `film = "z"`
+    (the film normal) gets the 1-D film palette along the normal when
+    the port is in-plane. The CORNER family adds tabulated circulation
+    modes at 90-degree bends (3 solved amplitudes per corner, both
+    in-plane orientations; AC-only by the DC-decoupling theorem). The
+    shapes retune per solve frequency; the evidence for every rule is
+    in docs/enrichment_history.md.
 
-14. **Subpixel geometry starts with `[[cylinder]]`** (added
-    2026-08-18; stage A of the subpixel program). A round conductor
-    is declared by `axis`, `center` (the two transverse coordinates,
-    metres), `radius`, `sigma` and an optional axial span
-    (`from`/`to` cells or `from_m`/`to_m`). Boundary cells get a
-    computed FILL FRACTION and carry `sigma_eff = sigma*fill`, so
-    the partial-cell resistance is exact through the per-cell-
-    conductivity machinery with no solver changes — measured on the
-    round-wire example: the center-in staircase reads DC resistance
-    11.6% low, the fill-corrected model lands within ~1% of
-    L/(sigma*pi*R^2). Stage B (same date) adds the matching
-    partial-cell INDUCTANCE: a sparse near-field correction
-    dL = w^T T w - u^T T u over exact sub-prism mutual tables
-    (4x4 sub-cells, 2-cell window; entries verified against first
-    principles to machine zero), applied on the branch rows with the
-    Toeplitz far field untouched. Measured on the round-wire
-    example against a 2x-refined reference, the inductance error
-    improves strictly through the stages: staircase 2.4% -> fill
-    1.2% -> fill+dL 0.9%. Skin effect on subpixel wires:
-    on the equipotential path the auto skin engine now engages
-    SURFACE-ANCHORED SOLVED MODES (stage C.2, 2026-08-18) — per-cell
-    net-zero conduction shapes anchored to the resolved circle over
-    the sub-prism geometry, amplitudes solved by the system, with a
-    per-cell block-Jacobi mode preconditioner (without which deep-
-    skin solves silently never converge; the engine applies it
-    automatically). MEASURED VALIDITY, 8 cells across the section:
-    R_AC/R_DC within ~1% of the exact Kelvin solution at
-    dx/delta = 1-2 (gated) and monotone (the bare lattice's
-    sign-instability is gone); usable to dx/delta ~ 3-4. DEEPER
-    SKIN CARRIES TWO SEPARATE EFFECTS, both measured: (a) a finite
-    core-fed wire is genuinely NOT the infinite Kelvin wire — a
-    4x-refined same-protocol reference reads +7% above Kelvin at
-    dx/delta = 6, so gate against same-protocol references there,
-    never the analytic formula; (b) the coarse model's TRANSVERSE
-    redistribution paths (staircase, no enrichment) are too
-    resistive, freezing an under-crowded profile (~20% high vs the
-    same-protocol reference at dx/delta = 6, growing deeper) —
-    transverse/cross-orientation enrichment is the documented
-    future work. Past dx/delta ~ 4, refine the section. An
-    imposed-Bessel-profile enrichment was measured WORSE than the
-    lattice alone (phase double-counting) and is deliberately not
-    wired; the offline zero-truncation referee shows the SOLVED
-    mode subspace tracks the fine sub-bar truth to ~2% through
-    dx/delta = 8, so the axial mode basis itself is not the
-    limiter. Equipotential ports ARE
-    supported on subpixel models with one rule — every port face on
-    a FULL cell (fill == 1), since partial rim cells carry distinct
-    effective conductivities (measured on the round wire: R within
-    ~1.5% of analytic with a solid-core port, Kelvin skin ratios
-    equivalent to the LpPR path); [[cylinder]] does not combine
-    with [[wire]], the LpPR path stays stage-B-only (modes are
-    equiterminal-only in v1),
-    primitives must not overlap other conductors, slivers below
-    fill 1e-3 are dropped, and port faces belong on solid-ish
-    cells.
+14. **Partial cells are always exact.** A `[[block]]` whose `from_m` /
+    `to_m` fall off-grid is never snapped: the boundary cells keep
+    their exact coverage (`model.fill`) and carry the LAMINATE
+    effective conductivity -- `sigma*fill` along the layers (exact for
+    a layered medium, not a bound), bulk across them (no filament
+    passes all the way through a cell, so the through-plane value is a
+    half-cell quantity a per-cell array cannot express) -- together
+    with the matching partial-cell inductance correction
+    (`enrich.partial_dL`, dL = w'Tw - u'Tu over exact sub-prism
+    tables, raised automatically). Measured on a 75 nm film at 30 nm
+    pitch against the same film at 15 nm: R error 16.67% -> 0.00%, L
+    error 2.42% -> 0.30%. ONE cut axis per model; a cell cut on two
+    axes is an error. `[[cylinder]]` (`axis`, `center`, `radius`,
+    `sigma`, optional span) is the round primitive on the same record:
+    fill fractions from the resolved circle, the same inductance
+    correction (round-wire example vs a 2x reference: staircase 2.4% ->
+    fill 1.2% -> fill+dL 0.9% in L), and under enrichment the
+    SURFACE palette -- per-cell modes anchored to the true surface,
+    R_AC/R_DC within ~1% of the exact Kelvin solution at dx/delta 1-2,
+    usable to 3-4. Equipotential ports on a cylinder fill must sit on
+    whole cells; a slab port may touch a partial cell. `[[cylinder]]`
+    does not combine with `[[wire]]`.
 
 ## What v1 deliberately leaves out
 

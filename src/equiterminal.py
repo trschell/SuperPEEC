@@ -76,7 +76,7 @@ import meshgraph as mg
 import sppeec_status as _spstatus
 import terminal as tm
 import stencils as st
-from enrich import Enrichment, ModeStack, partial_dL
+from enrich import resolve, build, partial_dL
 
 _AXIS_ORIENT = {0: 'f', 1: 'e', 2: 'g'}
 
@@ -479,67 +479,6 @@ class Terminals:
 MU0 = 4e-7*np.pi
 
 
-def skin_depth(sigma, freq, mu=4e-7*np.pi):
-    """Classical skin depth ``sqrt(2/(w mu sigma))`` (metres)."""
-    if freq <= 0:
-        return np.inf
-    return float(np.sqrt(2.0/(2*np.pi*freq*mu*sigma)))
-
-
-def recommend_subdivision(dx, sigma, freq, cap=3):
-    """Sub-filaments per transverse direction, from cell size vs skin depth.
-
-    Returns 1 (no subdivision) when the mesh already resolves the skin
-    depth, so switching this on costs nothing where it buys nothing.
-
-    THE RULE AND ITS HONEST LIMITS. The classical guideline -- Coperich,
-    Ruehli & Cangellaris, T-MTT 48(9) 2000, for their GSI cross-section
-    mesh -- is ``h < delta/2``, i.e. ``k >= 2*dx/delta``. Measured here
-    at ``dx/delta = 4.8`` on a uniform bar, R relative to no
-    subdivision:
-
-        k = 2x2  +93.9%     2x-refined reference  +98.5%
-        k = 3x3  +123.6%    3x-refined reference  +130.4%
-
-    so each k tracks the SAME-LEVEL refinement to ~95%, but the 3x
-    reference is itself still climbing -- k=2 is a large cheap
-    improvement, NOT convergence. The default cap keeps the cost sane
-    (modes grow as k**2 per filament); raise it if you need the
-    remaining accuracy and can pay for it.
-
-    Parameters
-    ----------
-    dx : float
-        Cell pitch (metres).
-    sigma : float
-    freq : float
-        Reference frequency -- use the HIGHEST of interest, since the
-        skin depth is smallest there. Over-subdividing at lower
-        frequency is harmless: the extra modes simply carry no current
-        (exactly zero at DC, measured).
-    cap : int, optional
-
-    Returns
-    -------
-    int
-    """
-    d = skin_depth(sigma, freq)
-    if not np.isfinite(d) or d <= 0:
-        return 1
-    k = int(min(max(1, np.ceil(2.0*dx/d)), cap))
-    # NEVER RETURN 2. A 2x2 split is BLIND to an axially symmetric
-    # neighbourhood: all four quadrants are equivalent, so their
-    # couplings to a collinear neighbour are identical and the net-zero
-    # mode weights cancel them EXACTLY. Measured on setup3, whose vias
-    # are collinear stacks: |Zcross|max = 1.4e-27 at k=2 (machine zero,
-    # so Z is unchanged to 10 digits) against 2.2e-13 at k=3. Only an
-    # ODD split has a distinguishable centre/edge/corner, which is what
-    # the radially symmetric part of skin effect needs; k=2 can express
-    # "more current on one side" (proximity effect) but not "more
-    # current at the edges than the centre".
-    return 3 if k == 2 else k
-
-
 class CouplerUnavailable(RuntimeError):
     """The FMM coupling does not apply to this tree/port geometry.
 
@@ -754,13 +693,10 @@ class EquiTerminalSolver:
     """
 
     def __init__(self, model, M, port=0, verbose=False, fmm=True, t_l=None,
-                 subdivide=False, rc_uu=3, rc_cross=4, skin_freq=None,
-                 use_fft=True, csr_max_gb=2.0, chol_mode='simplicial',
-                 chol_ordering='metis', reach=0, basis='selected',
-                 amg_cycles=4,
-                 amg_cycle_type='V', amg_smoother=None,
-                 amg_strength=None, gram_solver='amg',
-                 corner_modes=False, nsolves=1):
+                 enrich=None, chol_mode='simplicial', chol_ordering='metis',
+                 basis='selected', amg_cycles=4, amg_cycle_type='V',
+                 amg_smoother=None, amg_strength=None, gram_solver='amg',
+                 nsolves=1):
         self.M = M
         self.nsolves = int(nsolves)
         self.basis_fallback = None
@@ -829,14 +765,6 @@ class EquiTerminalSolver:
                 # O(n_t * N) block
                 self.C, _ = self.term.coupling(self.fil_axis,
                                                self.fil_cell)
-        # The skin-effect switch. False/None/1 = off (default, and
-        # exactly the behaviour without this feature); True/'auto' picks
-        # k from cell size vs skin depth at `skin_freq` (default: the
-        # model's highest frequency, where delta is smallest); an int is
-        # taken literally. NOTE `1 == True` in Python, so the identity
-        # test must come first. The reference frequency is resolved
-        # unconditionally because the 'conduction' basis needs it even
-        # when k is given literally.
         eps = getattr(model, 'epsilon', None)
         if eps is not None and bool(np.any(
                 (np.asarray(eps) != 1.0) & (model.sigma == 0.0))):
@@ -846,114 +774,12 @@ class EquiTerminalSolver:
                 "through the capacitive LpPR path, not the LpR-only "
                 "equipotential-terminal solver (an excess-capacitance "
                 "branch without its bound charge is not a dielectric).")
-        skin_off = (subdivide is False or subdivide is None
-                    or (subdivide == 1 and subdivide is not True))
-        # A uniform London model is served by the same palette at rate
-        # 1/lambda (the modes are net-zero, so the cell mean still
-        # carries the bulk kinetic term: no double count); several
-        # lambdas have no single rate and still raise.
-        if (getattr(model, 'superconductor', False) and not skin_off
-                and model.london_rate() is None):
-            raise NotImplementedError(
-                "skin-effect subdivision on a superconductor with no "
-                "single London depth: the mode palette is exponentials "
-                "at ONE rate 1/lambda, and a mixed- or zero-lambda model "
-                "has no such rate. Solve with subdivide=False.")
-        fref = skin_freq
-        if fref is None:
-            fref = float(np.max(model.freq)) if len(model.freq) else 0.0
-        self.skin_freq = fref
-        self.skin_k = 1
-        # THIN-FILM PALETTE ([[block]] film = "x|y|z", 2026-09-01). The
-        # declared normal is the stiff axis: in-plane current varies on
-        # the lambda/delta scale THROUGH the film, and (measured,
-        # studies/london_film.py Stage 0) recovering it needs BOTH fine
-        # quadrature along the normal and wide coupling radii -- two
-        # budgets the k x k cross-section palette cannot pay at once
-        # (its tables cost rc^3 * k^4-ish; the last Stage-0 bench point
-        # took 73 minutes). The film palette is the same engine spending
-        # the same budget where the physics is: a 1-D split along the
-        # normal, kk = (1, kz), under which conduction_weights reduces
-        # BY PRUNING to the normal-axis face family (the in-plane
-        # columns become constants and the corner columns degenerate) --
-        # ~3 modes and kz sub-bars instead of up to 16 and kz^2. kz
-        # takes the floor-7 conduction rule (Stage 0: k = 3 plateaus at
-        # 77% recovered, a quadrature ceiling; a 1-D kz = 7..12 is
-        # cheap). Applies when the port axis is IN-PLANE; a port along
-        # the normal falls back to the standard palette. Amplitudes are
-        # always solved -- this is a budget hint, not a sheet model.
-        fnorm = getattr(model, 'film_normal', None)
-        film = fnorm is not None and int(fnorm) != self.term.axis
-        if film:
-            fnorm = int(fnorm)
-        if subdivide is True or subdivide == 'auto':
-            lp = model.london_rate()
-            if lp is not None:
-                # A London conductor's screening length is lambda, and
-                # it does not depend on frequency, so the skin-depth
-                # rule does not apply: ask the same question of the
-                # right length. recommend_subdivision's rule is
-                # k >= 2*dx/length, and it is fed a sigma, so invert
-                # lambda into the sigma that would give delta = lambda
-                # at this frequency rather than duplicate the rule.
-                lam = 1.0/lp
-                sig0 = 2.0/(2.0*np.pi*fref*4e-7*np.pi*lam**2) if fref > 0 \
-                    else 0.0
-                dtc = (float(model.d[fnorm]) if film
-                       else max(float(v) for c, v in enumerate(model.d)
-                                if c != self.term.axis))
-                self.skin_k = (recommend_subdivision(dtc, sig0, fref)
-                               if sig0 > 0 else 1)
-            else:
-                # fill models have no uniform sigma, but the base METAL
-                # sigma (what the skin depth is made of) is well defined
-                sig0 = model.uniform_sigma()
-                dtc = (float(model.d[fnorm]) if film
-                       else max(float(v) for c, v in enumerate(model.d)
-                                if c != self.term.axis))
-                self.skin_k = recommend_subdivision(dtc, sig0, fref)
-        elif subdivide in (False, None):
-            self.skin_k = 1
-        else:
-            self.skin_k = int(subdivide)
-        if film and self.skin_k > 1:
-            # 1-D split is cheap (kz, not kz^2, sub-bars), so give it
-            # the conduction-quality quadrature unconditionally
-            self.skin_k = int(min(12, max(7, self.skin_k)))
-        subdivide = self.skin_k
-        self.film_kk = None
-        if film and subdivide > 1:
-            others = [c for c in range(3) if c != self.term.axis]
-            self.film_kk = tuple(subdivide if c == fnorm else 1
-                                 for c in others)
-        self.redist = None
-        if subdivide > 1:
-            with _spstatus.task('skin engine k=%d' % subdivide):
-                self.redist = Enrichment(
-                    model, M, self.term.axis, self.fil_axis, self.fil_cell,
-                    self.film_kk or subdivide, term=self.term,
-                    rc=(rc_uu, rc_cross), reach=reach, use_fft=use_fft,
-                    csr_max_gb=csr_max_gb, freq=fref)
-        if corner_modes:
-            from cornermode import corner_palette
-            # tabulate against the engine's single-axis coverage (axis
-            # 2 has no in-plane modes) so the tables do not double
-            # count the near-corner crowding the engine already fixes
-            arm = ({0: 'u', 1: 'v'}.get(int(self.redist.axis))
-                   if self.redist is not None else None)
-            cp = corner_palette(model, M, self.fil_axis, self.fil_cell,
-                                engine_arm=arm, verbose=verbose)
-            if cp is not None:
-                # mode-mode dense across a patch (4W), mode-aggregate at
-                # the engine's own radius (measured: the composed bands
-                # sit at x0.46 here against x0.41 at 2W + rc_cross)
-                Wm = max(c[4] for c in cp.corners)
-                cm = Enrichment(model, M, None, self.fil_axis, self.fil_cell,
-                                (cp.k_in, 1), palette=cp, term=self.term,
-                                rc=(4*Wm, rc_cross), use_fft=False,
-                                csr_max_gb=csr_max_gb, freq=fref)
-                self.redist = (cm if self.redist is None
-                               else ModeStack([self.redist, cm]))
+        # sub-cell enrichment: 'off' | 'auto' | a table; the engagement
+        # rules live in enrich.resolve, the families in enrich.build
+        self.enrich = resolve(model, enrich, self.term.axis)
+        self.redist = (build(model, M, self.fil_axis, self.fil_cell,
+                             self.term, self.enrich, verbose)
+                       if self.enrich is not None else None)
         self.nu = 0 if self.redist is None else self.redist.nmode
         with _spstatus.task('assemble + preconditioner'):
             self._build_augmented()

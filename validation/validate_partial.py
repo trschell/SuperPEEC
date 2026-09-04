@@ -12,7 +12,7 @@ improving staircase > A > A+B), the Kelvin skin razor on the LpR path,
 the equipotential path on fill models and the surface palette's
 solved modes against a dense oracle.
 
-SLAB ([grid] subpixel = true with off-grid block bounds): a z-cut cell
+SLAB (off-grid block bounds, never snapped): a z-cut cell
 is a LAMINATE -- the in-plane orientations carry sigma*fill exactly
 (the arithmetic mean, exact for a layered medium) and the cut axis
 stays at bulk (no filament passes all the way through a cell); the
@@ -336,7 +336,7 @@ def main():
         '[port]', 'equipotential = true',
         'p_faces = [[0, 1, 1, "-x"], [0, 2, 2, "-x"]]',
         'n_faces = [[5, 1, 1, "+x"], [5, 2, 2, "+x"]]',
-        '[solve]', 'freq = [1e10]', '[solve.skin]', 'k = 3'])
+        '[solve]', 'freq = [1e10]', '[solve.enrich]', 'k = 3'])
     pt = sppeec_input.loads(doc_t)
     mt = pt.model()
     st = pt.sweeper(mt, pt.tree(mt)).S
@@ -431,16 +431,13 @@ def main():
 [grid]
 dims  = [%d, %d, %d]
 pitch = %g
-%s
 
 [[block]]
-from_m = [0.0, 0.0, 0.0]
-to_m   = [6.0e-7, 1.8e-7, 6.0e-8]
+%s
 sigma  = 5.8e7
 
 [[block]]
-from_m = [0.0, 0.0, 1.2e-7]
-to_m   = [6.0e-7, 1.8e-7, 1.95e-7]
+%s
 sigma  = 5.8e7
 
 [port]
@@ -452,14 +449,31 @@ equipotential = true
 freq = [1e10]
 """
 
+    films = [((0.0, 0.0, 0.0), (6.0e-7, 1.8e-7, 6.0e-8)),
+             ((0.0, 0.0, 1.2e-7), (6.0e-7, 1.8e-7, 1.95e-7))]
+
+    def bounds(pitch, exact):
+        """Physical bounds (partial cells where off-grid), or the
+        STAIRCASE: the same bounds rounded to cell boundaries."""
+        out = []
+        for lo, hi in films:
+            if exact:
+                out.append("from_m = [%g, %g, %g]\nto_m   = [%g, %g, %g]"
+                           % (lo + hi))
+            else:
+                c = [int(round(v/pitch)) for v in lo + hi]
+                out.append("from = [%d, %d, %d]\nto   = [%d, %d, %d]"
+                           % tuple(c))
+        return out
+
     def run(pitch, nx, ny, nz, zlo, zhi, sub):
         pf = ", ".join('[0, %d, %d, "-x"]' % (j, k)
                        for j in range(ny) for k in range(zlo, zhi))
         nf = ", ".join('[%d, %d, %d, "+x"]' % (nx - 1, j, k)
                        for j in range(ny) for k in range(zlo, zhi))
-        prob = sppeec_input.loads(body % (nx, ny, nz, pitch,
-                                          "subpixel = true" if sub else "",
-                                          pf, nf))
+        prob = sppeec_input.loads(body % ((nx, ny, nz, pitch)
+                                          + tuple(bounds(pitch, sub))
+                                          + (pf, nf)))
         mm = prob.model()
         MM = prob.tree(mm)
         Z, _ = prob.sweeper(mm, MM).solve(prob.freqs[0])
@@ -467,16 +481,16 @@ freq = [1e10]
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        Zr, _ = run(1.5e-8, 40, 12, 16, 8, 13, False)     # exact
+        Zr, _ = run(1.5e-8, 40, 12, 16, 8, 13, True)      # exact
         Zs, _ = run(3.0e-8, 20, 6, 8, 4, 7, False)        # staircase
-        Za, ma = run(3.0e-8, 20, 6, 8, 4, 7, True)        # subpixel
+        Za, ma = run(3.0e-8, 20, 6, 8, 4, 7, True)        # partial cells
     er = abs(Zs.real/Zr.real - 1.0)
     ea = abs(Za.real/Zr.real - 1.0)
-    check("subpixel is declared per grid and reaches the model",
+    check("off-grid bounds reach the model as a slab cut",
           ma.fill is not None and ma.cut == dict(kind='slab', axis=2))
     check("a 2.5-cell film: staircase R is badly wrong",
           er > 0.10, "%.2f%% off the exact-pitch reference" % (100*er))
-    check("subpixel recovers R to well under 1%",
+    check("partial cells recover R to well under 1%",
           ea < 0.01, "%.3f%% (from %.1f%%)" % (100*ea, 100*er))
 
     print('\n%d checks failed' % len(FAIL))

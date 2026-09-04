@@ -219,12 +219,57 @@ the scoped code is ~1300 lines from 3334, i.e. about -2000 on `src/`.
 | 1 geometry + tables | cea4b11 | 26826 | 12294 | 11054 | equiterminal 3165, cornermode 607, enrich 385 (new), subpixel 0 (deleted), voxmodel 1179, sppeec_input 1399 | 46 pass / 0 skip / 0 fail (incl. new `validate_enrich`) | all three BIT-IDENTICAL to phase 0 |
 | 2 the Enrichment class | d306965 | 26278 | 12251 | 11050 | equiterminal 1943, cornermode 607, enrich 1060, voxmodel 1179, sppeec_input 1398 | 46 pass / 0 skip / 0 fail | all three BIT-IDENTICAL to phase 0 |
 | 3 corner generator + n-ary stack | 4fe8028 | 26235 | 12275 | 11050 | equiterminal 1938, cornermode 379, enrich 1250, voxmodel 1179, sppeec_input 1398 | 45 pass / 0 skip / 1 fail in the gate (`validate_subpixel` read a validator attribute moved in this phase; fixed, green standalone; no src change) | all three BIT-IDENTICAL to phase 0 |
-| 4 fill record + material merge | (next commit) | 26018 | 12161 | 11050 | equiterminal 1929, cornermode 379, enrich 1188, voxmodel 1057, sppeec_input 1374 | 44 pass / 0 skip / 1 fail in the gate (`validate_vhr` compared the filament resistance as a scalar; validator-only fix, green standalone) | all three BIT-IDENTICAL to phase 0 |
+| 4 fill record + material merge | 171e28f | 26018 | 12161 | 11050 | equiterminal 1929, cornermode 379, enrich 1188, voxmodel 1057, sppeec_input 1374 | 44 pass / 0 skip / 1 fail in the gate (`validate_vhr` compared the filament resistance as a scalar; validator-only fix, green standalone) | all three BIT-IDENTICAL to phase 0 |
+| 5 the enrich interface | (next commit) | 25819 | 12151 | 11037 | equiterminal 1755, cornermode 379, enrich 1399, voxmodel 1057, sppeec_input 1139 | 45 pass / 0 skip / 0 fail | all three BIT-IDENTICAL to phase 0 |
 
 Scoped validators at baseline: equiterminal 407, subpixel 380, corner
 202, superconductor 249, aniso 189, aniso_sigma 220, input_lppr 520.
 
 ## 8. Phase log
+
+### Phase 5 (2026-09-04): one `enrich` interface, one resolver
+
+* `enrich.resolve(model, request, port_axis)` is the ONE place the
+  engagement rules live (`'off' | 'auto' | table{families, k, reach,
+  rc, f_ref, use_fft, csr_max_gb}`), and `enrich.build()` the one
+  place the families are constructed. They replace: the seven-key
+  `skin` table parser (60 lines), `_skin_unsupported`, the sweeper's
+  duplicated k rule and rc dispatch (~90 lines), the solver's
+  engagement block (~100 lines incl. the film palette selection and
+  the corner branch), `skin_depth` / `recommend_subdivision` in
+  equiterminal (the resolver's rule subsumes both: engage when 2 dx >
+  the length the current varies on, k = min(12, max(7, ceil(2 dx /
+  length))), k = 2 refused). `_auto_rc` moved to enrich.py. The stale
+  guard is gone: `auto` now engages on anisotropic cells.
+* `EquiTerminalSolver(..., enrich=None)`: the ten engine kwargs
+  (`subdivide, rc_uu, rc_cross, skin_freq, use_fft, csr_max_gb, reach,
+  corner_modes, ...`) are one argument; the direct API and the TOML
+  path resolve identically (validate_input_lppr's TOML == direct
+  check). Consequence, by design: a direct-API caller that gave no
+  radii now gets the width-scaled defaults the TOML path always had
+  (A/B case B: rc (3,4) -> (6,8) on the 4x4 bar).
+* Partial cells are always exact: `[grid] subpixel` and `_snap` are
+  gone, off-grid metre bounds produce the fill record, a two-axis cut
+  is an error. Every example's metre bounds were verified on-grid to
+  1e-13 before removing the snap. The converter's `--subpixel` flag is
+  gone (physical z bounds always).
+* Docs: doctrine rules 13, 14 and 14b are two rules (enrichment;
+  partial cells); README and the status example follow.
+* Validators: `validate_input_lppr`'s section gates the resolver's
+  rules (k rule, width-scaled rc, override, off, k = 2 refused, table
+  without equipotential refused, unknown key refused, TOML == direct,
+  reach 0, wide-bar band, reach "all" overshoot, superconductor auto
+  off); `validate_partial` builds its staircase reference with cell
+  bounds now that snapping is gone; keeper studies and validate_corner
+  / enrich / superconductor / aniso use `enrich=`.
+* A/B vs the phase-4 snapshot: TOML, cylinder, slab and corner paths
+  identical to 1e-19; direct-API case B differs only by its new radii.
+* The TOML parser validates the table at load time through the same
+  `check_request` the resolver uses (doctrine errors fire at parse or
+  build; `validate_input_lppr` expects `k = 2` and unknown keys to be
+  refused before any solve).
+* Ledger: src 26018 -> 25819 (-199; -1308 total). THRESHOLD 25927 MET
+  with 108 lines to spare.
 
 ### Phase 4 (2026-09-04): one fill record, one material accessor
 

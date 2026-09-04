@@ -66,7 +66,7 @@ import sppeec_status as _status
 MU0 = 4e-7*np.pi
 
 _SCHEMA = {
-    'grid': {'dims', 'pitch', 'subpixel'},
+    'grid': {'dims', 'pitch'},
     'cylinder': {'axis', 'center', 'radius', 'from', 'to',
                  'from_m', 'to_m', 'sigma', 'name'},
     'block': {'from', 'to', 'from_m', 'to_m', 'sigma', 'name',
@@ -80,61 +80,13 @@ _SCHEMA = {
              'p_faces', 'n_faces', 'name', 'equipotential'},
     'solve': {'freq', 'rtol', 'current', 'foot_model', 'basis',
               'amg_cycles', 'method', 'gram_solver', 'formulation',
-              'skin', 'maxiter'},
+              'enrich', 'maxiter'},
 }
 
 _FACE = {'+x': (0, 1), '-x': (0, -1), '+y': (1, 1), '-y': (1, -1),
          '+z': (2, 1), '-z': (2, -1)}
 
 
-def _auto_rc(occ, axis):
-    """Width-scaled mode-coupling truncation radii (2026-08-20).
-
-    The skin engine's mode couplings correlate over the CROSS-SECTION
-    WIDTH (the flat-section sibling of the wire-class rc ~ 2D law,
-    doctrine rule 13): measured on the straight-bar ladder, rc = (3,4)
-    is fine at 2 cells across but silently truncates ~20 delivered
-    points at 4 across, where (6,8) -- 1.5-2x the width -- recovers
-    +14 of them at unchanged apply cost. So: estimate the section
-    width as the per-transverse-axis MEDIAN run length of occupied
-    cells (median so one wide pour does not inflate rc everywhere),
-    and take rc = (ceil(1.5 W), ceil(2 W)) off the THIN dimension.
-
-    TWO GUARDS, both measured:
-    * cost cap (12, 16): table setup grows with rc^3 (clipped to the
-      grid extent);
-    * the DAMAGE ZONE: on wide sections a hard cutoff at 0.5-1.5x the
-      width lands in the rc-ladder's measured non-monotonic region
-      (20x20 bar: rc 12-20 WORSE than (3,4) -- the cutoff breaks the
-      cancellation of the net-zero dipole tails mid-shell). When the
-      scaled rc cannot clear 1.5x the WIDE dimension under the cap,
-      fall back to the small-(3,4) regime (locally-1-D flat-face
-      physics) instead of stopping mid-shell.
-    """
-    occ = np.asarray(occ).astype(bool)
-    meds = []
-    for t in (a for a in range(3) if a != int(axis)):
-        o = np.moveaxis(occ, t, -1)
-        n = o.shape[-1]
-        flat = o.reshape(-1, n)
-        pad = np.zeros((flat.shape[0], n + 2), dtype=np.int8)
-        pad[:, 1:-1] = flat
-        d = np.diff(pad, axis=1)
-        starts = np.argwhere(d == 1)
-        ends = np.argwhere(d == -1)
-        if starts.size == 0:
-            continue
-        meds.append(float(np.median(ends[:, 1] - starts[:, 1])))
-    if not meds:
-        return 3, 4
-    w_thin, w_wide = min(meds), max(meds)
-    ru = max(3, int(np.ceil(1.5*w_thin)))
-    rc = max(4, int(np.ceil(2.0*w_thin)))
-    if ru > 12 or rc > 16:
-        return 3, 4                       # cap: fall back, never mid-shell
-    if rc > 0.5*w_wide and ru < 1.5*w_wide:
-        return 3, 4                       # would cut the wide axis mid-shell
-    return ru, rc
 _TOP = {'grid', 'block', 'model', 'wire', 'port',
         'cylinder', 'solve'}
 
@@ -448,68 +400,20 @@ class Problem:
             raise ValueError("solve.gram_solver must be 'geo' or "
                              "'amg', got %r" % (self.gram_solver,))
 
-        # -- sub-cell skin engine (equipotential path only) ----------
-        # Default policy: engage AUTOMATICALLY with the conduction
-        # basis, but only when the cell size justifies it -- the
-        # engine's own recommend_subdivision returns k = 1 (off) when
-        # the mesh already resolves the skin depth at the sweep's
-        # highest frequency, so it costs nothing where it buys
-        # nothing. Deliberately NOT exposed: use_fft, csr_max_gb,
-        # chol_*, split_axis (solver internals).
-        skin = solve.get('skin', {})
-        if not isinstance(skin, dict):
-            raise ValueError("solve.skin is a table, e.g. "
-                             "skin = { mode = \"off\" }")
-        bad = set(skin) - {'mode', 'basis', 'k', 'f_ref', 'rc_uu',
-                           'rc_cross', 'boundary_only'}
-        if bad:
-            raise ValueError("solve.skin: unknown key(s) %s -- "
-                             "allowed: mode, basis, k, f_ref, rc_uu, "
-                             "rc_cross, boundary_only" % sorted(bad))
-        if skin and not self.equipotential:
-            raise ValueError(
-                "solve.skin configures the sub-cell skin engine, "
-                "which lives on the equipotential-terminal path -- "
-                "add equipotential = true to the port (the wire and "
-                "LpPR paths carry their own skin models)")
-        self.skin = dict(
-            mode=str(skin.get('mode', 'auto')),
-            basis=str(skin.get('basis', 'conduction')),
-            k=skin.get('k'),
-            f_ref=skin.get('f_ref'),
-            rc_uu=skin.get('rc_uu'),
-            rc_cross=skin.get('rc_cross'),
-            boundary_only=bool(skin.get('boundary_only', True)))
-        if self.skin['mode'] not in ('auto', 'on', 'off'):
-            raise ValueError("skin.mode must be 'auto' (engage when "
-                             "the cell size justifies it), 'on' or "
-                             "'off', got %r" % self.skin['mode'])
-        if self.skin['basis'] != 'conduction':
-            raise ValueError("skin.basis must be 'conduction' (the "
-                             "measured best), 'linear' or 'diff', "
-                             "got %r" % self.skin['basis'])
-        if self.skin['k'] is not None:
-            kv = int(self.skin['k'])
-            if kv == 2:
+        # -- sub-cell enrichment (equipotential path only) ------------
+        # "auto" | "off" | a table; the rules live in enrich.resolve
+        self.enrich = solve.get('enrich', 'auto')
+        if isinstance(self.enrich, dict):
+            from enrich import check_request
+            check_request(self.enrich)
+            if not self.equipotential:
                 raise ValueError(
-                    "skin.k = 2 is BLIND to axially symmetric "
-                    "neighbourhoods (all four quadrants equivalent, "
-                    "cross-couplings cancel exactly -- measured at "
-                    "machine zero); use 3 or higher, odd preferred")
-            if kv < 3:
-                raise ValueError("skin.k must be >= 3 (or omit it "
-                                 "for the automatic choice)")
-            self.skin['k'] = kv
-        if self.skin['f_ref'] is not None \
-                and float(self.skin['f_ref']) <= 0:
-            raise ValueError("skin.f_ref must be > 0")
-        for key in ('rc_uu', 'rc_cross'):
-            if self.skin[key] is not None:
-                self.skin[key] = int(self.skin[key])
-                if self.skin[key] < 1:
-                    raise ValueError("skin.%s must be >= 1 (or omit "
-                                     "it for the width-scaled "
-                                     "automatic choice)" % key)
+                    "solve.enrich configures the sub-cell enrichment, "
+                    "which lives on the equipotential-terminal path -- "
+                    "add equipotential = true to the port")
+        elif self.enrich not in ('auto', 'off'):
+            raise ValueError("solve.enrich must be 'auto', 'off' or a "
+                             "table, got %r" % (self.enrich,))
 
     def model(self):
         """Build the VoxelModel (inline grid or .vhr reference)."""
@@ -541,21 +445,17 @@ class Problem:
         m.sigma = np.zeros(m.dims, dtype=np.float32)
         eps_blocks = []
         disp_blocks = []
-        # SUBPIXEL BLOCKS. `[grid] subpixel = true` stops rounding a
-        # block's physical bounds to the nearest cell boundary and
-        # represents the boundary cells for what they are: partial. A
-        # cell cut by an axis-aligned plane is a LAMINATE, whose exact
-        # effective conductivity is anisotropic (arithmetic along the
-        # layers, harmonic across), so this is not an approximation of
-        # the material law -- it is the material law the staircase was
-        # approximating. See VoxelModel.laminate_sigma.
-        subpix = bool(g.get('subpixel', False))
-        # coverage ACCUMULATES across blocks and is capped at 1: two
+        # PARTIAL CELLS. A block's physical bounds are never rounded to
+        # a cell boundary: the boundary cells are what they are,
+        # partial, and a cell cut by an axis-aligned plane is a LAMINATE
+        # whose effective conductivity is exact (VoxelModel.
+        # impedance_scale). Coverage ACCUMULATES across blocks and is
+        # capped at 1: two
         # abutting layers routinely share a boundary cell (in the SFQ5ee
         # stack at 100 nm, M5 covers 0.35 of cell 21 and J5 the other
         # 0.65), and that cell is FULL, of two conductors. Taking a
         # minimum instead would have called it 35% filled.
-        cover = np.zeros(m.dims, dtype=np.float64) if subpix else None
+        cover = np.zeros(m.dims, dtype=np.float64)
         cut_axis = None
         # THIN-FILM DECLARATION (2026-09-01). `film = "z"` on a block is
         # a HINT about the stiff axis, not a formulation change: in-plane
@@ -588,7 +488,7 @@ class Problem:
                                  "from_m/to_m (metres)"
                                  % b.get('name', '?'))
             frac_axis = None
-            if has_m and subpix:
+            if has_m:
                 # which axes are NOT commensurate with the pitch?
                 nm = b.get('name', '?')
                 bad = []
@@ -601,12 +501,11 @@ class Problem:
                 bad = sorted(set(bad))
                 if len(bad) > 1:
                     raise ValueError(
-                        "block %r is off-grid on axes %s. Subpixel v1 "
-                        "cuts ONE axis per model: a cell cut on two "
-                        "axes at once is not a laminate, and neither "
+                        "block %r is off-grid on axes %s. Partial cells "
+                        "are cut on ONE axis per model: a cell cut on "
+                        "two axes at once is not a laminate, and neither "
                         "the arithmetic nor the harmonic mean applies "
-                        "to it. Make the other axis commensurate, or "
-                        "set [grid] subpixel = false to snap."
+                        "to it. Make the other axis commensurate."
                         % (nm, bad))
                 if bad:
                     frac_axis = bad[0]
@@ -626,9 +525,6 @@ class Problem:
                     z = float(b['to_m'][k])/float(m.d[k])
                     lo.append(int(np.floor(a + 1e-9)))
                     hi.append(int(np.ceil(z - 1e-9)))
-            elif has_m:
-                lo = self._snap(b['from_m'], m.d, b.get('name', '?'))
-                hi = self._snap(b['to_m'], m.d, b.get('name', '?'))
             else:
                 lo = [int(v) for v in b['from']]
                 hi = [int(v) for v in b['to']]
@@ -653,7 +549,7 @@ class Problem:
                     raise ValueError("block %r: %s only means "
                                      "something under dispersion"
                                      % (b.get('name', '?'), k))
-            if subpix and has_m:
+            if has_m:
                 # per-cell coverage along the cut axis, clipped to this
                 # block's cell range; other axes are commensurate so
                 # their coverage is exactly 1
@@ -746,7 +642,7 @@ class Problem:
                                fl, fh))
                     disp_blocks.append((lo, hi, float(eps_inf),
                                         float(deps), fl, fh))
-        if subpix and cut_axis is not None:
+        if cut_axis is not None:
             np.clip(cover, 0.0, 1.0, out=cover)
             cover[np.abs(cover - 1.0) < 1e-9] = 1.0    # coverage roundoff
             # ONE pass, after every block has painted: the fill record
@@ -902,25 +798,6 @@ class Problem:
                                                              float(lo_m))
         return np.clip(ov/float(pitch), 0.0, 1.0)
 
-    @staticmethod
-    def _snap(coords, pitch, name):
-        """Physical coordinates -> cell boundaries, with a warning when
-        the snap moves a face by more than 5% of a cell (a refinement
-        ladder should use dimensions commensurate with every pitch)."""
-        out = []
-        for k, v in enumerate(coords):
-            c = float(v)/float(pitch[k])
-            r = int(round(c))
-            if abs(c - r) > 0.05:
-                import warnings
-                warnings.warn(
-                    "block %r: coordinate %g m snapped to cell "
-                    "boundary %d (moved %.0f%% of a cell at pitch "
-                    "%g)" % (name, v, r, 100*abs(c - r), pitch[k]),
-                    RuntimeWarning, stacklevel=3)
-            out.append(r)
-        return out
-
     def block_cells(self, m):
         """``[(name, lo, hi)]`` cell ranges of the declared blocks.
 
@@ -929,14 +806,16 @@ class Problem:
         solve needs it. Visualisation does: a 40 x 50 mm ground plane
         and a 3 mm die are one undifferentiated shell otherwise, and
         the plane hides the module. This re-derives the ranges from
-        the same document and the same ``_snap`` the painting used,
+        the same document and the same cell hull the painting used,
         so the labels cannot drift from the geometry.
         """
         out = []
         for k, b in enumerate(self._doc.get('block', [])):
             if ('from_m' in b) or ('to_m' in b):
-                lo = self._snap(b['from_m'], m.d, b.get('name', '?'))
-                hi = self._snap(b['to_m'], m.d, b.get('name', '?'))
+                lo = [int(np.floor(float(v)/float(m.d[k]) + 1e-9))
+                      for k, v in enumerate(b['from_m'])]
+                hi = [int(np.ceil(float(v)/float(m.d[k]) - 1e-9))
+                      for k, v in enumerate(b['to_m'])]
             else:
                 lo = [int(v) for v in b['from']]
                 hi = [int(v) for v in b['to']]
@@ -1150,39 +1029,6 @@ class _EquiSweep:
     prepare/set_frequency per point, so setup is reused)."""
     formulation = 'LpR'
 
-    @staticmethod
-    def _skin_unsupported(m):
-        """Why auto skin subdivision cannot engage on this model, or
-        None. Mirrors the engine's own loud guards -- auto degrades
-        gracefully where mode = "on" would raise."""
-        import numpy as np
-        d = np.asarray(m.d, dtype=float)
-        if not np.allclose(d, d[0]):
-            return 'anisotropic cells'
-        if getattr(m, 'superconductor', False):
-            # AUTO stays off here on purpose. The conduction palette can
-            # now serve a uniform-lambda superconductor (it takes the
-            # London rate 1/lambda directly, since 2026-08-29), but
-            # engaging it by DEFAULT would change every existing
-            # superconductor solve, so it is opt-in: an explicit
-            # skin = { mode = "on", basis = "conduction" } passes this
-            # reason by and lets the engine's own guards decide.
-            #
-            # The reason this used to give -- "the two-fluid z(w)
-            # already carries the current profile" -- was only true
-            # where the mesh resolves it. At two cells across a film
-            # z(w) delivers the BULK kinetic value and nothing else:
-            # studies/london_crowding.py measures 0.9999 of bulk at two
-            # cells against 1.44 at twelve.
-            return ('superconductor -- sub-cell London modes are '
-                    'opt-in; set skin = { mode = "on", basis = '
-                    '"conduction" }')
-        try:
-            m.uniform_sigma()
-        except ValueError:
-            return 'mixed conductivities'
-        return None
-
     def __init__(self, prob, m, M, verbose=False):
         from equiterminal import EquiTerminalSolver
         if m.cut is not None and m.cut['kind'] == 'cylinder':
@@ -1210,96 +1056,16 @@ class _EquiSweep:
         # too (2026-08-26): the exact Cholesky where the plaquettes
         # span and the model is small, the over-complete frame where
         # they do not (moated planes) or it is not -- doctrine 6b
-        # sub-cell skin engine: conduction by default, engaged only
-        # when the cell size justifies it (the engine's
-        # recommend_subdivision at the sweep's highest frequency)
-        sk = prob.skin
-        if sk['mode'] == 'off':
-            self.skin_kwargs = dict(subdivide=False)
-        else:
-            sub = sk['k'] if sk['k'] else 'auto'
-            why = self._skin_unsupported(m)
-            if why is not None:
-                if sk['mode'] == 'on' or sk['k']:
-                    # explicit request: let the engine's guards speak
-                    pass
-                else:
-                    if verbose:
-                        print('  skin: off (%s)' % why, flush=True)
-                    sub = False
-            elif sub == 'auto' and sk['basis'] == 'conduction':
-                # conduction's k is pure quadrature (mode count is
-                # fixed), and the engine's own guidance is k ~ 6-8 to
-                # resolve the exponentials -- the generic
-                # recommend_subdivision cap of 3 exists for bases
-                # whose DOF grow with k and undersells conduction by
-                # ~19 points of gap (measured on equibar at
-                # dx/delta = 4.8: k=3 57.6%, k=7 76.2%). Engagement
-                # is still the engine's own justification rule.
-                from equiterminal import recommend_subdivision, \
-                    skin_depth
-                fref = (float(sk['f_ref']) if sk['f_ref'] is not None
-                        else max(prob.freqs) if prob.freqs else 0.0)
-                sig0 = m.uniform_sigma()
-                if recommend_subdivision(m.dx, sig0, fref) > 1:
-                    # RESOLUTION-AWARE k (2026-08-20, palette_ablation
-                    # + xsection_tabulated): once the shape family is
-                    # not the binder, the piecewise-constant sub-bar
-                    # grid is -- pick k so a sub-bar is <= delta/2.
-                    # Measured: dx/delta = 6 needs k = 12 (+4
-                    # delivered points over k = 7 at unchanged
-                    # matvecs; km, not k, drives solve cost) while
-                    # dx/delta = 3 is already resolved at 7. Floor 7
-                    # keeps the previous default; cap 12 is the
-                    # measured point and bounds the k^2 setup growth.
-                    delta = skin_depth(sig0, fref)
-                    sub = int(min(12, max(7, np.ceil(2*m.dx/delta))))
-                else:
-                    sub = False
-            rcu, rcc = sk['rc_uu'], sk['rc_cross']
-            if rcu is None or rcc is None:
-                # width-scaled automatic radii (see _auto_rc); the
-                # port axis is the mode-carrying axis, the width is
-                # transverse to it. Explicit values pass through.
-                # SCOPE: coarse-engine (FFT-path) models only --
-                # subpixel models run the per-cell SPARSE path,
-                # whose cost grows as (2rc+1)^3 and whose Kelvin
-                # bands are validated at (3,4); they keep the small
-                # radii unless set explicitly.
-                if getattr(m, 'film_normal', None) is not None:
-                    # declared thin films: Stage 0 (studies/
-                    # london_film.py, 2026-09-01) measured the film's
-                    # mode dipoles as coherently ALIGNED, so recovery
-                    # keeps climbing with the coupling radius (68.7 ->
-                    # 83.0% over rc (3,4) -> (12,16) at k = 7) and falls
-                    # with film extent at small rc. The film palette's
-                    # 1-D split makes these radii affordable (tables
-                    # cost rc^3 * kz, not rc^3 * kz^2-squared).
-                    au, ac = 12, 16
-                elif m.cut is None or m.cut['kind'] != 'cylinder':
-                    pax = int(prob.ports_faces[0][1][0][3])
-                    au, ac = _auto_rc(m.struc(), pax)
-                else:
-                    au, ac = 3, 4
-                rcu = au if rcu is None else int(rcu)
-                rcc = ac if rcc is None else int(rcc)
-            self.skin_kwargs = dict(
-                subdivide=sub, rc_uu=rcu, rc_cross=rcc,
-                reach=0 if sk['boundary_only'] else None)
-            if sk['f_ref'] is not None:
-                self.skin_kwargs['skin_freq'] = float(sk['f_ref'])
-        kw.update(self.skin_kwargs)
         self.prob = prob
-        self.S = EquiTerminalSolver(m, M, 0, verbose=verbose, **kw)
-        if verbose and self.skin_kwargs.get('subdivide') is not False:
-            print('  skin: %s' % (
-                'k=%d, basis=%s, f_ref %.3g Hz'
-                % (self.S.skin_k, sk['basis'], self.S.skin_freq)
-                if self.S.skin_k > 1 else
-                'off (mesh resolves the skin depth)'), flush=True)
+        self.S = EquiTerminalSolver(m, M, 0, verbose=verbose,
+                                    enrich=prob.enrich, **kw)
+        if verbose:
+            print('  enrich: %s' % (dict(self.S.enrich) if self.S.enrich
+                                    else 'off'), flush=True)
         self.sol = None          # no wire solver on this path
         self.efg = self.S.efg
-        _status_meta(prob, m, M, skin=dict(self.skin_kwargs))
+        _status_meta(prob, m, M,
+                     enrich=dict(self.S.enrich) if self.S.enrich else None)
 
     def solve(self, freq):
         with _status.freq_task(freq):

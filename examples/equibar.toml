@@ -9,7 +9,7 @@
 # The sub-cell skin engine engages automatically at this bar's top
 # frequency (dx/delta = 4.8 at 1 GHz -> 7x7-quadrature conduction
 # modes, raising R(1e9) ~102% over the unsubdivided solve -- 76% of
-# the gap to a 3x-refined mesh; add skin = { mode = "off" } under
+# the gap to a 3x-refined mesh; add enrich = "off" under
 # [solve] to compare).
 # Expect R to rise and L to fall through the skin transition
 # (copper delta = 0.21 mm at 1e5 Hz >> the bar, 2.1 um at 1e9 << it).

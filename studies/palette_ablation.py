@@ -177,7 +177,7 @@ for nper in LADDER:
             make_palette(pal)
         try:
             S = eq.EquiTerminalSolver(
-                m, M, 0, subdivide=KVAL, skin_freq=max(FREQS))
+                m, M, 0, enrich=dict(k=KVAL, f_ref=max(FREQS)))
             km = S.redist.km
             for f in FREQS:
                 Z, _, info = S.solve(f, rtol=1e-8, maxiter=MAXITER)

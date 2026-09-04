@@ -83,8 +83,8 @@ def main():
                 Z, _info = sw.solve(f)
                 rec[str(f)] = dict(R=float(np.real(Z)),
                                    wall=time.perf_counter() - t0,
-                                   skin=dict(sw.skin_kwargs)
-                                   if hasattr(sw, 'skin_kwargs') else None)
+                                   skin=dict(sw.S.enrich)
+                                   if sw.S.enrich else None)
                 sk = rec[str(f)]['skin'] or {}
                 print('  %-8s f=%-9.3g R=%-11.6g  subdiv=%-5s bo=%-5s '
                       'rc=(%s,%s)' % (key, f, rec[str(f)]['R'],

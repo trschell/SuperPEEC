@@ -165,7 +165,7 @@ def part_d():
     # (2026-09-01): boxes, sub-bar areas and shapes are per-axis. This
     # check used to expect NotImplementedError and went stale with that
     # commit (caught by the enrichment-plan phase-0 baseline).
-    S = eq.EquiTerminalSolver(m, M, 0, subdivide=3)
+    S = eq.EquiTerminalSolver(m, M, 0, enrich=dict(k=3))
     r = S.redist
     check("skin engine engages on anisotropic cells",
           r is not None and r.nmode > 0

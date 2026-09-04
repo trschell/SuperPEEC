@@ -164,7 +164,6 @@ def main():
 [grid]
 dims  = [%d, %d, %d]
 pitch = %g
-%s
 
 [[block]]
 from_m = [0.0, 0.0, 0.0]
@@ -173,7 +172,7 @@ sigma  = 5.8e7
 
 [[block]]
 from_m = [0.0, 0.0, 1.2e-7]
-to_m   = [6.0e-7, 1.8e-7, 1.95e-7]
+to_m   = [6.0e-7, 1.8e-7, %s]
 sigma  = 5.8e7
 
 [port]
@@ -192,11 +191,10 @@ freq = [1e10]
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        pw = sppeec_input.loads(body % (nx, ny, nz, 3e-8, '', pf, nf))
+        pw = sppeec_input.loads(body % (nx, ny, nz, 3e-8, '1.8e-7', pf, nf))
         mw = pw.model()
     check('whole-cell model -> None', partial_dL(mw, None) is None)
-    ps = sppeec_input.loads(body % (nx, ny, nz, 3e-8, 'subpixel = true',
-                                    pf, nf))
+    ps = sppeec_input.loads(body % (nx, ny, nz, 3e-8, '1.95e-7', pf, nf))
     ms = ps.model()
     Ms = ps.tree(ms)
     dL = partial_dL(ms, Ms)
@@ -269,8 +267,8 @@ freq = [1e10]
     Mb = pb.tree(mb)
     f_lo, f_hi = 1e2, 1e10
     mb.prepare(Mb, f_hi)
-    a = eq.EquiTerminalSolver(mb, Mb, 0, subdivide=4, skin_freq=f_lo)
-    b = eq.EquiTerminalSolver(mb, Mb, 0, subdivide=4, skin_freq=f_hi)
+    a = eq.EquiTerminalSolver(mb, Mb, 0, enrich=dict(k=4, f_ref=f_lo))
+    b = eq.EquiTerminalSolver(mb, Mb, 0, enrich=dict(k=4, f_ref=f_hi))
     km_lo, nu_lo = a.redist.km, a.nu
     Za, _, _ = a.solve(f_hi)             # retunes W from f_lo to f_hi
     Zb, _, _ = b.solve(f_hi)
@@ -279,10 +277,10 @@ freq = [1e10]
           'km %d -> %d, nu %d -> %d' % (km_lo, a.redist.km, nu_lo, a.nu))
     check('Z retuned == fresh (FFT path)', abs(Za - Zb)/abs(Zb) < 1e-10,
           'rel %.2e' % (abs(Za - Zb)/abs(Zb)))
-    kw = dict(subdivide=3, use_fft=False, rc_uu=1, rc_cross=2)
-    c1 = eq.EquiTerminalSolver(mb, Mb, 0, skin_freq=f_lo, **kw)
+    kw = dict(k=3, use_fft=False, rc=(1, 2))
+    c1 = eq.EquiTerminalSolver(mb, Mb, 0, enrich=dict(f_ref=f_lo, **kw))
     c1.redist.set_frequency(f_hi)
-    c2 = eq.EquiTerminalSolver(mb, Mb, 0, skin_freq=f_hi, **kw)
+    c2 = eq.EquiTerminalSolver(mb, Mb, 0, enrich=dict(f_ref=f_hi, **kw))
     diffs = [abs(getattr(c1.redist, nm) - getattr(c2.redist, nm)).max()
              for nm in ('Zuu', 'Zcross', 'Zt', 'Ru')]
     check('CSR blocks retuned == fresh, bitwise', max(diffs) == 0.0,
@@ -293,7 +291,7 @@ freq = [1e10]
     ml = pl.model()
     Ml = pl.tree(ml)
     ml.prepare(Ml, 1e9)
-    L1 = eq.EquiTerminalSolver(ml, Ml, 0, subdivide=3, skin_freq=1e9)
+    L1 = eq.EquiTerminalSolver(ml, Ml, 0, enrich=dict(k=3, f_ref=1e9))
     Ru1 = L1.redist.Ru.copy()
     moved = L1.redist.set_frequency(2e9)
     check('London rate does not move: set_frequency False, Ru ~ w exactly',
@@ -322,7 +320,7 @@ freq = [1e10]
         mz = pz.model()
         Mz = pz.tree(mz)
         mz.prepare(Mz, fr)
-        kwz = dict(subdivide=3, skin_freq=fr) if modes else {}
+        kwz = dict(enrich=dict(k=3, f_ref=fr)) if modes else {}
         Z, _, _ = eq.EquiTerminalSolver(mz, Mz, 0, **kwz).solve(fr)
         return Z.imag
     # lambda difference against a SMALL lambda (1e-8: at 1e-9 the rate
@@ -360,7 +358,7 @@ freq = [1e10]
     mc = vhr.read_vhr(path)
     Mc = mc.build_tree()
     mc.prepare(Mc, 1e9)
-    S1 = eq.EquiTerminalSolver(mc, Mc, 0, corner_modes=True)
+    S1 = eq.EquiTerminalSolver(mc, Mc, 0, enrich=dict(families=['corner']))
     r = S1.redist
     check('patch palette: per-entry net-zero',
           np.abs(r.Wf.sum(axis=1)).max() < 1e-12)
@@ -368,9 +366,9 @@ freq = [1e10]
           S1.nu == 3*len(r.palette.corners))
     check('Zuu unconjugated symmetry',
           abs(r.Zuu - r.Zuu.T).max() < 1e-10*abs(r.Zuu).max())
-    Sc = eq.EquiTerminalSolver(mc, Mc, 0, subdivide=7, skin_freq=1e10,
-                               corner_modes=True)
-    Se = eq.EquiTerminalSolver(mc, Mc, 0, subdivide=7, skin_freq=1e10)
+    Sc = eq.EquiTerminalSolver(mc, Mc, 0, enrich=dict(
+        families=['section', 'corner'], k=7, f_ref=1e10))
+    Se = eq.EquiTerminalSolver(mc, Mc, 0, enrich=dict(k=7, f_ref=1e10))
     check('stack mode count = engine + corners',
           Sc.nu == Se.nu + S1.nu and Sc.redist.cross[0, 1].nnz > 0)
     for S, tag in ((S1, 'corners only'), (Sc, 'engine + corners')):

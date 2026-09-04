@@ -362,15 +362,13 @@ The tables:
   `{ from, to, points, spacing = "log" }`, plus optional `rtol`,
   `formulation = "auto" | "LpR" | "LpPR"` (auto derives the
   formulation from the declared materials) and solver-policy
-  overrides, including `skin = { ... }`: the sub-cell skin-effect
-  engine on equipotential ports. Its default (`mode = "auto"`,
-  `basis = "conduction"`) engages frequency-tracked conduction
-  modes at k = 7 quadrature — the measured-best cross-section
-  basis — but only when
-  the cell size fails to resolve the skin depth at the sweep's
-  highest frequency, so it costs nothing where it buys nothing;
-  `mode = "off"` disables it, and `k`, `f_ref`, `rc_uu`/`rc_cross`
-  and `boundary_only` tune it (see the doctrine's rule 13).
+  overrides, including `enrich = "auto" | "off" | { ... }`: the
+  sub-cell enrichment on equipotential ports. `auto` (the default)
+  engages frequency-tracked conduction modes -- the measured-best
+  cross-section basis -- only when the cell size fails to resolve the
+  skin depth at the sweep's highest frequency, so it costs nothing
+  where it buys nothing; a table sets `families`, `k`, `reach`, `rc`
+  and `f_ref` (the doctrine's rule 13).
 
 The full set of rules — including the conventions that make results
 refinement-stable — is `docs/input_doctrine.md`, and `examples/`

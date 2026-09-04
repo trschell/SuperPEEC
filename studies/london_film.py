@@ -105,8 +105,6 @@ def toml_text(dx, dz, ln, lam, offset, modes):
     w = ["[grid]",
          "dims  = [%d, %d, %d]" % (nx, ny, nz),
          "pitch = [%g, %g, %g]" % (dx, dx, dz)]
-    if offset:
-        w.append("subpixel = true")
     w.append("")
     fl = lambda v: int(np.floor(v/dz + 1e-6))       # noqa: E731
     ce = lambda v: int(np.ceil(v/dz - 1e-6))        # noqa: E731
@@ -149,7 +147,7 @@ def toml_text(dx, dz, ln, lam, offset, modes):
           "p_faces = " + fmt(pf), "n_faces = " + fmt(nf), "",
           "[solve]", "freq = [%g]" % ARGS.freq]
     if modes:
-        w.append('skin = { mode = "on", basis = "conduction" }')
+        w.append('enrich = { families = ["section"] }')
     return "\n".join(w) + "\n"
 
 

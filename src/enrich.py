@@ -1186,3 +1186,212 @@ class ModeStack:
                           else sp.identity(f.nmode, format='csr',
                                            dtype=np.complex128))
         return sp.block_diag(blocks, format='csr')
+
+
+# ------------------------------------------------------------- the front end
+
+def skin_depth(sigma, freq):
+    """Classical skin depth ``sqrt(2/(w mu sigma))`` (metres)."""
+    from voxmodel import MU0
+    return float(np.sqrt(2.0/(2*np.pi*freq*MU0*sigma))) if freq > 0 \
+        else np.inf
+
+
+def _auto_rc(occ, axis):
+    """Width-scaled coupling radii ``(rc_uu, rc_cross)``.
+
+    The mode couplings correlate over the cross-section WIDTH: measured
+    on the straight-bar ladder, (3,4) is fine at 2 cells across yet
+    silently truncates ~20 delivered points at 4 across, where (6,8) --
+    1.5-2x the width -- recovers +14 at unchanged apply cost. Take the
+    median transverse run length perpendicular to the port axis (so one
+    wide pour does not inflate rc everywhere), rc = (ceil 1.5W, ceil 2W)
+    off the THIN dimension, floors (3,4), cap (12,16) (table setup
+    grows as rc^3), and fall back to (3,4) whenever the scaled radii
+    cannot clear 1.5x the WIDE dimension under the cap -- the rc
+    ladder's measured mid-shell damage zone (a 20x20 bar reads WORSE at
+    rc 12-20 than at (3,4): a hard cutoff mid-shell leaves an
+    unbalanced residue rather than dropping negligible terms).
+    """
+    occ = np.asarray(occ).astype(bool)
+    runs = []
+    for t in [c for c in range(3) if c != int(axis)]:
+        rl = []
+        for line in np.moveaxis(occ, t, -1).reshape(-1, occ.shape[t]):
+            n = 0
+            for v in line:
+                if v:
+                    n += 1
+                elif n:
+                    rl.append(n)
+                    n = 0
+            if n:
+                rl.append(n)
+        runs.append(float(np.median(rl)) if rl else 1.0)
+    w_thin, w_wide = min(runs), max(runs)
+    ru = max(3, int(np.ceil(1.5*w_thin)))
+    rc = max(4, int(np.ceil(2.0*w_thin)))
+    if ru > 12 or rc > 16:
+        return 3, 4
+    if rc > 0.5*w_wide and ru < 1.5*w_wide:
+        return 3, 4
+    return ru, rc
+
+
+ENRICH_KEYS = ('families', 'k', 'reach', 'rc', 'f_ref', 'use_fft',
+               'csr_max_gb')
+
+
+class EnrichConfig(dict):
+    """Resolved enrichment settings (attribute access over a dict)."""
+    __getattr__ = dict.__getitem__
+
+
+def check_request(req):
+    """Validate an enrichment table without a model (the TOML parser
+    calls this at load time; :func:`resolve` again at build)."""
+    bad = set(req) - set(ENRICH_KEYS)
+    if bad:
+        raise ValueError("enrich: unknown key(s) %s -- allowed: %s"
+                         % (sorted(bad), ', '.join(ENRICH_KEYS)))
+    if any(f not in ('section', 'corner')
+           for f in req.get('families', [])):
+        raise ValueError("enrich.families: 'section' and/or 'corner'")
+    k = req.get('k')
+    if k is not None:
+        if int(k) == 2:
+            raise ValueError("enrich.k = 2 is BLIND to axially symmetric "
+                             "neighbourhoods (cross-couplings cancel "
+                             "exactly, measured at machine zero); use 3 "
+                             "or more, odd preferred")
+        if int(k) < 3:
+            raise ValueError("enrich.k must be >= 3 (or omit it)")
+    reach = req.get('reach', 0)
+    if reach != 'all' and int(reach) < 0:
+        raise ValueError("enrich.reach must be >= 0 or 'all'")
+    rc = req.get('rc')
+    if rc is not None and (len(rc) != 2 or min(int(v) for v in rc) < 1):
+        raise ValueError("enrich.rc is two radii >= 1")
+    if req.get('f_ref') is not None and float(req['f_ref']) <= 0:
+        raise ValueError("enrich.f_ref must be > 0")
+
+
+def resolve(model, request, port_axis):
+    """The one place the engagement rules live.
+
+    ``request`` is ``None`` or ``'off'`` (no enrichment), ``'auto'``
+    (the defaults, engaged only when the cell size justifies it, and
+    never by default on a superconductor -- London modes are opt-in),
+    or a table with any of ``families`` (``'section'``, ``'corner'``),
+    ``k``, ``reach`` (cells, or ``'all'``), ``rc`` (two radii),
+    ``f_ref`` and the internals ``use_fft`` / ``csr_max_gb``; a table
+    is explicit, so a model the rules cannot serve raises instead of
+    degrading. Returns an :class:`EnrichConfig` or ``None``.
+
+    THE RULES. The section family engages when a transverse cell
+    exceeds half the length the current varies on (the skin depth at
+    ``f_ref``, or lambda), and its quadrature is k = min(12, max(7,
+    ceil(2 dx/length))) -- a sub-bar no coarser than half that length
+    (k is quadrature, km drives cost; measured +4 delivered points at
+    dx/delta = 6 for k 7 -> 12). A given ``k`` is honoured (k = 2 is
+    refused: a 2x2 split cannot express "more current at the edges
+    than the centre"). A declared film normal off the port axis gets
+    the 1-D film palette ``(k, 1)`` along the normal. Radii: given, or
+    (12,16) on films (aligned dipoles), (3,4) on cylinder fills (the
+    sparse path), else width-scaled (:func:`_auto_rc`).
+    """
+    if request is None or request == 'off':
+        return None
+    if isinstance(request, EnrichConfig):     # already resolved
+        return request
+    explicit = isinstance(request, dict)
+    if not explicit and request != 'auto':
+        raise ValueError("enrich must be 'off', 'auto' or a table, got %r"
+                         % (request,))
+    req = dict(request) if explicit else {}
+    check_request(req)
+    fam = list(req.get('families', ['section']))
+    f_ref = (float(req['f_ref']) if req.get('f_ref') is not None
+             else float(np.max(model.freq)) if len(model.freq) else 0.0)
+    if f_ref <= 0:
+        raise ValueError("enrich needs a frequency: f_ref, or a sweep")
+    reach = req.get('reach', 0)
+    reach = None if reach == 'all' else int(reach)
+    k = None if req.get('k') is None else int(req['k'])
+    d3 = np.asarray(model.d, dtype=float)
+    tr = [c for c in range(3) if c != int(port_axis)]
+    fnorm = getattr(model, 'film_normal', None)
+    film = fnorm is not None and int(fnorm) != int(port_axis)
+    kk = None
+    if 'section' in fam:
+        length = None
+        if getattr(model, 'superconductor', False):
+            lp = model.london_rate()
+            if lp is None and explicit:
+                raise NotImplementedError(
+                    "sub-cell modes on a superconductor with no single "
+                    "London depth: the palette is exponentials at ONE "
+                    "rate 1/lambda")
+            length = 1.0/lp if (lp is not None and explicit) else None
+        else:
+            try:
+                length = skin_depth(model.uniform_sigma(), f_ref)
+            except ValueError:
+                if explicit:
+                    raise
+        if length is None:
+            fam.remove('section')
+        else:
+            dtc = float(d3[int(fnorm)]) if film else max(float(d3[c])
+                                                          for c in tr)
+            if k is None:
+                k = (int(min(12, max(7, np.ceil(2*dtc/length))))
+                     if 2*dtc/length > 1 else 1)
+            if k > 1:
+                kk = tuple(k if (not film or c == int(fnorm)) else 1
+                           for c in tr)
+            else:
+                fam.remove('section')
+    rc = req.get('rc')
+    if rc is None:
+        cyl = getattr(model, 'cut', None) is not None and \
+            model.cut['kind'] == 'cylinder'
+        rc = ((12, 16) if film else (3, 4) if cyl
+              else _auto_rc(model.struc(), port_axis))
+    rc = (int(rc[0]), int(rc[1]))
+    if not fam:
+        return None
+    return EnrichConfig(families=fam, k=k, kk=kk, reach=reach, rc=rc,
+                        f_ref=f_ref, use_fft=req.get('use_fft'),
+                        csr_max_gb=float(req.get('csr_max_gb', 2.0)))
+
+
+def build(model, M, fil_axis, fil_cell, term, cfg, verbose=False):
+    """The families a resolved config asks for, as one ``redist``
+    object (an :class:`Enrichment` or a :class:`ModeStack`), or None."""
+    red = None
+    if cfg.kk is not None:
+        with _spstatus.task('skin engine k=%d' % cfg.k):
+            red = Enrichment(model, M, term.axis, fil_axis, fil_cell,
+                             cfg.kk, term=term, rc=cfg.rc, reach=cfg.reach,
+                             use_fft=cfg.use_fft, csr_max_gb=cfg.csr_max_gb,
+                             freq=cfg.f_ref)
+    if 'corner' in cfg.families:
+        from cornermode import corner_palette
+        # tabulate against the engine's single-axis coverage (axis 2 has
+        # no in-plane modes) so the tables do not double count the
+        # near-corner crowding the engine already fixes
+        arm = {0: 'u', 1: 'v'}.get(term.axis) if red is not None else None
+        cp = corner_palette(model, M, fil_axis, fil_cell, engine_arm=arm,
+                            verbose=verbose)
+        if cp is not None:
+            # mode-mode dense across a patch (4W), mode-aggregate at the
+            # engine's own radius (measured: the composed bands sit at
+            # x0.46 here against x0.41 at 2W + rc_cross)
+            Wm = max(c[4] for c in cp.corners)
+            cm = Enrichment(model, M, None, fil_axis, fil_cell,
+                            (cp.k_in, 1), palette=cp, term=term,
+                            rc=(4*Wm, cfg.rc[1]), use_fft=False,
+                            csr_max_gb=cfg.csr_max_gb, freq=cfg.f_ref)
+            red = cm if red is None else ModeStack([red, cm])
+    return red

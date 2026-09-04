@@ -86,7 +86,7 @@ def run(nw, modes=0):
     leaf, lv = m.partition()
     M = m.build_tree(leaf, lv)
     m.prepare(M, FREQ)
-    kw = dict(subdivide=modes, skin_freq=FREQ) if modes else {}
+    kw = dict(enrich=dict(k=modes, f_ref=FREQ)) if modes else {}
     Z, _, _ = eq.EquiTerminalSolver(m, M, 0, **kw).solve(FREQ)
     os.remove(p)
     return abs(Z.imag)/(2*np.pi*FREQ), nx*ny*nz
