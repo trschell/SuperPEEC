@@ -179,13 +179,8 @@ def solve_sp(path, freqs, engine=False, k=None):
     for f in freqs:
         M = m.build_tree()
         m.prepare(M, f)
-        kw = {}
-        if k is not None:
-            kw['k'] = k
-        S = eq.EquiTerminalSolver(m, M, 0, subdivide=engine,
-                                  skin_freq=(f if engine else None),
-                                  mode_basis=('conduction' if engine
-                                              else 'diff'), **kw)
+        S = eq.EquiTerminalSolver(m, M, 0, enrich=(
+            dict(f_ref=f, **({'k': k} if k else {})) if engine else None))
         t0 = time.perf_counter()
         Z, _i, info = S.solve(f)
         out[f] = dict(R=float(np.real(Z)), L=float(np.imag(Z)/(2*np.pi*f)),

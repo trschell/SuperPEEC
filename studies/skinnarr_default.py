@@ -88,8 +88,8 @@ def main():
                 sk = rec[str(f)]['skin'] or {}
                 print('  %-8s f=%-9.3g R=%-11.6g  subdiv=%-5s bo=%-5s '
                       'rc=(%s,%s)' % (key, f, rec[str(f)]['R'],
-                                      sk.get('subdivide'),
-                                      sk.get('boundary_only'),
+                                      sk.get('k'),
+                                      sk.get('reach'),
                                       sk.get('rc_uu'), sk.get('rc_cross')),
                       flush=True)
             except Exception as exc:

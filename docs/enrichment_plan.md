@@ -220,12 +220,45 @@ the scoped code is ~1300 lines from 3334, i.e. about -2000 on `src/`.
 | 2 the Enrichment class | d306965 | 26278 | 12251 | 11050 | equiterminal 1943, cornermode 607, enrich 1060, voxmodel 1179, sppeec_input 1398 | 46 pass / 0 skip / 0 fail | all three BIT-IDENTICAL to phase 0 |
 | 3 corner generator + n-ary stack | 4fe8028 | 26235 | 12275 | 11050 | equiterminal 1938, cornermode 379, enrich 1250, voxmodel 1179, sppeec_input 1398 | 45 pass / 0 skip / 1 fail in the gate (`validate_subpixel` read a validator attribute moved in this phase; fixed, green standalone; no src change) | all three BIT-IDENTICAL to phase 0 |
 | 4 fill record + material merge | 171e28f | 26018 | 12161 | 11050 | equiterminal 1929, cornermode 379, enrich 1188, voxmodel 1057, sppeec_input 1374 | 44 pass / 0 skip / 1 fail in the gate (`validate_vhr` compared the filament resistance as a scalar; validator-only fix, green standalone) | all three BIT-IDENTICAL to phase 0 |
-| 5 the enrich interface | (next commit) | 25819 | 12151 | 11037 | equiterminal 1755, cornermode 379, enrich 1399, voxmodel 1057, sppeec_input 1139 | 45 pass / 0 skip / 0 fail | all three BIT-IDENTICAL to phase 0 |
+| 5 the enrich interface | 5f39c39 | 25819 | 12151 | 11037 | equiterminal 1755, cornermode 379, enrich 1399, voxmodel 1057, sppeec_input 1139 | 45 pass / 0 skip / 0 fail | all three BIT-IDENTICAL to phase 0 |
+| 6 study prune + dormant code | (next commit) | 24675 | 12150 | 9593 | tree 1310, leaf_induct 410, enrich 1399, equiterminal 1755, sppeec_input 1139 | 45 pass / 0 skip / 0 fail | all three BIT-IDENTICAL to phase 0 |
 
 Scoped validators at baseline: equiterminal 407, subpixel 380, corner
 202, superconductor 249, aniso 189, aniso_sigma 220, input_lppr 520.
 
 ## 8. Phase log
+
+### Phase 6 (2026-09-04): the study prune, and 1000 dormant lines
+
+* Studies removed (21 files, 1444 lines), per section 5: the
+  superseded skin chapters `skinconv`, `barconv2`, `wireconv`,
+  `shortwire`, `wirerc`, `wirefull`, `wirebnd`, `basis4wire`,
+  `thirdwire`, `linbnd`, `frozenstair`, `cmpeq`; `zuudiag` and `zcross`
+  (their block checks are validate_enrich B); the narrative duplicate
+  `skinnarr_report`; the done measurements `p3point`, `p3pinned`,
+  `memsolve`, `onefac2`, `ordering`, `vhrsurvey`. KEPT against the
+  plan: `skinnarr.py` -- it is the model library the three kept
+  narrative scripts import, not a duplicate. The loop-basis /
+  preconditioner cluster (18 files) is untouched, as planned.
+* Scratch deleted and ignored: `studies/_narr/` (16 MB of meshes),
+  `studies/*.vhr`, `*.log`, `validation/studies/`, `.ipynb_checkpoints`.
+  The `*_results.json` files stay.
+* Kept studies moved to the current API where they still read old
+  attributes (`mode_referee`: `split.boxes`, `_rc`, the palette's
+  per-cell geometry, the whole-sub-bar impedance; `skinnarr.solve_sp`:
+  `enrich=`). Smoke-run on the new API: `london1d` (100.0% contin),
+  `london_crowding` (1.3009 at two cells, as in phase 2),
+  `mode_referee` (below). `studies/README.md` rewritten for the
+  remaining set.
+* DORMANT CODE: the SPAI/RDF preconditioner -- `spaiinit`,
+  `spaiapply`, `spaiapply2` in tree.py and `spaiinit`, `spaistruc`,
+  `spaiapply` in leaf_induct.py (1017 lines, "implemented but unused",
+  one commented-out caller), plus the `RDFapply*` trio that called
+  them -- is gone. `RDFinit` STAYS: it publishes alpha/beta to the
+  leaves and `VoxelModel.prepare` calls it (my pattern cut took it
+  along and the import check caught it; restored from HEAD).
+* Ledger: src 25819 -> 24675 (-1144; -2452 total, 9.0% of the
+  baseline). validation 12150, studies 11037 -> 9593.
 
 ### Phase 5 (2026-09-04): one `enrich` interface, one resolver
 

@@ -44,12 +44,12 @@ r2 = enrich.Enrichment(m, sw.S.M, 0, sw.S.fil_axis, sw.S.fil_cell, 4,
 n, k = r2.nfil, r2.k
 ns = n*k
 print('%d filaments, %d sub-bars' % (n, ns), flush=True)
-L = tm.box_mutual_matrix(r2.lo, r2.hi, r2.axis)     # dense, area-normalised
+L = tm.box_mutual_matrix(*r2.split.boxes(r2.cells), r2.axis)     # dense, area-normalised
 # fill-weighted sub-bar resistance (l = dx)
 rvec = np.zeros(ns)
-base = k/(r2.sigma*r2.dx)
-for f, key in enumerate(r2._tkey):
-    pc = r2._percell[key]
+base = (r2._z*r2.d3[r2.axis]/r2.split.area).real   # a whole sub-bar
+for f, key in enumerate(r2.palette.tkey):
+    pc = r2.palette.percell[key]
     fill = pc['fill']
     rr = np.full(k, np.inf)
     sup = fill > 1e-3

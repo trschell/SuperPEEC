@@ -473,7 +473,6 @@ elif peectype == 'LpPR2':
     # P = SchurInv
 elif peectype == 'LpR':
     pass
-    # S.M.spaiinit()
     itervector = np.zeros((meshsize,), dtype=np.complex128)
     Afull = np.zeros((meshsize, meshsize), dtype=np.complex128)
     for ii in range(meshsize):
