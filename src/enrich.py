@@ -776,9 +776,20 @@ class Enrichment:
             return False
         self.freq = freq
         p, self._z = self._model.material_response(freq)
-        moved = self.palette.moves and (p != self._p)
-        self._p = p
+        # Retune the shapes only where the family would ENGAGE at this
+        # frequency (a transverse cell over half the decay length,
+        # 2 dx Re(p) > 1). Below that the modes carry no current by
+        # design, and retuned shapes are the wrong thing to give them:
+        # at dx/delta = 0.5 the real and imaginary parts of one face
+        # exponential are both nearly linear, the pruned basis is
+        # nearly degenerate, and the Krylov made NO progress (measured
+        # on equibar at 1e5-1e7: 331 matvecs, residual 1.0, at every
+        # commit back to the original engine). The f_ref shapes stay.
+        dtm = max(self.dt) if self.dt else 0.0
+        moved = (self.palette.moves and p != self._p
+                 and 2.0*dtm*np.real(p) > 1.0)
         if moved:
+            self._p = p
             self._set_weights()
         self._assemble()
         return bool(moved)

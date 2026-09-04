@@ -253,6 +253,35 @@ Scoped validators at baseline: equiterminal 407, subpixel 380, corner
   was 1.7304 pH (2026-09-02); in-plane refinement moves L down, as the
   film bench predicted (the geometric term converges downward).
 
+### After the program, second finding (2026-09-04): low-frequency solves
+
+* Running every example on the new interface: `equibar`'s five-point
+  sweep did not converge at 1e5, 1e6 and 1e7 (331 matvecs, flag 30,
+  residual 1.0, R stuck at DC), converging only at 1e8 and 1e9.
+  BISECTED to the phase-0 baseline: the original engine fails the
+  same way, so it is pre-existing, and no validator ever solved the
+  bar below 1e9 (validate_input_lppr's 1e7 check compared two paths
+  that failed identically). Mechanism: at dx/delta ~ 0.5 the real and
+  imaginary parts of one face exponential are both nearly linear and
+  differ only at second order, so the retuned, pruned basis is nearly
+  degenerate and the mode block conditions so badly the Krylov makes
+  no progress at all.
+* FIX (`Enrichment.set_frequency`): retune the shapes only where the
+  family would ENGAGE at the solve frequency (2 dx Re(p) > 1, the
+  resolver's own rule); below it the modes carry no current by design
+  and keep the well-conditioned f_ref shapes. equibar: 13 / 23 / 28
+  matvecs at 1e5 / 1e6 / 1e7 to residual <= 5e-5, DC resistance
+  recovered, the 1e8 and 1e9 points unchanged to every digit.
+  validate_enrich, validate_input_lppr, validate_partial,
+  validate_corner, validate_superconductor green.
+* Examples run on this box (all exit 0): coupled_plates 14 s / 0.6 GB,
+  plate_pair 7 s, plate_pair_ds 8 s, london_bar 1.5 s, equibar 2:31 /
+  1.0 GB, round_wire 35 s / 1.1 GB, module3wire 54 s / 0.8 GB,
+  dbc_halfbridge 24 s / 0.9 GB, dbc_halfbridge_r3 8:48 / 5.5 GB,
+  r3_spline 11:30 / 6.2 GB, r4 27:11 / 20.6 GB, r4_spline 38:12 /
+  21.8 GB; r5 (2e8 cells) and r6 (1e9) exceed the box. Only equibar
+  and round_wire needed edits, both to comments.
+
 ### Phase 6 (2026-09-04): the study prune, and 1000 dormant lines
 
 * Studies removed (21 files, 1444 lines), per section 5: the
