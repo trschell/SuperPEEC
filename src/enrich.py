@@ -239,9 +239,10 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
     from the same kernel, so dL vanishes on whole cells and the
     Toeplitz far field is untouched; the correction is local (decay
     measured in docs/enrichment_history.md, a 2-cell window suffices).
-    A ``[[cylinder]]`` model corrects the filaments ALONG the cylinder
-    over its k x k sub-fill bins; an axis-aligned slab cut corrects the
-    two IN-PLANE orientations over a 1-D split. Values depend only on
+    A section cut (``[[cylinder]]`` / ``[[trace]]``) corrects the
+    filaments ALONG its invariance axis over the k x k sub-fill bins of
+    the cells that are actually partial; an axis-aligned slab cut
+    corrects the two IN-PLANE orientations over a 1-D split. Values depend only on
     (orientation, offset, w_i, w_j) and the weight vectors are few, so
     they are computed once per distinct triple and gathered; every pair
     with at least one partial end is emitted. ``max_pairs`` bounds the
@@ -255,8 +256,8 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
     cut = getattr(model, 'cut', None)
     if cut is None:
         return None
-    if cut['kind'] == 'cylinder':
-        fams = [(int(cut['axis']), 'cylinder')]
+    if cut['kind'] == 'section':
+        fams = [(int(cut['axis']), 'section')]
     else:
         fams = [(o, 'slab') for o in range(3) if o != int(cut['axis'])]
     from equiterminal import filament_cells
@@ -270,7 +271,7 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
         if sel.size == 0:
             continue
         cells = np.asarray(fil_cell[sel], dtype=np.int64)
-        if kind == 'cylinder':
+        if kind == 'section':
             k = int(cut['k'])
             t1, t2 = [c for c in range(3) if c != orient]
             split = Split.transverse(orient, (k, k), d)
@@ -280,7 +281,7 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
             partial = np.zeros(cells.shape[0], dtype=bool)
             for f, c in enumerate(cells):
                 bins = cut['cells'].get((int(c[t1]), int(c[t2])))
-                if bins is not None:
+                if bins is not None and bins.min() < 1.0 - 1e-12:
                     b = np.asarray(bins, dtype=float).ravel()
                     W[f] = b/b.sum()
                     partial[f] = True
@@ -456,11 +457,13 @@ def conduction_weights(kk, d, p):
 
 
 def _surface_geometry(spx, cells, tr, kk, dx):
-    """Per transverse cell of a cylinder model: sub-prism fills at the
-    ENGINE subdivision (resampled from the resolved circle), signed
-    distance to the surface and azimuth at the centroids. Shared down
-    the extrusion. ``None`` for a conductor cell outside every cylinder
-    (it couples as an aggregate and carries no modes)."""
+    """Per transverse cell of a section-cut model: sub-prism fills at
+    the ENGINE subdivision (resampled from the shape union), signed
+    distance to the surface and the outward-normal angle at the
+    centroids (:func:`section.field`). Shared down the extrusion.
+    ``None`` for a conductor cell no section primitive claims (it
+    couples as an aggregate and carries no modes)."""
+    import section
     t1, t2 = tr
     tkey = [(int(a), int(b)) for a, b in zip(cells[:, t1], cells[:, t2])]
     k0, k1 = kk
@@ -472,20 +475,18 @@ def _surface_geometry(spx, cells, tr, kk, dx):
     cv = (np.arange(k1) + 0.5)*h1
     percell = {}
     for key in set(tkey):
-        g = spx['geom'].get(key)
-        if g is None:
+        if key not in spx['cells']:
             percell[key] = None
             continue
-        c1, c2, R, _ = g
         x0, y0 = key[0]*dx, key[1]*dx
-        ins = ((x0 + u1[:, None] - c1)**2
-               + (y0 + u2[None, :] - c2)**2) <= R*R
+        ins = section.field(spx['shapes'], x0 + u1[:, None],
+                            y0 + u2[None, :])[0] >= 0.0
         XC, YC = np.meshgrid(x0 + cu, y0 + cv, indexing='ij')
-        rho = np.hypot(XC.ravel() - c1, YC.ravel() - c2)
+        d, phi = section.field(spx['shapes'], XC.ravel(), YC.ravel())
         percell[key] = dict(
             fill=ins.reshape(k0, ns, k1, ns).mean(axis=(1, 3)).ravel(),
-            d=R - rho,                          # signed: > 0 inside
-            phi=np.arctan2(YC.ravel() - c2, XC.ravel() - c1))
+            d=d,                                # signed: > 0 inside
+            phi=phi)
     return tkey, percell
 
 
@@ -545,7 +546,7 @@ class ConductionPalette:
 
 
 class SurfacePalette:
-    """Per-cell weights anchored to a resolved cylinder surface
+    """Per-cell weights anchored to a resolved section surface
     (:func:`surface_weights`); fill-share aggregates ``G`` and
     fill-weighted sub-bar impedance factors ``rfac``; placement within
     ``reach`` cells of the surface layer."""
@@ -659,7 +660,7 @@ class Enrichment:
         self.freq = float(freq) if freq else 0.0
         self._p, self._z = model.material_response(self.freq)
         cut = getattr(model, 'cut', None)
-        spx = cut if cut is not None and cut['kind'] == 'cylinder' else None
+        spx = cut if cut is not None and cut['kind'] == 'section' else None
         subset = palette is not None      # a patch family, not a whole orientation
         if palette is None:
             self.axis = int(axis)
@@ -670,8 +671,8 @@ class Enrichment:
                 if int(spx['axis']) != self.axis:
                     raise NotImplementedError(
                         "surface modes: the terminal axis (%d) differs "
-                        "from the cylinder axis (%d) -- transverse mode "
-                        "families are future work"
+                        "from the section axis (%d) -- the edge family "
+                        "is docs/trace_plan.md phase 3"
                         % (self.axis, int(spx['axis'])))
                 palette = SurfacePalette(spx, self.cells, tr, kk, model.dx,
                                          reach)
@@ -1311,7 +1312,7 @@ def resolve(model, request, port_axis):
     refused: a 2x2 split cannot express "more current at the edges
     than the centre"). A declared film normal off the port axis gets
     the 1-D film palette ``(k, 1)`` along the normal. Radii: given, or
-    (12,16) on films (aligned dipoles), (3,4) on cylinder fills (the
+    (12,16) on films (aligned dipoles), (3,4) on section cuts (the
     sparse path), else width-scaled (:func:`_auto_rc`).
     """
     if request is None or request == 'off':
@@ -1369,7 +1370,7 @@ def resolve(model, request, port_axis):
     rc = req.get('rc')
     if rc is None:
         cyl = getattr(model, 'cut', None) is not None and \
-            model.cut['kind'] == 'cylinder'
+            model.cut['kind'] == 'section'
         rc = ((12, 16) if film else (3, 4) if cyl
               else _auto_rc(model.struc(), port_axis))
     rc = (int(rc[0]), int(rc[1]))

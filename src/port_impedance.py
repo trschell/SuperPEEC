@@ -2023,7 +2023,9 @@ def terminal_impedance(model, M, port=0, freq=1.0, weight='corner',
                              "finite impedance density" % (model.name, port))
         sigma = 1.0/np.mean(nz)
     else:
-        sigma = model.port_sigma(port)
+        # PER FACE: a port on partial cells (a trace's staircased end)
+        # sees the effective sigma of each face's own half-cell
+        sigma = model.port_sigma_faces(port)
     # per-axis pitch: the terminal's axial step and its cross-section are
     # all read from l below, so anisotropic models need no special case
     # (model.dx raises on them by design)
@@ -2031,13 +2033,15 @@ def terminal_impedance(model, M, port=0, freq=1.0, weight='corner',
     jw = 1j*2*np.pi*freq
     # per-face share, summing to 1 at each end
     faces = []
+    sig = np.broadcast_to(np.asarray(sigma, dtype=float),
+                          (len(p.pos) + len(p.neg),))
     for arr in (p.pos, p.neg):
         if len(arr) == 0:
             continue
         share = 1.0/len(arr)
         for e in arr:
             faces.append((int(e[0]), int(e[1]), int(e[2]), int(e[3]),
-                          int(e[4]), share))
+                          int(e[4]), share, float(sig[len(faces)])))
     if not faces:
         return 0.0
     # A port's faces may carry several orientations (a staircased
@@ -2048,25 +2052,25 @@ def terminal_impedance(model, M, port=0, freq=1.0, weight='corner',
     for axis in sorted({f[3] for f in faces}):
         orient = _AXIS_ORIENT[axis]
         others = [c for c in range(3) if c != axis]
-        rt = tm.terminal_resistance(l, orient, sigma, t_l=t_l)
         # axial half-slot: cell c spans [2c, 2c+2); the terminal
         # occupies the half next to its face
         slots = []
-        for (ix, iy, iz, ax, sign, share) in faces:
+        for (ix, iy, iz, ax, sign, share, sg) in faces:
             if ax != axis:
                 continue
             cell = (ix, iy, iz)
             slot = 2*cell[axis] + (1 if sign > 0 else 0)
-            slots.append((slot, cell[others[0]], cell[others[1]], share))
+            slots.append((slot, cell[others[0]], cell[others[1]], share,
+                          tm.terminal_resistance(l, orient, sg, t_l=t_l)))
         span = max(s[0] for s in slots) - min(s[0] for s in slots) + 2
         n = [0, 0, 0]
         n[axis] = span//2 + 2
         n[others[0]] = ncell[others[0]] + 1
         n[others[1]] = ncell[others[1]] + 1
         kern = tm.axial_halfstep_kernel(l, orient, n)
-        for (sa, ta0, ta1, ua) in slots:
+        for (sa, ta0, ta1, ua, rt) in slots:
             z += ua*ua*rt
-            for (sb, tb0, tb1, ub) in slots:
+            for (sb, tb0, tb1, ub, _) in slots:
                 z += jw*ua*ub*tm.mutual_segments(
                     kern, orient, (sa, 1), (sb, 1),
                     transverse=(ta0 - tb0, ta1 - tb1))

@@ -99,9 +99,13 @@ def main():
                  wire_doc(3e-6).replace('center = [4e-06, 4e-06]',
                                         'center = [4e-06]'),
                  'TWO transverse')
-    expect_error('overlap with block rejected',
-                 wire_doc(3e-6) + '\n[[block]]\nfrom = [0, 0, 0]\n'
-                 'to = [96, 8, 8]\nsigma = 1e7', 'overlaps')
+    # the UNION rule (docs/trace_plan.md 3.3): a block that fills the
+    # cylinder's cells whole owns them; the cylinder carves nothing
+    mu = sppeec_input.loads(wire_doc(3e-6) + '\n[[block]]\nfrom = [0, 0, 0]\n'
+                            'to = [96, 8, 8]\nsigma = 1e7').model()
+    check('cylinder under a whole block: no cut, block sigma kept',
+          mu.cut is None and mu.fill is None
+          and float(mu.sigma.min()) == float(mu.sigma.max()) == 1e7)
 
     # -- physics: DC R vs analytic, staircase vs fill -----------------
     R, DX, NX = 3e-6, 1e-6, 96
@@ -206,7 +210,9 @@ def main():
         pr = sppeec_input.loads(doc)
         mm = pr.model()
         if strip_b:
-            mm.cut = None
+            # drop the bins (stage B's input) and keep the face fills
+            # (stage A's, since the face rule): R must not move
+            mm.cut = dict(mm.cut, cells={})
         sw2 = pr.sweeper(mm, pr.tree(mm))
         Z2, _ = sw2.solve(1e5)
         return Z2.real, Z2.imag/(2*math.pi*1e5)

@@ -176,10 +176,10 @@ class VoxelModel:
         # PARTIAL CELLS, one record: `fill` is the covered fraction per
         # cell (None when every cell is whole); `cut` says how they are
         # cut -- dict(kind='slab', axis=a) for an axis-aligned layer
-        # boundary, dict(kind='cylinder', axis=a, k=, cells={(t1, t2):
-        # (k, k) sub-fill bins}, geom={(t1, t2): (c1, c2, R, sigma)})
-        # for a resolved round conductor. `sigma` stays the BULK metal;
-        # the per-orientation consequence is impedance_scale().
+        # boundary, or the section cut of section.paint (kind='section',
+        # axis=the invariance axis, shapes=, k=, cells={(t1, t2): (k, k)
+        # sub-fill bins}) for cylinders and traces. `sigma` stays the
+        # BULK metal; the per-orientation consequence is impedance_scale().
         self.fill = None
         self.cut = None
         # thin-film declaration ([[block]] film = "x|y|z" in the TOML):
@@ -361,9 +361,9 @@ class VoxelModel:
         them -- the harmonic mean is the value for a path through the
         whole cell, and no filament makes one (the half-pair rule gives
         it half of each end cell), so the through-plane figure is a
-        half-cell quantity this array cannot express. A resolved
-        cylinder scales every orientation (uniform density over the
-        clipped section). Material-agnostic: ``1/sigma`` and
+        half-cell quantity this array cannot express. A section cut
+        scales every orientation (uniform density over the clipped
+        section). Material-agnostic: ``1/sigma`` and
         ``j w mu lambda^2`` scale the same way.
         """
         if self.fill is None:
@@ -838,11 +838,22 @@ class VoxelModel:
         l = [float(v) for v in np.asarray(M.e.l, dtype=float)]
         area = (l[1]*l[2], l[0]*l[2], l[0]*l[1])       # perp to x, y, z
         out = []
+        faces = (self.cut.get('faces') if self.cut is not None
+                 and self.cut['kind'] == 'section' else None)
         for leaf, axis in ((M.e, 1), (M.f, 0), (M.g, 2)):
             c = filament_cells(M, leaf)
             up = c.copy()
             up[:, axis] += 1
-            zg = z if zs is None else z*zs[..., axis]
+            if faces is not None and axis in faces:
+                # in-plane orientation through a section cut: the
+                # conductance of the face the filament crosses
+                # (section.paint), bulk density on both sides
+                t = [q for q in range(3) if q != self.cut['axis']]
+                g = np.maximum(faces[axis][c[:, t[0]], c[:, t[1]]], 1e-3)
+                zg = z
+            else:
+                g = 1.0
+                zg = z if zs is None else z*zs[..., axis]
             za = zg[c[:, 0], c[:, 1], c[:, 2]]
             zb = zg[up[:, 0], up[:, 1], up[:, 2]]
             if np.any(za == 0.0) or np.any(zb == 0.0):
@@ -850,7 +861,7 @@ class VoxelModel:
                     "%s: a filament spans a cell with zero impedance "
                     "density -- the occupancy stencil and the material "
                     "arrays disagree" % self.name)
-            out.append(0.5*l[axis]/area[axis]*(za + zb))
+            out.append(0.5*l[axis]/area[axis]*(za + zb)/g)
         return out[0], out[1], out[2]
 
     # -- port excitation --------------------------------------------

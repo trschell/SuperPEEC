@@ -59,9 +59,9 @@ MU0 = 4e-7*np.pi
 # Gate thresholds on the diagonal/aligned ratio by program phase
 # (docs/trace_plan.md section 7). PHASE is bumped as each phase closes;
 # a threshold of None is not yet gated.
-PHASE = 0
+PHASE = 1
 GATE = {                       # (nw, metric): {phase: max ratio}
-    (8, 'R_dc'): {1: 1.06}, (16, 'R_dc'): {1: 1.015},
+    (8, 'R_dc'): {1: 1.01}, (16, 'R_dc'): {1: 1.005},
     (8, 'L_dc'): {2: 1.005}, (16, 'L_dc'): {2: 1.002},
     (8, 'R_1e9'): {3: 1.10}, (16, 'R_1e9'): {3: 1.05},
     (8, 'L_1e9'): {3: 1.005}, (16, 'L_1e9'): {3: 1.002},
@@ -128,8 +128,13 @@ def end_cut_port(m, nw, angle_deg):
     u > LEN at N), x- and y-faces alike -- the mixed-orientation
     prescribed-current port."""
     h, n, (x0, y0), (c, s) = rotated_frame(nw, angle_deg)
-    occ = np.asarray(m.struc()) > 0
-    inside = occ[:, :, 0]
+    # the port's cells are the staircase's own (fill >= 1/2): the
+    # prescribed-current port hands every face an EQUAL share, and a
+    # sliver face at 1/fill terminal resistance would dominate the
+    # answer (measured: R ratio 1.03 -> 1.09 at DC, 1.20 -> 2.13 deep
+    # skin). Slivers beyond the port faces hang as dead-end stubs.
+    fill = np.asarray(m.struc()) > 0 if m.fill is None else np.asarray(m.fill)
+    inside = fill[:, :, 0] >= 0.5
     xc = (np.arange(n) + 0.5)*h
     nt = int(m.dims[2])
     p = voxmodel.Port('p1')
@@ -238,7 +243,9 @@ def dogleg_doc(nw, freq, equipotential, pad_cells=6):
     """x pad, 45-degree run, x pad; ports on the pads' outer faces."""
     h = W/nw
     nt = int(round(T/h))
-    run = LEN/float(np.sqrt(2.0))           # in-plane projection
+    # in-plane projection of the run, snapped to whole cells so the
+    # far pad stays on-grid (the segment is exactly 45 degrees)
+    run = round(LEN/float(np.sqrt(2.0))/h)*h
     pad = pad_cells*h
     margin = 2*h
     x0, y0 = margin, margin + W/2
@@ -270,7 +277,9 @@ def dogleg_doc(nw, freq, equipotential, pad_cells=6):
 def part_d():
     print("D: the dogleg with pads, both port paths")
     nw, f = 8, 1e3
-    r_ref = (LEN + 2*6*W/nw)/(SIGMA*W*T)    # pads + run, aligned bound
+    h = W/nw
+    run = round(LEN/float(np.sqrt(2.0))/h)*h*float(np.sqrt(2.0))
+    r_ref = (run + 2*6*h)/(SIGMA*W*T)        # pads + run, aligned bound
     for eq in (False, True):
         pr = sppeec_input.loads(dogleg_doc(nw, f, eq))
         m = pr.model()

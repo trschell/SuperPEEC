@@ -134,13 +134,28 @@ Trace ends that carry no pad are closed by the end plane and get no
 port; a user who wants a port on a bare diagonal end has the mixed-
 orientation face port, which phase 4 decides to keep or drop.
 
-### 3.4 Resistance (stage A)
+### 3.4 Resistance (stage A): the FACE rule (revised in phase 1)
 
-The 1/fill rule on every orientation, exactly the cylinder's, in v1.
-It is direction-blind (charges a filament along a thin sliver the same
-as one across it); DC already converges at second order under it, and
-the sub-bar series-parallel network is the contained refinement if
-phase 1 shows DC on edge cells limiting anything. Not planned.
+The plan's first version kept the cylinder's 1/fill-per-cell rule on
+every orientation and asserted DC would converge at second order
+under it. Measured in phase 1, it does not: on a 45-degree edge every
+in-plane link joins two cells of UNEQUAL fill, the half-cell series
+rule charges each such link an O(1) excess, and the ladder's DC ratio
+went 1.144 / 1.065 / 1.034 at 4/8/16 across -- first order, and worse
+than the staircase at 16. The cylinder and the slab never see this
+because their fills are constant along the current.
+
+The rule that is right for a tilted cut: a filament takes the
+conductance of the FACE it crosses, the metal fraction of the shared
+cell face (sampled from the shape union at paint time,
+`cut['faces'][axis]`), with bulk impedance density on both sides. For
+a uniform flow at any angle the link currents are the face fluxes and
+the dissipation sums to the exact area to O(h^2). Measured: DC R
+ratio 1.0093 / 1.0008 / 1.0007, DC L 0.9997 / 0.9971 / 0.9992.
+Filaments along the invariance axis keep the cell rule (the face IS
+the cell's section there, so the cylinder is unchanged); a face with
+a whole cell on either side is whole; a face with no metal is capped
+at 1e-3 of bulk.
 
 ### 3.5 Inductance (stage B) through the cut
 
@@ -292,7 +307,7 @@ ledger and the phase log here.
 ## 7. Gate thresholds by phase (validate_trace part C, 45 degrees)
 
     phase   metric                 nw=8      nw=16
-    1       DC R ratio             <= 1.06   <= 1.015
+    1       DC R ratio             <= 1.01   <= 1.005   (face rule; was 1.06 / 1.015)
     2       DC L ratio             <= 1.005  <= 1.002
     3       1e9 R ratio            referee-set; target <= 1.10, <= 1.05
     3       1e9 L ratio            <= 1.005  <= 1.002
@@ -310,6 +325,8 @@ Separate plan when this one closes.
 
     phase   date         src     validation   studies   note
     base    2026-09-04   24707   12150        9593      45 validators; src includes 6039f9b's mixed-orientation port
+    0       2026-09-05   24707   12471        9593      validate_trace.py skeleton (+321)
+    1       2026-09-05   24985   12486        9593      section.py 260 (pieces, field, painter, face fills); the cylinder painter left sppeec_input; enrich/voxmodel/port_impedance small
 
 ## 10. Phase log
 
@@ -327,3 +344,57 @@ Separate plan when this one closes.
   scratch ladder's rule, so the phase-1+ numbers are comparable with
   the baseline table row for row. validation 12150 -> 12471 (+321,
   the new validator).
+
+### Phase 1 (2026-09-05)
+
+* `src/section.py`: convex pieces (`trace_pieces`: rectangles per
+  segment, mitre quad or bevel per bend), `field` (signed distance +
+  outward-normal angle of the union), `lattice` (row-shifted sample
+  lattice), `paint` (SDF classification of every cell, sampled fill and
+  bins on boundary cells, union rule, block-whole cells untouched,
+  record dropped when nothing is partial, FACE fills). The cylinder
+  painter in `sppeec_input` is gone; both primitives go through
+  `paint`. `cut['kind'] == 'section'` everywhere (`partial_dL`,
+  `_surface_geometry` now reads the shape union, `Enrichment`,
+  `resolve`, `_EquiSweep`).
+* `[[trace]]` (`path_m`, `width_m`, `z_m`, `sigma`, `film`, `name`);
+  refusals of 3.7 in place (off-grid z, section + slab, mixed axes,
+  wires).
+* Three findings, all measured on the ladder (validate_trace C):
+  1. The unshifted 64 x 64 sample lattice over-counts a 45-degree edge
+     by +1/(4s) per cell (every lattice diagonal flips at once): fill
+     area 1.0025 / 1.0013 of w*L at 4/8 across. Rows shifted by the
+     golden fraction (`section.lattice`) -> 1.0000 at both angles.
+  2. A prescribed-current port on sliver faces: equal shares through
+     1/fill terminal resistances took DC from 1.03 to 1.09 and deep
+     skin from 1.20 to 2.13. The terminal now takes per-face sigma
+     (`port_sigma_faces`, `port_impedance.terminal_impedance`), and
+     the ladder's end-cut port sits on the staircase's own cells
+     (fill >= 1/2); slivers beyond it are dead-end stubs.
+  3. THE ONE THAT CHANGED THE DESIGN (section 3.4): the per-cell 1/fill
+     rule is first order on a tilted cut. Face rule shipped:
+
+         cells across        4        8       16
+         DC R, staircase   1.420    1.132    1.029
+         DC R, cell fills  1.144    1.065    1.034
+         DC R, face rule   1.0093   1.0008   1.0007
+         DC L, face rule   0.9997   0.9971   0.9992
+         1e9 R, face rule  1.556    1.735    1.967   (phase 3's problem)
+         1e9 L, face rule  0.984    0.983    0.991
+
+     Deep skin is WORSE than the staircase (1.20 at 16) under any
+     fill rule without modes: the lattice's outermost layer is now the
+     partial cells, the skin current crowds into them, and their
+     conductance is a fraction of bulk. That is the lossy-shell
+     artefact the edge palette exists to remove (phase 3); the
+     cylinder shows the same base behaviour and its surface palette
+     fixes it (validate_partial: Kelvin within 2.5% at dx/delta 2).
+* The dogleg with pads (validate_trace D): DC R within 0.09%
+  (prescribed) and 0.72% (equipotential) of the aligned bound; the
+  union rule (E) holds.
+* Gate: validate_trace A-E green with the phase-1 DC thresholds
+  (1.01 / 1.005); validate_partial green after its stage-B strip was
+  taught to keep the face fills; full gate 46 pass / 0 skip / 0 fail, anchors setup1/2/3 bit-identical.
+* Ledger: src +278 over phase 0 (section.py 260, less the painter it
+  replaced); the plan's "roughly flat" was optimistic by ~200 lines,
+  the face rule and the SDF classification being the additions.

@@ -242,16 +242,28 @@ written today still means the same thing after the next refactor.
     tables, raised automatically). Measured on a 75 nm film at 30 nm
     pitch against the same film at 15 nm: R error 16.67% -> 0.00%, L
     error 2.42% -> 0.30%. ONE cut axis per model; a cell cut on two
-    axes is an error. `[[cylinder]]` (`axis`, `center`, `radius`,
-    `sigma`, optional span) is the round primitive on the same record:
-    fill fractions from the resolved circle, the same inductance
+    axes is an error. The SECTION cut is the other record: geometry
+    invariant along one lattice axis and resolved below the cell in
+    the plane across it -- `[[cylinder]]` (`axis`, `center`, `radius`,
+    `sigma`, optional span) and `[[trace]]` (`path_m` polyline in xy,
+    `width_m`, `z_m` whole cells, `sigma`, optional `film = "z"`; any
+    angle; bends mitred) are its two shapes, painted as one union:
+    fill fractions sampled from the shape union, in-plane filaments
+    at the conductance of the FACE they cross (a tilted cut joins
+    cells of unequal fill, and the per-cell rule is first order
+    there; the face rule leaves a 45-degree bar's DC R within 0.1% of
+    the axis-aligned solve at 8 cells across), the same inductance
     correction (round-wire example vs a 2x reference: staircase 2.4% ->
     fill 1.2% -> fill+dL 0.9% in L), and under enrichment the
     SURFACE palette -- per-cell modes anchored to the true surface,
     R_AC/R_DC within ~1% of the exact Kelvin solution at dx/delta 1-2,
-    usable to 3-4. Equipotential ports on a cylinder fill must sit on
-    whole cells; a slab port may touch a partial cell. `[[cylinder]]`
-    does not combine with `[[wire]]`.
+    usable to 3-4. Union rule: a cell is metal if any primitive claims
+    it, a later primitive's sigma wins, and a cell a `[[block]]` fills
+    whole is never carved -- so a trace ends inside a pad and the port
+    goes on the pad's axis-aligned face; a commensurate trace IS a
+    block. Equipotential ports on a section cut must sit on whole
+    cells; a slab port may touch a partial cell. Section and slab cuts
+    do not combine in one model, and neither combines with `[[wire]]`.
 
 ## What v1 deliberately leaves out
 

@@ -61,6 +61,7 @@ import tomllib
 
 import numpy as np
 
+import section
 import sppeec_status as _status
 
 MU0 = 4e-7*np.pi
@@ -69,6 +70,7 @@ _SCHEMA = {
     'grid': {'dims', 'pitch'},
     'cylinder': {'axis', 'center', 'radius', 'from', 'to',
                  'from_m', 'to_m', 'sigma', 'name'},
+    'trace': {'path_m', 'width_m', 'z_m', 'sigma', 'film', 'name'},
     'block': {'from', 'to', 'from_m', 'to_m', 'sigma', 'name',
               'epsilon', 'loss_tangent', 'lambda_l',
               'dispersion', 'f_ref', 'f1', 'f2', 'film'},
@@ -88,7 +90,7 @@ _FACE = {'+x': (0, 1), '-x': (0, -1), '+y': (1, 1), '-y': (1, -1),
 
 
 _TOP = {'grid', 'block', 'model', 'wire', 'port',
-        'cylinder', 'solve'}
+        'cylinder', 'trace', 'solve'}
 
 
 def _reject_unknown(doc):
@@ -129,10 +131,25 @@ class Problem:
         # exactly. v1 scope: conductors only; Lp stays full-cell
         # (stage B of the subpixel program owns the inductance
         # correction).
-        if doc.get('cylinder') and self.wire_specs:
+        if (doc.get('cylinder') or doc.get('trace')) and self.wire_specs:
             raise ValueError(
-                "[[cylinder]] and [[wire]] do not combine in subpixel "
-                "v1 -- the wire path has no partial-cell corrections")
+                "[[cylinder]] / [[trace]] and [[wire]] do not combine "
+                "-- the wire path has no partial-cell corrections")
+        # [[trace]]: a routed film trace, the section cut's polygon
+        # (docs/trace_plan.md): a polyline centreline in the xy plane,
+        # a width, a z extent; bends mitred; any angle.
+        for k, tr in enumerate(doc.get('trace', [])):
+            for req in ('path_m', 'width_m', 'z_m', 'sigma'):
+                if req not in tr:
+                    raise ValueError("trace %d is missing %r" % (k, req))
+            if float(tr['width_m']) <= 0:
+                raise ValueError("trace %d: width_m must be > 0" % k)
+            if len(tr['z_m']) != 2 or float(tr['z_m'][1]) <= float(tr['z_m'][0]):
+                raise ValueError("trace %d: z_m is [z_lo, z_hi] in metres"
+                                 % k)
+            if tr.get('film', 'z') != 'z':
+                raise ValueError("trace %d: a trace is a film with normal "
+                                 "'z' (film = \"z\" or omitted)" % k)
         for k, cy in enumerate(doc.get('cylinder', [])):
             for req in ('axis', 'center', 'radius', 'sigma'):
                 if req not in cy:
@@ -655,9 +672,11 @@ class Problem:
                     "coverage and the painted blocks disagree")
             m.fill = cover
             m.cut = dict(kind='slab', axis=int(cut_axis))
+        # SECTION PRIMITIVES: cylinders and traces, painted together as
+        # one union (section.paint): the record is one cut per model
+        prims, sec_axis = [], None
         for k, cy in enumerate(self._doc.get('cylinder', [])):
             axis = 'xyz'.index(str(cy['axis']))
-            t1, t2 = [ax for ax in range(3) if ax != axis]
             if ('from' in cy) or ('to' in cy):
                 a0 = int(cy.get('from', 0))
                 a1 = int(cy.get('to', m.dims[axis]))
@@ -673,59 +692,37 @@ class Problem:
                 raise ValueError("cylinder %d: axial span [%d, %d) "
                                  "does not fit the grid" % (k, a0, a1))
             c1, c2 = float(cy['center'][0]), float(cy['center'][1])
-            R = float(cy['radius'])
-            sig = float(cy['sigma'])
-            # per-cell fill fraction by sub-sampling (s^2 points per
-            # transverse cell; error ~ chord/s of a cell, well under
-            # the 1e-3 sliver threshold below)
-            s = 64
-            o = (np.arange(s) + 0.5)/s
-            p1, p2 = float(m.d[t1]), float(m.d[t2])
-            x = (np.arange(m.dims[t1])[:, None] + o[None, :])*p1 - c1
-            y = (np.arange(m.dims[t2])[:, None] + o[None, :])*p2 - c2
-            inside = (x[:, None, :, None]**2
-                      + y[None, :, None, :]**2) < R*R
-            fill = inside.mean(axis=(2, 3))
-            # k=4 sub-fill bins per cell (stage B consumes these as
-            # sub-prism current weights; 64 samples/bin)
-            # k = 4 sub-cells: measured NOT the accuracy limiter --
-            # k = 8 left the Kelvin-gate errors unchanged-to-worse;
-            # the high-dx/delta residual is cell-level discretization
-            # of the crowding envelope (stage C.2's charter)
-            ks = 4
-            sub = inside.reshape(inside.shape[0], inside.shape[1],
-                                 ks, 64//ks, ks, 64//ks
-                                 ).mean(axis=(3, 5))
-            if m.fill is None:
-                m.fill = (m.sigma != 0).astype(np.float64)
-            if m.cut is None:
-                m.cut = dict(kind='cylinder', axis=axis, k=ks, cells={},
-                             geom={})
-            elif m.cut['kind'] != 'cylinder' or m.cut['axis'] != axis:
+            prims.append(([('circle', c1, c2, float(cy['radius']))],
+                          float(cy['sigma']), a0, a1, axis))
+        for k, tr in enumerate(self._doc.get('trace', [])):
+            z0, z1 = float(tr['z_m'][0]), float(tr['z_m'][1])
+            a0, a1 = z0/float(m.d[2]), z1/float(m.d[2])
+            if abs(a0 - round(a0)) > 1e-9 or abs(a1 - round(a1)) > 1e-9:
                 raise ValueError(
-                    "cylinder %d: one cut per model -- mixed cylinder "
-                    "axes, or a cylinder with a slab cut, are not "
-                    "supported" % k)
-            span = [slice(None)]*3
-            span[axis] = slice(a0, a1)
-            for i1, i2 in zip(*np.nonzero(fill >= 1e-3)):
-                pos = [None]*3
-                pos[axis] = slice(a0, a1)
-                pos[t1], pos[t2] = int(i1), int(i2)
-                pos = tuple(pos)
-                if np.any(m.sigma[pos] != 0.0):
-                    raise ValueError(
-                        "cylinder %d overlaps existing conductor "
-                        "cells -- subpixel v1 keeps primitives "
-                        "disjoint (transverse cell %d,%d)"
-                        % (k, i1, i2))
-                m.sigma[pos] = np.float32(sig)
-                m.fill[pos] = fill[i1, i2]
-                m.cut['cells'][(int(i1), int(i2))] = \
-                    sub[i1, i2].astype(np.float64)
-                # the surface palette needs the resolved surface: each
-                # cell remembers its cylinder's (center, R, sigma)
-                m.cut['geom'][(int(i1), int(i2))] = (c1, c2, R, sig)
+                    "trace %d: z_m must be whole cells (%g, %g at pitch "
+                    "%g) -- a section cut and a slab cut in one cell is "
+                    "v1's refusal (docs/trace_plan.md 3.7)"
+                    % (k, z0, z1, m.d[2]))
+            a0, a1 = int(round(a0)), int(round(a1))
+            if not (0 <= a0 < a1 <= m.dims[2]):
+                raise ValueError("trace %d: z_m [%d, %d) does not fit "
+                                 "the grid" % (k, a0, a1))
+            prims.append((section.trace_pieces(tr['path_m'],
+                                               tr['width_m']),
+                          float(tr['sigma']), a0, a1, 2))
+        if prims:
+            axes = {pr[4] for pr in prims}
+            if len(axes) != 1:
+                raise ValueError(
+                    "section primitives share ONE invariance axis per "
+                    "model (cylinder axes and traces' z); got %s"
+                    % sorted('xyz'[a] for a in axes))
+            if m.cut is not None:
+                raise ValueError(
+                    "a section cut ([[cylinder]] / [[trace]]) and a slab "
+                    "cut (an off-grid [[block]]) in one model is v1's "
+                    "refusal -- make the block commensurate")
+            m.cut = section.paint(m, [pr[:4] for pr in prims], axes.pop())
         if eps_blocks:
             cplx = any(np.iscomplexobj(ec) for _, _, ec in eps_blocks)
             eps = np.ones(m.dims,
@@ -766,6 +763,11 @@ class Problem:
                 plist.append(p)
             m.ports = plist
         m.freq = np.array(self.freqs if self.freqs else [0.0])
+        if any(tr.get('film') for tr in self._doc.get('trace', [])):
+            if film_normal not in (None, 2):
+                raise ValueError("a trace is a z-normal film; blocks "
+                                 "declare film normal %s" % 'xyz'[film_normal])
+            film_normal = 2
         m.film_normal = film_normal
         return m
 
@@ -1031,8 +1033,8 @@ class _EquiSweep:
 
     def __init__(self, prob, m, M, verbose=False):
         from equiterminal import EquiTerminalSolver
-        if m.cut is not None and m.cut['kind'] == 'cylinder':
-            # equipotential terminals on cylinder fills need every
+        if m.cut is not None and m.cut['kind'] == 'section':
+            # equipotential terminals on section cuts need every
             # port face on a FULL cell: partial rim cells carry
             # distinct sigma_eff values, and the terminal machinery
             # wants one port conductivity (and full terminal
