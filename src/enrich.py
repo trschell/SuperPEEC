@@ -257,7 +257,12 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
     if cut is None:
         return None
     if cut['kind'] == 'section':
-        fams = [(int(cut['axis']), 'section')]
+        # along the invariance axis: the cell's bins (fills constant
+        # along the current); ACROSS the cut (in-plane): every filament
+        # its own sub-prism fills, split along its length too, since
+        # the cut slices it obliquely and it spans two half-cells
+        fams = [(int(cut['axis']), 'section')] + \
+            [(o, 'plane') for o in range(3) if o != int(cut['axis'])]
     else:
         fams = [(o, 'slab') for o in range(3) if o != int(cut['axis'])]
     from equiterminal import filament_cells
@@ -285,6 +290,12 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
                     b = np.asarray(bins, dtype=float).ravel()
                     W[f] = b/b.sum()
                     partial[f] = True
+        elif kind == 'plane':
+            k = int(cut['k'])
+            n = [k, k, k]
+            n[int(cut['axis'])] = 1
+            split = Split(orient, n, d)
+            W, partial = _plane_weights(cut, split, cells)
         else:
             k = 8
             n = [1, 1, 1]
@@ -321,13 +332,46 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
     return sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
 
 
+def _plane_weights(cut, split, cells):
+    """Sub-prism fills of in-plane filaments through a section cut:
+    each sub-prism's footprint sampled against the shape union (8 x 8
+    per sub-prism, as the surface palette does). Whole on both ends ->
+    uniform, not partial."""
+    import section
+    ax = int(cut['axis'])
+    t = [c for c in range(3) if c != ax]
+    part = {key for key, b in cut['cells'].items()
+            if b.min() < 1.0 - 1e-12}
+    up = cells.copy()
+    up[:, split.axis] += 1
+    partial = np.array([((int(c[t[0]]), int(c[t[1]])) in part)
+                        or ((int(e[t[0]]), int(e[t[1]])) in part)
+                        for c, e in zip(cells, up)])
+    W = np.full((cells.shape[0], split.nsub), 1.0/split.nsub)
+    sel = np.flatnonzero(partial)
+    if sel.size:
+        lo, hi = split.boxes(cells[sel])
+        ns = 8
+        o = (np.arange(ns) + 0.5)/ns
+        xs = lo[:, t[0], None, None] + (hi - lo)[:, t[0], None, None]*o[None, :, None]
+        ys = lo[:, t[1], None, None] + (hi - lo)[:, t[1], None, None]*o[None, None, :]
+        f = section.inside(cut['shapes'], xs, ys).reshape(sel.size, split.nsub, -1).mean(axis=2)
+        tot = f.sum(axis=1)
+        ok = tot > 0
+        W[sel[ok]] = f[ok]/tot[ok, None]
+    return W, partial
+
+
 def _pair_correction(sel, cells, W, partial, split, window, dims, tables):
     """COO parts of ``w_i'T w_j - u'T u`` over the offset cube.
 
     Only the lexicographically non-negative half of the cube is
     tabulated; each pair is emitted in both orderings with the SAME
     value, so the result is exactly symmetric and the zero offset
-    (self pairs) is emitted once."""
+    (self pairs) is emitted once. Few distinct weight rows (a cylinder
+    or slab: one per fill value) are tabulated as a matrix over them;
+    many (in-plane filaments through a tilted cut: one per filament)
+    are contracted per pair."""
     nf = cells.shape[0]
     uw, inv = np.unique(W, axis=0, return_inverse=True)
     inv = inv.ravel()
@@ -338,8 +382,10 @@ def _pair_correction(sel, cells, W, partial, split, window, dims, tables):
     offs = offs[np.lexsort(offs.T[::-1])]
     offs = offs[len(offs)//2:]                 # (0,0,0) and the half after
     T = tables(split, split, offs)
-    V = (np.einsum('ap,opq,bq->oab', uw, T, uw)
-         - np.einsum('p,opq,q->o', u, T, u)[:, None, None])
+    uTu = np.einsum('p,opq,q->o', u, T, u)
+    memo = uw.shape[0] <= 256
+    if memo:
+        V = np.einsum('ap,opq,bq->oab', uw, T, uw) - uTu[:, None, None]
     loc = np.full(dims, -1, dtype=np.int64)
     loc[cells[:, 0], cells[:, 1], cells[:, 2]] = np.arange(nf)
     out = []
@@ -352,7 +398,10 @@ def _pair_correction(sel, cells, W, partial, split, window, dims, tables):
         jj = j[ii]
         keep = partial[ii] | partial[jj]
         ii, jj = ii[keep], jj[keep]
-        v = V[o, inv[ii], inv[jj]]
+        if memo:
+            v = V[o, inv[ii], inv[jj]]
+        else:
+            v = np.einsum('ip,pq,iq->i', W[ii], T[o], W[jj]) - uTu[o]
         nz = v != 0.0
         if not nz.any():
             continue

@@ -59,7 +59,7 @@ MU0 = 4e-7*np.pi
 # Gate thresholds on the diagonal/aligned ratio by program phase
 # (docs/trace_plan.md section 7). PHASE is bumped as each phase closes;
 # a threshold of None is not yet gated.
-PHASE = 1
+PHASE = 2
 GATE = {                       # (nw, metric): {phase: max ratio}
     (8, 'R_dc'): {1: 1.01}, (16, 'R_dc'): {1: 1.005},
     (8, 'L_dc'): {2: 1.005}, (16, 'L_dc'): {2: 1.002},
@@ -310,6 +310,49 @@ def part_e():
     check('no cut record inside the pad', not inpad, '%d' % len(inpad))
 
 
+def part_f():
+    print("F: stage B through the cut (in-plane filaments)")
+    from enrich import partial_dL
+    nw, f = 8, 1e3
+    pr = sppeec_input.loads(rotated_doc(nw, f, 45.0))
+    m = pr.model()
+    M = pr.tree(m)
+    dL = partial_dL(m, M)
+    check('dL built', dL is not None)
+    if dL is None:
+        return
+    check('dL exactly symmetric', (dL != dL.T).nnz == 0,
+          'nnz %d' % dL.nnz)
+    from equiterminal import filament_cells
+    fa, fc = filament_cells(M)
+    part = {k for k, b in m.cut['cells'].items() if b.min() < 1 - 1e-12}
+    coo = dL.tocoo()
+    def touches(i):
+        c = fc[i]
+        e = c.copy()
+        e[fa[i]] += 1
+        return ((int(c[0]), int(c[1])) in part) or ((int(e[0]), int(e[1])) in part)
+    bad = sum(1 for i, j in zip(coo.row, coo.col)
+              if not (touches(i) or touches(j)))
+    check('every entry touches a partial cell', bad == 0, '%d' % bad)
+    inplane = np.isin(fa[coo.row], [0, 1]).sum()
+    check('in-plane filaments corrected', inplane > 0,
+          '%d of %d entries' % (inplane, coo.nnz))
+    # L with and without stage B on the ladder's diagonal bar
+    end_cut_port(m, nw, 45.0)
+    pa = sppeec_input.loads(aligned_doc(nw, f))
+    ma = pa.model()
+    _, la, _ = solve_lpr(pa, ma, f)
+    _, lb, _ = solve_lpr(pr, m, f)
+    m2 = pr.model()
+    end_cut_port(m2, nw, 45.0)
+    m2.cut = dict(m2.cut, cells={})
+    _, l0, _ = solve_lpr(pr, m2, f)
+    print('    L ratio without stage B %.5f, with %.5f' % (l0/la, lb/la))
+    check('stage B moves L toward the aligned value',
+          abs(lb/la - 1) <= abs(l0/la - 1) + 1e-4)
+
+
 def main():
     try:
         sppeec_input.loads(rotated_doc(4, 1e6, 45.0))
@@ -318,7 +361,7 @@ def main():
         print("SKIP: [[trace]] not parsed yet (%s) -- docs/trace_plan.md "
               "phase 1" % msg)
         return 0
-    for part in (part_a, part_b, part_c, part_d, part_e):
+    for part in (part_a, part_b, part_c, part_d, part_e, part_f):
         part()
     print("%d checks failed" % len(FAIL))
     for f in FAIL:

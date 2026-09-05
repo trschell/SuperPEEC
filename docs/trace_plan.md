@@ -327,6 +327,7 @@ Separate plan when this one closes.
     base    2026-09-04   24707   12150        9593      45 validators; src includes 6039f9b's mixed-orientation port
     0       2026-09-05   24707   12471        9593      validate_trace.py skeleton (+321)
     1       2026-09-05   24985   12486        9593      section.py 260 (pieces, field, painter, face fills); the cylinder painter left sppeec_input; enrich/voxmodel/port_impedance small
+    2       2026-09-05   25043   12529        9593      _plane_weights + per-pair contraction (+50), stage B on the LpR path (+8); validate_trace F (+43)
 
 ## 10. Phase log
 
@@ -398,3 +399,46 @@ Separate plan when this one closes.
 * Ledger: src +278 over phase 0 (section.py 260, less the painter it
   replaced); the plan's "roughly flat" was optimistic by ~200 lines,
   the face rule and the SDF classification being the additions.
+
+### Phase 2 (2026-09-05)
+
+* `partial_dL` on a section cut now corrects the in-plane orientations
+  too: each filament through a partial cell gets its own sub-prism
+  fills on a `(k, k, 1)` split (k along its length, over the two
+  half-cells it spans; k across in the plane; the section axis whole),
+  sampled 8 x 8 per sub-prism from the shape union (`_plane_weights`).
+  `_pair_correction` contracts per pair when the weight rows are many
+  (a tilted cut: one row per filament), and keeps the matrix-over-
+  unique-rows memo when they are few (cylinder, slab).
+* FOUND: stage B was attached on the LpPR and equipotential paths
+  only. The plain `LpRSolver` + `impedance_matrix` path -- the one the
+  ladder and the scratch study drive -- never carried it, for
+  cylinders either. `impedance_matrix` now builds it once per solver
+  and `_apply_Z` adds `jw dL i`. validate_partial's LpR-path numbers
+  moved at the 1e-4 level (Kelvin razor 3.1845 -> unchanged to 4
+  digits).
+* MEASURED, 45-degree bar at 8 across (validate_trace F and the
+  diagnostic), diagonal/aligned:
+
+         f        with B: R        L      | without: R        L
+         1e3      1.000808   0.997192     | 1.000808   0.997131
+         1e8      1.218540   0.990248     | 1.222532   0.989980
+         1e9      1.729056   0.983738     | 1.734824   0.983415
+
+  Stage B through the cut is real but SMALL on a trace: +0.006% in L
+  at DC, +0.03% at 1 GHz, -0.4% in R at 100 MHz. With the face rule
+  the edge links carry current in proportion to their face fill, so
+  the I^2 dL of the partial cells is second order in the fill; the
+  cylinder needed stage B (2.4% -> 0.9% in L) because its rim cells
+  carry the full axial current. The remaining -0.3% in L at 8 across
+  (-0.08% at 16) is not a partial-cell inductance effect; the
+  terminal's neglected mutual to the interior (port_impedance
+  docstring) on a staircased end cut is the likely owner, and it
+  converges with the pitch.
+* Gate: validate_trace A-F green at the phase-2 thresholds (DC L
+  <= 1.005 / 1.002, met at 0.9971 / 0.9992); validate_partial green;
+  full gate 46 pass / 0 skip / 0 fail, anchors bit-identical.
+* Ledger: src +58. Kept, flagged: the in-plane stage B costs ~50 lines
+  for a 1e-4 effect on traces; it is the consistent physics and the
+  cylinder's transverse filaments now get it too, but it is the first
+  candidate to strip if the count must come down.

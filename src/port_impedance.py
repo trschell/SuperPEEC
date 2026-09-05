@@ -1177,11 +1177,17 @@ class LpRSolver:
         im = self.chol(np.float32(np.imag(vec)))
         return np.float64(re) + 1j*np.float64(im)
 
+    dL_near = None      # stage-B partial-cell dL (impedance_matrix sets it)
+
     def _apply_Z(self, i):
         """Branch impedance ``Z i`` via the FMM (in place on the buffer)."""
         self.whole[:self.efgsize] = i
         self.M.traverseRL()
-        return self.whole[:self.efgsize]
+        if self.dL_near is None:
+            return self.whole[:self.efgsize]
+        # subpixel stage B on this path too (the LpPR and equipotential
+        # solvers carry the same term): the real geometry dL scaled jw
+        return self.whole[:self.efgsize] + self.M.jomega*(self.dL_near @ i)
 
     def _mesh_matvec(self, w):
         self.matvecs += 1
@@ -1567,6 +1573,9 @@ def impedance_matrix(model, M, solver, freq, current=1.0, weight='corner',
     Z = np.zeros((n, n), dtype=np.complex128)
     infos = []
     model.prepare(M, freq)
+    if getattr(model, 'cut', None) is not None and solver.dL_near is None:
+        from enrich import partial_dL
+        solver.dL_near = partial_dL(model, M)
     # Measurement weights, one per port, in compressed node ordering.
     # Frequency independent, so hoisted out of the solve loop.
     wts = [model.source_vector(M, k, 1.0, weight) for k in range(n)]
