@@ -8,6 +8,11 @@ A  an axis-aligned trace is BIT-IDENTICAL to the equivalent block:
 B  the sampled fill of a rotated bar sums to its true area w*L to
    1e-3 at 45 and 30 degrees (the staircase's -11% at 4 cells across
    is what the cut exists to remove).
+G  deep skin where it can be carried: the dogleg on the equipotential
+   path with enrich = "auto" (the section family on BOTH in-plane
+   orientations, the edge family anchored to the true edge replacing
+   the face-anchored modes on the edge cells) at 4 and 8 cells across,
+   100 MHz (h/delta 3.8 and 1.9), against the converged dogleg.
 C  the 45-degree ladder: one copper bar (100 x 50 um x 1.6 mm) at
    4/8/16 cells across the width, axis-aligned (the rotation-invariant
    reference; DC closed form to 1e-5) against the same bar at 45
@@ -59,12 +64,12 @@ MU0 = 4e-7*np.pi
 # Gate thresholds on the diagonal/aligned ratio by program phase
 # (docs/trace_plan.md section 7). PHASE is bumped as each phase closes;
 # a threshold of None is not yet gated.
-PHASE = 2
+PHASE = 3
 GATE = {                       # (nw, metric): {phase: max ratio}
     (8, 'R_dc'): {1: 1.01}, (16, 'R_dc'): {1: 1.005},
     (8, 'L_dc'): {2: 1.005}, (16, 'L_dc'): {2: 1.002},
-    (8, 'R_1e9'): {3: 1.10}, (16, 'R_1e9'): {3: 1.05},
-    (8, 'L_1e9'): {3: 1.005}, (16, 'L_1e9'): {3: 1.002},
+    # the 1e9 rows of part C run on the LpR path, which carries no
+    # modes: informational. The deep-skin gate is part G.
 }
 
 
@@ -239,10 +244,15 @@ def part_c():
                                 % (nw, metric, ratio, lim))
 
 
-def dogleg_doc(nw, freq, equipotential, pad_cells=6):
+PAD_M = 75e-6        # pad length in METRES (6 cells at 8 across), so the
+                     # geometry is the same at every pitch
+
+
+def dogleg_doc(nw, freq, equipotential, pad_m=PAD_M):
     """x pad, 45-degree run, x pad; ports on the pads' outer faces."""
     h = W/nw
     nt = int(round(T/h))
+    pad_cells = int(round(pad_m/h))
     # in-plane projection of the run, snapped to whole cells so the
     # far pad stays on-grid (the segment is exactly 45 degrees)
     run = round(LEN/float(np.sqrt(2.0))/h)*h
@@ -279,7 +289,7 @@ def part_d():
     nw, f = 8, 1e3
     h = W/nw
     run = round(LEN/float(np.sqrt(2.0))/h)*h*float(np.sqrt(2.0))
-    r_ref = (run + 2*6*h)/(SIGMA*W*T)        # pads + run, aligned bound
+    r_ref = (run + 2*PAD_M)/(SIGMA*W*T)      # pads + run, aligned bound
     for eq in (False, True):
         pr = sppeec_input.loads(dogleg_doc(nw, f, eq))
         m = pr.model()
@@ -299,7 +309,7 @@ def part_e():
     m = pr.model()
     h = W/nw
     margin = 2*h
-    i0, i1 = int(round(margin/h)), int(round((margin + 6*h)/h))
+    i0, i1 = int(round(margin/h)), int(round((margin + PAD_M)/h))
     j0 = int(round(margin/h))
     j1 = int(round((margin + W)/h))
     pad = np.asarray(m.fill)[i0:i1, j0:j1, :]
@@ -353,6 +363,42 @@ def part_f():
           abs(lb/la - 1) <= abs(l0/la - 1) + 1e-4)
 
 
+# The dogleg's converged R at 100 MHz (delta = 6.6 um): the plain
+# basis at 48 cells across (h/delta = 0.32), scratch/trace_skin.py,
+# 2026-09-05; the plain ladder 16/24/32/48 across read 2.341 / 2.278 /
+# 2.318 / 2.306 e-2 ohm (a +-1% staircase-parity wobble), L 1.153 nH.
+R_DOGLEG_1E8 = 2.3056e-2
+
+
+def part_g():
+    print("G: deep skin on the dogleg, equipotential path, enrich auto "
+          "(section on both in-plane orientations + the edge family)")
+    f = 1e8
+    for nw, tol in ((4, 0.04), (8, 0.04)):
+        rows = {}
+        for tag, enrich in (('plain', '"off"'), ('auto', '"auto"')):
+            doc = dogleg_doc(nw, f, True).replace('enrich = "off"',
+                                                  'enrich = %s' % enrich)
+            pr = sppeec_input.loads(doc)
+            m = pr.model()
+            M = pr.tree(m)
+            sw = pr.sweeper(m, M)
+            t0 = time.perf_counter()
+            Z, info = sw.solve(f)
+            rows[tag] = (float(np.real(np.atleast_2d(Z)[0, 0])),
+                         info.get('matvecs', -1), time.perf_counter() - t0)
+        rp, ra = rows['plain'][0], rows['auto'][0]
+        print('    nw=%d (h/delta %.1f): plain %.4e (%+.1f%%), auto %.4e '
+              '(%+.1f%%), %d mv, %.0f s'
+              % (nw, (W/nw)/6.6e-6, rp, 100*(rp/R_DOGLEG_1E8 - 1), ra,
+                 100*(ra/R_DOGLEG_1E8 - 1), rows['auto'][1], rows['auto'][2]))
+        check('nw=%d auto within %.0f%% of the converged dogleg' % (nw, 100*tol),
+              abs(ra/R_DOGLEG_1E8 - 1) < tol,
+              '%.4f' % (ra/R_DOGLEG_1E8))
+        check('nw=%d auto converged' % nw, rows['auto'][1] < 331,
+              '%d mv' % rows['auto'][1])
+
+
 def main():
     try:
         sppeec_input.loads(rotated_doc(4, 1e6, 45.0))
@@ -361,7 +407,7 @@ def main():
         print("SKIP: [[trace]] not parsed yet (%s) -- docs/trace_plan.md "
               "phase 1" % msg)
         return 0
-    for part in (part_a, part_b, part_c, part_d, part_e, part_f):
+    for part in (part_a, part_b, part_c, part_d, part_e, part_f, part_g):
         part()
     print("%d checks failed" % len(FAIL))
     for f in FAIL:

@@ -627,6 +627,83 @@ class SurfacePalette:
         return Wf, cmask & self.bnd[:, None]
 
 
+class EdgePalette:
+    """Per-entry weights on the IN-PLANE filaments of a section cut,
+    anchored to the true (tilted) edge: ``exp(-p d)`` and its two
+    tangential partners at the sub-prism centroids of a transverse
+    split, restricted to the metal sub-prisms and fill-weighted, as
+    :class:`SurfacePalette` does along a cylinder. Entries: filaments
+    of both in-plane orientations with an end cell within ``reach``
+    section-plane steps of a partial cell. The distance is taken at
+    the filament's midpoint (the shared face); the edge's run along
+    the filament is not resolved. A column for the exposed faces along
+    the section axis measured WORSE (+14% / +6% against +1% / +3%
+    without, docs/trace_plan.md phase 3): the shared families own
+    those faces. Its entries are EXCLUDED from the shared families."""
+    shared = False
+    moves = True
+
+    def __init__(self, cut, model, fil_axis, fil_cell, kk, reach):
+        import section
+        ax = int(cut['axis'])
+        t = [c for c in range(3) if c != ax]
+        d3 = np.asarray(model.d, dtype=float)
+        near = np.zeros(tuple(int(model.dims[c]) for c in t), dtype=bool)
+        for key, b in cut['cells'].items():
+            if b.min() < 1.0 - 1e-12:
+                near[key] = True
+        for _ in range(int(reach or 0)):
+            g = near.copy()
+            for a in (0, 1):
+                g |= np.roll(near, 1, axis=a) | np.roll(near, -1, axis=a)
+            near = g
+        fil_axis = np.asarray(fil_axis)
+        cells = np.asarray(fil_cell)
+        up = cells.copy()
+        up[np.arange(len(up)), fil_axis] += 1
+        hit = (near[cells[:, t[0]], cells[:, t[1]]]
+               | near[up[:, t[0]], up[:, t[1]]])
+        self.sel = np.flatnonzero(np.isin(fil_axis, t) & hit)
+        self.kk = kk
+        k = kk[0]*kk[1]
+        self.k = k
+        n = self.sel.size
+        self.fill = np.zeros((n, k))
+        self.d = np.zeros((n, k))
+        self.phi = np.zeros((n, k))
+        ns = 8
+        o = (np.arange(ns) + 0.5)/ns
+        for a in np.unique(fil_axis[self.sel]):
+            idx = np.flatnonzero(fil_axis[self.sel] == a)
+            split = Split.transverse(int(a), kk, d3)
+            lo, hi = split.boxes(cells[self.sel[idx]])
+            xs = lo[:, t[0], None, None] + (hi - lo)[:, t[0], None, None]*o[None, :, None]
+            ys = lo[:, t[1], None, None] + (hi - lo)[:, t[1], None, None]*o[None, None, :]
+            self.fill[idx] = section.inside(cut['shapes'], xs, ys).reshape(
+                idx.size, k, -1).mean(axis=2)
+            cx = 0.5*(lo + hi)
+            dd, pp = section.field(cut['shapes'], cx[:, t[0]], cx[:, t[1]])
+            self.d[idx] = dd.reshape(idx.size, k)
+            self.phi[idx] = pp.reshape(idx.size, k)
+        sup = self.fill > 1e-3
+        tot = self.fill.sum(axis=1)
+        self.G = np.where(tot[:, None] > 0,
+                          self.fill/np.maximum(tot, 1e-300)[:, None], 0.0)
+        self.rfac = np.where(sup, 1.0/np.where(sup, self.fill, 1.0), 0.0)
+
+    def weights(self, p):
+        n, k = self.fill.shape
+        Wf = np.zeros((n, k, SURFACE_KM))
+        cmask = np.zeros((n, SURFACE_KM), dtype=bool)
+        for f in range(n):
+            c = np.exp(-p*np.maximum(self.d[f], 0.0))*self.fill[f]
+            cols = np.stack([part for sh in (c, c*np.cos(self.phi[f]),
+                                             c*np.sin(self.phi[f]))
+                             for part in (sh.real, sh.imag)], axis=1)
+            Wf[f], cmask[f] = netzero_prune(cols, support=self.fill[f] > 1e-3)
+        return Wf, cmask
+
+
 class FixedPalette:
     """Frequency-independent per-entry weights tied into PATCH modes.
 
@@ -695,7 +772,7 @@ class Enrichment:
 
     def __init__(self, model, M, axis, fil_axis, fil_cell, kk, term=None,
                  rc=(3, 4), reach=0, use_fft=None, csr_max_gb=2.0,
-                 freq=None, palette=None):
+                 freq=None, palette=None, exclude=None):
         kk = ((int(kk), int(kk)) if np.isscalar(kk)
               else tuple(int(v) for v in kk))
         if min(kk) < 1 or max(kk) < 2:
@@ -716,23 +793,28 @@ class Enrichment:
             self.sel = np.flatnonzero(fil_axis == self.axis)
             self.cells = fil_cell[self.sel]
             tr = [c for c in range(3) if c != self.axis]
-            if spx is not None:
-                if int(spx['axis']) != self.axis:
-                    raise NotImplementedError(
-                        "surface modes: the terminal axis (%d) differs "
-                        "from the section axis (%d) -- the edge family "
-                        "is docs/trace_plan.md phase 3"
-                        % (self.axis, int(spx['axis'])))
+            if spx is not None and int(spx['axis']) == self.axis:
+                # current ALONG the section (a cylinder): modes anchored
+                # to the resolved surface
                 palette = SurfacePalette(spx, self.cells, tr, kk, model.dx,
                                          reach)
                 bnd = palette.bnd
             else:
+                # current ACROSS a section cut (a trace) takes the shared
+                # palette anchored to the cell faces, i.e. the staircase;
+                # the true-edge anchoring is the edge family
                 palette = ConductionPalette(
                     kk, (float(d3[tr[0]]), float(d3[tr[1]])))
                 bnd = (np.ones(self.sel.size, dtype=bool) if reach is None
                        else _near_surface(np.asarray(model.struc())
                                           .astype(bool), self.cells, tr,
                                           reach))
+                if exclude is not None:
+                    # entries another family owns (the edge family's:
+                    # true-edge modes REPLACE the face-anchored ones
+                    # there; stacked on top they measured +9% / +6%
+                    # against +1% / +3% replaced, docs/trace_plan.md)
+                    bnd &= ~np.isin(self.sel, exclude)
         else:
             self.sel = palette.sel
             self.cells = fil_cell[self.sel]
@@ -753,8 +835,9 @@ class Enrichment:
         self.whole = self.wholes.get(self.axis)
         self.tr = ([c for c in range(3) if c != self.axis]
                    if self.axis is not None else None)
-        self.dt = (self.split.d[self.tr[0]], self.split.d[self.tr[1]]) \
-            if self.split is not None else None
+        self.dt = ((self.split.d[self.tr[0]], self.split.d[self.tr[1]])
+                   if self.split is not None
+                   else (float(d3.max()), float(d3.max())))
         self._bnd = bnd
         self.G = getattr(palette, 'G', None)
         self._rfac = getattr(palette, 'rfac', None)
@@ -784,6 +867,13 @@ class Enrichment:
             self.agg = cand[np.unique(fb[same])]
         self.agg_cells = fil_cell[self.agg]
         self.agg_axis = fil_axis[self.agg]
+        if subset and self.G is not None:
+            # the palette's shares are per ENTRY; the aggregates are the
+            # wider set: uniform there, the entry's own shares where an
+            # aggregate is an entry
+            G = np.full((self.agg.size, self.k), 1.0/self.k)
+            G[np.searchsorted(self.agg, self.sel)] = self.G
+            self.G = G
         self.tables = PairTables()
         self._pairs = {}
         self._set_weights()
@@ -1318,9 +1408,9 @@ def check_request(req):
     if bad:
         raise ValueError("enrich: unknown key(s) %s -- allowed: %s"
                          % (sorted(bad), ', '.join(ENRICH_KEYS)))
-    if any(f not in ('section', 'corner')
+    if any(f not in ('section', 'corner', 'edge')
            for f in req.get('families', [])):
-        raise ValueError("enrich.families: 'section' and/or 'corner'")
+        raise ValueError("enrich.families: 'section', 'corner', 'edge'")
     k = req.get('k')
     if k is not None:
         if int(k) == 2:
@@ -1416,10 +1506,20 @@ def resolve(model, request, port_axis):
                            for c in tr)
             else:
                 fam.remove('section')
+    cyl = getattr(model, 'cut', None) is not None and \
+        model.cut['kind'] == 'section'
+    trace = cyl and int(model.cut['axis']) != int(port_axis)
+    if 'edge' in fam and not trace:
+        if explicit:
+            raise ValueError("enrich.families 'edge' needs a section cut "
+                             "the port current crosses (a [[trace]])")
+        fam.remove('edge')
+    if trace and not explicit and 'section' in fam and 'edge' not in fam:
+        fam.append('edge')          # the default on a trace
+    if 'edge' in fam and 'section' not in fam:
+        fam.remove('edge')          # rides on the section family's engagement
     rc = req.get('rc')
     if rc is None:
-        cyl = getattr(model, 'cut', None) is not None and \
-            model.cut['kind'] == 'section'
         rc = ((12, 16) if film else (3, 4) if cyl
               else _auto_rc(model.struc(), port_axis))
     rc = (int(rc[0]), int(rc[1]))
@@ -1435,13 +1535,48 @@ def build(model, M, fil_axis, fil_cell, term, cfg, verbose=False):
     object (an :class:`Enrichment` or a :class:`ModeStack`), or None."""
     red = None
     if cfg.kk is not None:
+        cut = getattr(model, 'cut', None)
+        trace = (cut is not None and cut['kind'] == 'section'
+                 and int(cut['axis']) != int(term.axis))
+        ep = None
+        if trace and 'edge' in cfg.families:
+            ep = EdgePalette(cut, model, fil_axis, fil_cell, (cfg.k, cfg.k),
+                             cfg.reach)
+        excl = None if ep is None else ep.sel
         with _spstatus.task('skin engine k=%d' % cfg.k):
             red = Enrichment(model, M, term.axis, fil_axis, fil_cell,
                              cfg.kk, term=term, rc=cfg.rc, reach=cfg.reach,
                              use_fft=cfg.use_fft, csr_max_gb=cfg.csr_max_gb,
-                             freq=cfg.f_ref)
+                             freq=cfg.f_ref, exclude=excl)
+        if trace:
+            # a trace: the current turns in the plane, so the OTHER
+            # in-plane orientation carries as much of it as the port's
+            # and gets the same shared family (its own split, the film
+            # rule applied to its own transverse axes)
+            other = [c for c in range(3)
+                     if c not in (int(cut['axis']), int(term.axis))][0]
+            fnorm = getattr(model, 'film_normal', None)
+            tr2 = [c for c in range(3) if c != other]
+            kk2 = tuple(cfg.k if (fnorm is None or c == int(fnorm)) else 1
+                        for c in tr2)
+            with _spstatus.task('skin engine, second orientation'):
+                fams = [red, Enrichment(model, M, other, fil_axis, fil_cell,
+                                        kk2, term=term, rc=cfg.rc,
+                                        reach=cfg.reach, use_fft=cfg.use_fft,
+                                        csr_max_gb=cfg.csr_max_gb,
+                                        freq=cfg.f_ref, exclude=excl)]
+            if ep is not None:
+                with _spstatus.task('edge family (%d entries)' % ep.sel.size):
+                    fams.append(Enrichment(model, M, None, fil_axis, fil_cell,
+                                           (cfg.k, cfg.k), palette=ep,
+                                           term=term, rc=cfg.rc, use_fft=False,
+                                           csr_max_gb=cfg.csr_max_gb,
+                                           freq=cfg.f_ref))
+            red = ModeStack(fams)
     if 'corner' in cfg.families:
         from cornermode import corner_palette
+        if isinstance(red, ModeStack):
+            raise NotImplementedError("corner modes on a trace model")
         # tabulate against the engine's single-axis coverage (axis 2 has
         # no in-plane modes) so the tables do not double count the
         # near-corner crowding the engine already fixes

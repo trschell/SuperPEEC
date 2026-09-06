@@ -224,7 +224,13 @@ written today still means the same thing after the next refactor.
     (12,16), with the mid-shell damage-zone fallback; (12,16) on
     declared films; (3,4) on cylinder fills. A block with `film = "z"`
     (the film normal) gets the 1-D film palette along the normal when
-    the port is in-plane. The CORNER family adds tabulated circulation
+    the port is in-plane. On a `[[trace]]` the section family covers
+    BOTH in-plane orientations and the EDGE family (`"edge"`, on by
+    default under `auto`) anchors the edge cells' modes to the true
+    tilted edge in place of the face-anchored ones: a 45-degree
+    dogleg's R at 100 MHz within 1.2% / 2.9% of its converged value at
+    4 / 8 cells across, where the plain basis is -39% / -4% and the
+    face-anchored modes alone +9% / +6%. The CORNER family adds tabulated circulation
     modes at 90-degree bends (3 solved amplitudes per corner, both
     in-plane orientations; AC-only by the DC-decoupling theorem). The
     shapes retune per solve frequency; the evidence for every rule is

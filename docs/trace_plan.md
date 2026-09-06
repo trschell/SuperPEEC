@@ -171,26 +171,35 @@ distinct ones (the cylinder's memo by weight triple is replaced by
 tables per separation and a k^2 product per pair; for a 10 mm trace at
 6 um pitch that is ~4e5 pairs, seconds).
 
-### 3.6 Skin (the edge family)
+### 3.6 Skin (the edge family) -- as built in phase 3
 
-An `EdgePalette` beside `SurfacePalette`: per-cell weights on the x and
-y filaments of cut cells (and within `reach`), sub-prism split
-`(kx, ky, kz)` = axial x transverse-in-plane x film-normal, weight
-columns `exp(-p d)` with d the signed distance to the section boundary
-at the sub-prism centre, times the film profile along z when the trace
-declares `film`, fill-weighted, net-zero pruned as today. Built as a
-subset `Enrichment` (explicit `sel`, `agg` found by neighbour search as
-the corner family does) and stacked by `ModeStack` on the shared
-section family. Two changes to the shared family fall out and are
-needed regardless of traces: `build()` constructs it for BOTH in-plane
-orientations when the film normal is declared (today: port axis only,
-so on a diagonal half the current carries no modes), and `resolve()`
-picks the section-cut radii (3, 4) for the new kind as it did for
-`cylinder`.
+`EdgePalette` (enrich.py): per-entry weights on the x and y filaments
+whose end cell lies within `reach` section-plane steps of a partial
+cell, on a `(k, k)` transverse split (in-plane x through-thickness),
+columns `exp(-p d)` and its two tangential partners with d the signed
+distance to the section boundary at the sub-prism centroid (the
+filament's midpoint), fill-weighted and net-zero pruned as the
+cylinder's surface palette. Built as a subset `Enrichment` (explicit
+`sel`, aggregates found by neighbour search) and stacked by
+`ModeStack` on the shared section family, which `build()` now
+constructs for BOTH in-plane orientations on a trace model (the port
+axis only before: half the current carried no modes).
 
-Whether the modes carry the tilted layer beyond the round wire's
-h/delta of 3 to 4 is the program's open question, and phase 3 measures
-it with a referee before assembling anything.
+The two design points the plan left open, both measured (phase 3
+log): the edge family REPLACES the face-anchored shared modes on its
+entries rather than adding to them (`Enrichment(exclude=...)`), and it
+carries no column for the exposed faces along the section axis (the
+shared families own those). `enrich = "auto"` includes the edge family
+on a trace model whenever the section family engages;
+`families = ["section", "edge"]` asks for it; `"edge"` on a model with
+no trace raises. The distance along the filament is not resolved
+(an axial split would be the next refinement; not needed at h/delta
+<= 4 by the measurements).
+
+Not done: the plan's 2-D Galerkin referee. The direct ladder (the
+dogleg against its own converged value) was cheaper and answered the
+same question with the real operator; the referee pattern stays
+available if the axial question is ever opened.
 
 ### 3.7 What v1 refuses
 
@@ -309,8 +318,11 @@ ledger and the phase log here.
     phase   metric                 nw=8      nw=16
     1       DC R ratio             <= 1.01   <= 1.005   (face rule; was 1.06 / 1.015)
     2       DC L ratio             <= 1.005  <= 1.002
-    3       1e9 R ratio            referee-set; target <= 1.10, <= 1.05
-    3       1e9 L ratio            <= 1.005  <= 1.002
+    3       dogleg R at 100 MHz vs its converged value (validate_trace G,
+            equipotential, enrich auto): within 4% at 4 and 8 across
+            (h/delta 3.8 and 1.9), solve converged. The 1e9 rows of
+            part C run on the LpR path, which carries no modes, and
+            are informational.
 
 ## 8. Beyond this program
 
@@ -328,6 +340,7 @@ Separate plan when this one closes.
     0       2026-09-05   24707   12471        9593      validate_trace.py skeleton (+321)
     1       2026-09-05   24985   12486        9593      section.py 260 (pieces, field, painter, face fills); the cylinder painter left sppeec_input; enrich/voxmodel/port_impedance small
     2       2026-09-05   25043   12529        9593      _plane_weights + per-pair contraction (+50), stage B on the LpR path (+8); validate_trace F (+43)
+    3       2026-09-05   25178   12575        9593      EdgePalette (+75), two-orientation shared family + exclude + the edge hook in build (+45), resolve rules; validate_trace G (+46)
 
 ## 10. Phase log
 
@@ -442,3 +455,55 @@ Separate plan when this one closes.
   for a 1e-4 effect on traces; it is the consistent physics and the
   cylinder's transverse filaments now get it too, but it is the first
   candidate to strip if the count must come down.
+
+### Phase 3 (2026-09-05)
+
+The instrument. The bare bar's mixed-orientation end cut lives on the
+prescribed-current LpR path, which carries no modes, so deep skin
+was measured on the DOGLEG (x pad 75 um, 45-degree run ~1.6 mm, x
+pad) on the equipotential path, against the dogleg's own converged
+value: the plain basis at 48 cells across (h/delta = 0.32) at 100 MHz
+(delta = 6.6 um). The straight bar is not the target here -- the two
+bends cost real resistance in the skin regime, and the shared family
+on the straight bar is itself unreliable above h/delta ~6 (its 1 GHz
+R moved 50% between 4 and 8 across). The plain ladder 16 / 24 / 32 /
+48 across read 2.341 / 2.278 / 2.318 / 2.306 e-2 ohm (a +-1%
+staircase-parity wobble), L 1.153 nH. An earlier ladder with pads of
+6 CELLS was not one geometry (the pads shrank with the pitch, 2.5% of
+R between 16 and 48 across); `validate_trace.PAD_M` fixes the pad in
+metres.
+
+Steps, dogleg R at 100 MHz as a fraction of the converged 2.306e-2:
+
+    cells across (h/delta)     4 (3.8)    8 (1.9)    16 (0.95)
+    plain basis                 0.609      0.960      1.015
+    shared family, x only       (raises before phase 3)
+    shared families x + y       1.094      1.057      stall (331 mv)
+    + edge family, stacked      1.121      1.068
+    + edge family, REPLACING    1.012      1.029      stall (331 mv)
+    + z-face column (replacing) 1.143      1.058
+
+* The face-anchored shared modes converge to the STAIRCASE answer
+  (the perimeter sqrt(2) too long): +9% / +6%, worse with refinement
+  in the wrong direction. Stacking true-edge modes on top of them
+  does not help (+12% / +7%): the solve keeps both. Replacing them on
+  the edge cells is the design: +1.2% / +2.9% at h/delta 3.8 / 1.9,
+  where the plain basis is -39% / -4%. A column for the exposed z
+  faces in the edge palette is worse again; the shared families own
+  those faces.
+* ENGINE FINDING, out of scope, recorded: at h/delta ~ 1 (16 across
+  at 100 MHz) the shared section family stalls at the 331-matvec cap
+  on the straight bar (one family; R came out NEGATIVE) and on the
+  dogleg alike. The engagement rule (2 dx / delta > 1) engages there
+  with k = 7. The plain basis is within 1.5% at that pitch, so the
+  fix is a rule, not a basis; it belongs to the enrichment engine's
+  docket, with this measurement.
+* `EdgePalette`, `Enrichment(exclude=)`, the two-orientation shared
+  family, `resolve` rules (`edge` auto on traces, refused without a
+  trace, dropped with the section family below engagement),
+  `_surface_geometry` unchanged; `SPPEEC_EDGE_*` experiment flags
+  removed after the measurement.
+* validate_trace G: dogleg plain and auto at 4 and 8 across against
+  the recorded reference, 4% band, convergence checked; the 1e9 rows
+  of C are informational (LpR path). Gate: full gate 46 pass / 0 skip / 0 fail, anchors bit-identical.
+* Ledger: src +135 (EdgePalette 75).
