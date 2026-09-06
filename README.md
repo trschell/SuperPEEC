@@ -373,7 +373,9 @@ The tables:
 The full set of rules — including the conventions that make results
 refinement-stable — is `docs/input_doctrine.md`, and `examples/`
 contains runnable inputs from a three-wire power module to dispersive
-plate capacitors and a superconducting bar.
+plate capacitors, a superconducting bar and a 45-degree PCB trace
+(`diagonal_trace.toml`: a `[[trace]]` between two pads, the section
+cut and the edge family of `docs/trace_plan.md`).
 
 ## License
 

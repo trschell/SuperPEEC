@@ -248,19 +248,22 @@ PAD_M = 75e-6        # pad length in METRES (6 cells at 8 across), so the
                      # geometry is the same at every pitch
 
 
-def dogleg_doc(nw, freq, equipotential, pad_m=PAD_M):
-    """x pad, 45-degree run, x pad; ports on the pads' outer faces."""
+def dogleg_doc(nw, freq, equipotential, pad_m=PAD_M, angle_deg=45.0):
+    """x pad, a run of ~LEN at ``angle_deg``, x pad; ports on the pads'
+    outer faces. The run's x and y projections are snapped to whole
+    cells so the far pad stays on-grid (exactly 45 degrees at 45; a
+    few tenths of a degree off at other angles)."""
     h = W/nw
     nt = int(round(T/h))
     pad_cells = int(round(pad_m/h))
-    # in-plane projection of the run, snapped to whole cells so the
-    # far pad stays on-grid (the segment is exactly 45 degrees)
-    run = round(LEN/float(np.sqrt(2.0))/h)*h
+    a = np.deg2rad(angle_deg)
+    rx = round(LEN*float(np.cos(a))/h)*h
+    ry = round(LEN*float(np.sin(a))/h)*h
     pad = pad_cells*h
     margin = 2*h
     x0, y0 = margin, margin + W/2
     x1 = x0 + pad
-    x2, y2 = x1 + run, y0 + run
+    x2, y2 = x1 + rx, y0 + ry
     x3 = x2 + pad
     n1 = int(np.ceil((x3 + margin)/h))
     n2 = int(np.ceil((y2 + W/2 + margin)/h))
@@ -285,21 +288,25 @@ def dogleg_doc(nw, freq, equipotential, pad_m=PAD_M):
 
 
 def part_d():
-    print("D: the dogleg with pads, both port paths")
+    print("D: the dogleg with pads, both port paths, 45 and 30 degrees")
     nw, f = 8, 1e3
     h = W/nw
-    run = round(LEN/float(np.sqrt(2.0))/h)*h*float(np.sqrt(2.0))
-    r_ref = (run + 2*PAD_M)/(SIGMA*W*T)      # pads + run, aligned bound
-    for eq in (False, True):
-        pr = sppeec_input.loads(dogleg_doc(nw, f, eq))
-        m = pr.model()
-        M = pr.tree(m)
-        sw = pr.sweeper(m, M)
-        Z = sw.solve(f)
-        r = float(np.real(np.atleast_2d(Z)[0, 0]))
-        check('%s path: DC R within 6%% of the aligned bound'
-              % ('equipotential' if eq else 'prescribed'),
-              abs(r/r_ref - 1) < 0.06, 'R/R_ref = %.4f' % (r/r_ref))
+    for ang in (45.0, 30.0):
+        a = np.deg2rad(ang)
+        rx = round(LEN*float(np.cos(a))/h)*h
+        ry = round(LEN*float(np.sin(a))/h)*h
+        run = float(np.hypot(rx, ry))
+        r_ref = (run + 2*PAD_M)/(SIGMA*W*T)  # pads + run, aligned bound
+        for eq in (False, True):
+            pr = sppeec_input.loads(dogleg_doc(nw, f, eq, angle_deg=ang))
+            m = pr.model()
+            M = pr.tree(m)
+            sw = pr.sweeper(m, M)
+            Z = sw.solve(f)
+            r = float(np.real(np.atleast_2d(Z)[0, 0]))
+            check('%g deg, %s path: DC R within 6%% of the aligned bound'
+                  % (ang, 'equipotential' if eq else 'prescribed'),
+                  abs(r/r_ref - 1) < 0.06, 'R/R_ref = %.4f' % (r/r_ref))
 
 
 def part_e():

@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: MIT
+# A DIAGONAL TRACE: an x pad, a 45-degree run of 1.6 mm and an x pad,
+# 100 um wide, 50 um thick copper at 12.5 um pitch (8 cells across).
+# The run is a [[trace]] (docs/trace_plan.md): a polyline centreline
+# with a width; its edge cells are SECTION CUTS with exact fills, the
+# in-plane filaments take the conductance of the face they cross, and
+# under enrichment the edge cells' modes anchor to the true tilted
+# edge (the EDGE family, on by default) while the section family runs
+# on both in-plane orientations. The pads are [[block]]s the trace
+# ends inside (the union rule: a block-whole cell is never carved),
+# and the ports sit on the pads' outer x faces, so the equipotential
+# terminal stays single-axis.
+# Expect: DC R within 0.7% of the aligned bound rho*L/(W*T); at 100 MHz
+# (h/delta = 1.9) R within ~3% of the dogleg's converged value, where
+# the plain basis (enrich = "off") is 4% low and would be 39% low at
+# 25 um pitch. Measured 2026-09-05 (validate_trace parts D and G).
+
+[grid]
+dims  = [107, 103, 4]
+pitch = 12.5e-6
+
+[[block]]
+name   = "pad_in"
+from_m = [25e-6, 25e-6, 0.0]
+to_m   = [100e-6, 125e-6, 50e-6]
+sigma  = 5.8e7
+
+[[trace]]
+name    = "run45"
+path_m  = [[100e-6, 75e-6], [1237.5e-6, 1212.5e-6]]
+width_m = 100e-6
+z_m     = [0.0, 50e-6]
+sigma   = 5.8e7
+
+[[block]]
+name   = "pad_out"
+from_m = [1237.5e-6, 1162.5e-6, 0.0]
+to_m   = [1312.5e-6, 1262.5e-6, 50e-6]
+sigma  = 5.8e7
+
+[port]
+equipotential = true
+p_faces = [[2, 2, 0, "-x"], [2, 2, 1, "-x"], [2, 2, 2, "-x"], [2, 2, 3, "-x"],
+           [2, 3, 0, "-x"], [2, 3, 1, "-x"], [2, 3, 2, "-x"], [2, 3, 3, "-x"],
+           [2, 4, 0, "-x"], [2, 4, 1, "-x"], [2, 4, 2, "-x"], [2, 4, 3, "-x"],
+           [2, 5, 0, "-x"], [2, 5, 1, "-x"], [2, 5, 2, "-x"], [2, 5, 3, "-x"],
+           [2, 6, 0, "-x"], [2, 6, 1, "-x"], [2, 6, 2, "-x"], [2, 6, 3, "-x"],
+           [2, 7, 0, "-x"], [2, 7, 1, "-x"], [2, 7, 2, "-x"], [2, 7, 3, "-x"],
+           [2, 8, 0, "-x"], [2, 8, 1, "-x"], [2, 8, 2, "-x"], [2, 8, 3, "-x"],
+           [2, 9, 0, "-x"], [2, 9, 1, "-x"], [2, 9, 2, "-x"], [2, 9, 3, "-x"]]
+n_faces = [[104, 93, 0, "+x"], [104, 93, 1, "+x"], [104, 93, 2, "+x"], [104, 93, 3, "+x"],
+           [104, 94, 0, "+x"], [104, 94, 1, "+x"], [104, 94, 2, "+x"], [104, 94, 3, "+x"],
+           [104, 95, 0, "+x"], [104, 95, 1, "+x"], [104, 95, 2, "+x"], [104, 95, 3, "+x"],
+           [104, 96, 0, "+x"], [104, 96, 1, "+x"], [104, 96, 2, "+x"], [104, 96, 3, "+x"],
+           [104, 97, 0, "+x"], [104, 97, 1, "+x"], [104, 97, 2, "+x"], [104, 97, 3, "+x"],
+           [104, 98, 0, "+x"], [104, 98, 1, "+x"], [104, 98, 2, "+x"], [104, 98, 3, "+x"],
+           [104, 99, 0, "+x"], [104, 99, 1, "+x"], [104, 99, 2, "+x"], [104, 99, 3, "+x"],
+           [104, 100, 0, "+x"], [104, 100, 1, "+x"], [104, 100, 2, "+x"], [104, 100, 3, "+x"]]
+
+[solve]
+freq   = [1e5, 1e6, 1e7, 1e8]
+enrich = "auto"

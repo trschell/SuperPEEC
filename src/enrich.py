@@ -917,8 +917,9 @@ class Enrichment:
         self.freq = freq
         p, self._z = self._model.material_response(freq)
         # Retune the shapes only where the family would ENGAGE at this
-        # frequency (a transverse cell over half the decay length,
-        # 2 dx Re(p) > 1). Below that the modes carry no current by
+        # frequency (a transverse cell over the decay length,
+        # dx Re(p) > 1; the same threshold as resolve). Below that the
+        # modes carry little current by
         # design, and retuned shapes are the wrong thing to give them:
         # at dx/delta = 0.5 the real and imaginary parts of one face
         # exponential are both nearly linear, the pruned basis is
@@ -927,7 +928,7 @@ class Enrichment:
         # commit back to the original engine). The f_ref shapes stay.
         dtm = max(self.dt) if self.dt else 0.0
         moved = (self.palette.moves and p != self._p
-                 and 2.0*dtm*np.real(p) > 1.0)
+                 and dtm*np.real(p) > 1.0)
         if moved:
             self._p = p
             self._set_weights()
@@ -1443,9 +1444,10 @@ def resolve(model, request, port_axis):
     degrading. Returns an :class:`EnrichConfig` or ``None``.
 
     THE RULES. The section family engages when a transverse cell
-    exceeds half the length the current varies on (the skin depth at
-    ``f_ref``, or lambda), and its quadrature is k = min(12, max(7,
-    ceil(2 dx/length))) -- a sub-bar no coarser than half that length
+    exceeds the length the current varies on (the skin depth at
+    ``f_ref``, or lambda; half that length until 2026-09-05, which
+    stalled the solve between the two), and its quadrature is k =
+    min(12, max(7, ceil(2 dx/length))) -- a sub-bar no coarser than half that length
     (k is quadrature, km drives cost; measured +4 delivered points at
     dx/delta = 6 for k 7 -> 12). A given ``k`` is honoured (k = 2 is
     refused: a 2x2 split cannot express "more current at the edges
@@ -1499,8 +1501,16 @@ def resolve(model, request, port_axis):
             dtc = float(d3[int(fnorm)]) if film else max(float(d3[c])
                                                           for c in tr)
             if k is None:
+                # ENGAGE at dx > the length (was 2 dx > length until
+                # 2026-09-05): between dx/length 0.5 and 1 the pruned
+                # face exponentials are nearly degenerate and the
+                # Krylov stalled at the cap (a 16-across bar at
+                # dx/delta 0.95, straight or bent; the diagonal-trace
+                # example at 0.6), while the plain basis is within ~2%
+                # there (validate_partial's Kelvin razor at dx/delta 1:
+                # 1.1%). k is unchanged: min(12, max(7, ceil(2 dx/length))).
                 k = (int(min(12, max(7, np.ceil(2*dtc/length))))
-                     if 2*dtc/length > 1 else 1)
+                     if dtc/length > 1 else 1)
             if k > 1:
                 kk = tuple(k if (not film or c == int(fnorm)) else 1
                            for c in tr)

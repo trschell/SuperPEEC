@@ -143,3 +143,30 @@ nm film at 30 nm pitch vs the same film at 15 nm): R error 16.67% ->
 0.00%, L error 2.42% -> 0.30%. The RSFQ XNOR at pz = 67.5 nm has 13
 distinct fills (all n/27) and 706254 partial cells; the memoised
 correction takes 15.9 s and 1.74 GB CSR.
+
+## Traces: the section cut and the edge family (docs/trace_plan.md)
+
+A tilted edge on the voxel lattice, 2026-09-05. The 45-degree bar
+ladder against the same bar axis-aligned (rotation invariance is the
+reference; validate_trace C, prescribed-current path, no modes):
+staircase DC R 1.420 / 1.132 / 1.029 at 4 / 8 / 16 cells across;
+exact cell fills with the per-cell 1/fill rule 1.144 / 1.065 / 1.034
+(FIRST order: every in-plane link joins cells of unequal fill); the
+FACE rule (a filament takes the conductance of the face it crosses)
+1.0093 / 1.0008 / 1.0007. Stage B through the cut is +0.006% in L.
+
+Deep skin on the 45-degree dogleg (equipotential path, 100 MHz,
+against the dogleg's converged plain-basis value at 48 across):
+
+    cells across (h/delta)      4 (3.8)    8 (1.9)
+    plain basis                  0.609      0.960
+    face-anchored shared modes   1.094      1.057   (the staircase answer)
+    + true-edge modes stacked    1.121      1.068
+    + true-edge modes REPLACING  1.012      1.029   (shipped)
+    + a z-face column            1.143      1.058
+
+Face-anchored modes converge to the staircase perimeter; the edge
+family must replace them on the edge cells, not join them. At
+h/delta ~ 1 (16 across) the shared section family stalls at the
+matvec cap, straight bar or dogleg alike -- an engagement-rule item
+on the enrichment docket.

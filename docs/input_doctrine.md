@@ -210,7 +210,7 @@ written today still means the same thing after the next refactor.
 
         [solve.enrich]
         families = ["section", "corner"]   # default ["section"]
-        k        = 7        # sub-bars per split axis; auto = min(12, max(7, ceil(2 dx/delta)))
+        k        = 7        # sub-bars per split axis; auto = min(12, max(7, ceil(2 dx/delta))), engaged at dx > delta
         reach    = 0        # cells beyond the exposed layer that carry modes; "all"
         rc       = [6, 8]   # coupling radii (mode-mode, mode-aggregate); auto = width-scaled
         f_ref    = 1e9      # shape reference frequency; auto = sweep maximum

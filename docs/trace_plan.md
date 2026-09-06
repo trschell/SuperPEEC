@@ -1,8 +1,10 @@
 # Diagonal traces: the section-cut program
 
-Status: PLAN, 2026-09-04. Nothing built. Phases run one at a time on
-the user's go, each closed by the validator gate and a ledger entry,
-as docs/enrichment_plan.md was.
+Status: PHASES 0-4 COMPLETE, 2026-09-05 (phase 5 deferred). Phases ran
+one at a time on the user's go, each closed by the validator gate and
+a ledger entry, as docs/enrichment_plan.md was. Sections 1-3 are the
+design as planned; section 3.4 and 3.6 carry the phase-1 and phase-3
+revisions; section 10 is the record.
 
 ## 1. The problem, measured
 
@@ -341,6 +343,7 @@ Separate plan when this one closes.
     1       2026-09-05   24985   12486        9593      section.py 260 (pieces, field, painter, face fills); the cylinder painter left sppeec_input; enrich/voxmodel/port_impedance small
     2       2026-09-05   25043   12529        9593      _plane_weights + per-pair contraction (+50), stage B on the LpR path (+8); validate_trace F (+43)
     3       2026-09-05   25178   12575        9593      EdgePalette (+75), two-orientation shared family + exclude + the edge hook in build (+45), resolve rules; validate_trace G (+46)
+    4       2026-09-05   25188   12582        9593      engagement threshold (comments), validate_trace D at two angles; examples/diagonal_trace.toml
 
 ## 10. Phase log
 
@@ -507,3 +510,49 @@ Steps, dogleg R at 100 MHz as a fraction of the converged 2.306e-2:
   the recorded reference, 4% band, convergence checked; the 1e9 rows
   of C are informational (LpR path). Gate: full gate 46 pass / 0 skip / 0 fail, anchors bit-identical.
 * Ledger: src +135 (EdgePalette 75).
+
+### Phase 4 (2026-09-05)
+
+* `examples/diagonal_trace.toml`: the dogleg at 12.5 um pitch (8
+  across), equipotential port on the pads, `enrich = "auto"`, sweep
+  1e5..1e8. 107 x 103 x 4 cells; wall 8:16, peak RSS 7.4 GB on the
+  12-core box; R 6.108e-3 / 6.161e-3 / 8.531e-3 / 2.372e-2 ohm, L
+  1.256 / 1.254 / 1.219 / 1.158 nH at 1e5 / 1e6 / 1e7 / 1e8, all
+  points converged (30 / 37 / 56 / 170 matvecs) -- after the rule
+  change below; before it the 1e7 point stalled.
+* validate_trace D now runs the dogleg at 45 AND ~30 degrees (the
+  run's projections snapped to whole cells), both port paths: DC R
+  within 0.09% / 0.72% (45) and 0.08% / 0.76% (30) of the aligned
+  bound.
+* THE MIXED-ORIENTATION FACE PORT STAYS. The plan's default was to
+  drop it if a pad port made it redundant; the bare-end port and the
+  pad port agree at DC (1.0008 vs 1.0009 of the aligned bound at 8
+  across), so it IS redundant for users -- but validate_trace C, the
+  rotation-invariance ladder with an exact reference, is built on it
+  (the pad geometry has bends and no exact reference), and that ladder
+  is the program's cleanest gate. 18 lines, validated by
+  validate_port_impedance; kept for the instrument, not for users. The
+  doctrine does not advertise it.
+* THE ENGINE STALL, FIXED (a doctrine amendment, flagged): the
+  example's 10 MHz point stalled at the 331-matvec cap (residual
+  0.98) -- dx/delta = 0.6 there, the same stall as the 16-across bar
+  at 0.95 in phase 3 and the equibar's low points before the
+  enrichment plan's retune fix. The engagement threshold moves from
+  2 dx > length to dx > length, for both the build (`resolve`) and
+  the per-frequency retune (`Enrichment.set_frequency`); k is
+  unchanged. Evidence: between dx/length 0.5 and 1 the pruned face
+  exponentials are nearly degenerate (the enrichment plan's own
+  finding at 0.5) and the plain basis is within ~2% there
+  (validate_partial's Kelvin razor at dx/delta 1: 1.1%), so the modes
+  buy nothing and cost a stall. Verified: validate_superconductor,
+  validate_equiterminal, validate_enrich, validate_aniso,
+  validate_input_lppr green; equibar converges at every point (13 /
+  23 / 28 / 112 / 202 matvecs, the 1e8 and 1e9 points still engaged
+  and unchanged); the example's 1e7 point 331 -> 56 matvecs. The
+  16-across straight bar of phase 3 now takes the plain basis at
+  dx/delta 0.95 by the same rule.
+  The scratch instruments (scratch/diagonal_bar.py, trace_skin.py)
+  are superseded by validate_trace C and G and stay local.
+* Gate: full gate 46 pass / 0 skip / 0 fail, anchors bit-identical.
+* Phases 0-4 complete; phase 5 (section + slab in one model, the
+  sub-bar edge resistance, traces with normal x or y) stays deferred.
