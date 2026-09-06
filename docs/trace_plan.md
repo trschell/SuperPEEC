@@ -556,3 +556,37 @@ Steps, dogleg R at 100 MHz as a fraction of the converged 2.306e-2:
 * Gate: full gate 46 pass / 0 skip / 0 fail, anchors bit-identical.
 * Phases 0-4 complete; phase 5 (section + slab in one model, the
   sub-bar edge resistance, traces with normal x or y) stays deferred.
+
+### Post-program: the rotated square loop (2026-09-05)
+
+The user's original reference geometry, driven by the mixed-
+orientation face port (scratch/rotated_loop.py, local): a square
+loop, 1 mm centreline side, 100 x 50 um copper trace, 100 um gap in
+the middle of one side, as ONE [[trace]] polyline with four mitred
+corners; the same loop rotated 45 degrees about its centre at the
+same pitch. The unrotated loop lands on cell boundaries (no cut
+record, a plain block model); the rotated one is section cuts all
+round. Port = the gap: every boundary face of a metal cell whose
+outside neighbour lies in the gap region, x and y faces alike on the
+rotated loop. Prescribed-current LpR path (no modes; fills, the face
+rule and stage B on). Rotated / unrotated, every solve converged to
+~1e-13:
+
+    cells across        4                 8                 16
+    f       h/delta   R_r/R_u  L_r/L_u  R_r/R_u  L_r/L_u  R_r/R_u  L_r/L_u
+    1 kHz   --        1.0020   0.9917   1.0015   0.9986   0.9993   0.9984
+    10 MHz  1.2/.6/.3 1.1011   0.9855   1.0218   0.9977   1.0060   0.9980
+    100 MHz 3.8/1.9/1 2.1955   0.9539   1.3136   0.9904   1.0858   0.9957
+
+DC is rotation-invariant to 0.2% at 4 cells across the trace, with
+four 45-degree mitred corners and a staircased gap port, and to 0.1%
+at 16; L within 1% from 8 across. The skin rows are the base lattice
+alone (this path carries no modes): the ratio's excess falls ~second
+order in the pitch at fixed h/delta (100 MHz: 1.20 / 0.31 / 0.086),
+the same law as the bar ladder. The rotated loop's solves take 4-10x
+the matvecs of the unrotated (197-564 vs 8-81 at 8 across and up):
+the sliver faces' small conductances condition the system worse; a
+cost, not an accuracy item. The enrichment path (phase 3's edge
+family) needs a single-axis port and so a pad at the gap; a loop
+"identical in all respects" cannot reach it -- the pad variant is the
+follow-up if the skin rows are wanted with modes.
