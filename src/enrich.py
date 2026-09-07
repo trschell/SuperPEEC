@@ -1259,10 +1259,11 @@ class ModeStack:
             for b in range(a + 1, len(self.fam)):
                 A, B = self.fam[a], self.fam[b]
                 radius = max(A._rc[0], B._rc[0])
-                fa, fb = neighbour_pairs(A.cells, radius,
-                                         other=B.cells.astype(float))
-                same = A.fax[fa] == B.fax[fb]
-                fa, fb = fa[same], fb[same]
+                with _spstatus.task('cross pairs %d-%d' % (a, b)):
+                    fa, fb = neighbour_pairs(A.cells, radius,
+                                             other=B.cells.astype(float))
+                    same = A.fax[fa] == B.fax[fb]
+                    fa, fb = fa[same], fb[same]
                 self._raw[a, b] = (fa, fb)
         self._restack()
 
@@ -1284,15 +1285,31 @@ class ModeStack:
                     s = np.flatnonzero(A.fax[fa] == ax)
                     D, inv = unique_separations(B.cells[fb[s]] - A.cells[fa[s]])
                     T = A.tables(A.splits[ax], B.splits[ax], D)
-                    vals[s] = np.einsum('apm,apq,aqr->amr', Wa[s], T[inv],
-                                        Wb[s])
-                rows = np.broadcast_to(
-                    fa[:, None, None]*A.km + np.arange(A.km)[None, :, None],
-                    vals.shape).ravel()
-                cols = np.broadcast_to(
-                    fb[:, None, None]*B.km + np.arange(B.km)[None, None, :],
-                    vals.shape).ravel()
-                Z = sp.csr_matrix((vals.ravel(), (rows, cols)), shape=Z.shape)
+                    # per SEPARATION, two matmuls: a per-pair copy of
+                    # the k x k table (``T[inv]``, 3.5 GB at 180k pairs
+                    # and k = 49) with a looped three-operand einsum
+                    # measured +4.6 GB and 71 s per cross block on the
+                    # diagonal-trace example; this is ~0 GB and seconds
+                    with _spstatus.task('cross fold %d-%d (%d pairs, k %d)'
+                                        % (a, b, s.size, T.shape[1])):
+                        order = np.argsort(inv, kind='stable')
+                        bnds = np.searchsorted(inv[order],
+                                               np.arange(D.shape[0] + 1))
+                        for d in range(D.shape[0]):
+                            g = order[bnds[d]:bnds[d + 1]]
+                            if g.size == 0:
+                                continue
+                            sg = s[g]
+                            X = np.matmul(np.swapaxes(Wa[sg], 1, 2), T[d])
+                            vals[sg] = np.matmul(X, Wb[sg])
+                with _spstatus.task('cross csr %d-%d' % (a, b)):
+                    rows = np.broadcast_to(
+                        fa[:, None, None]*A.km + np.arange(A.km)[None, :, None],
+                        vals.shape).ravel()
+                    cols = np.broadcast_to(
+                        fb[:, None, None]*B.km + np.arange(B.km)[None, None, :],
+                        vals.shape).ravel()
+                    Z = sp.csr_matrix((vals.ravel(), (rows, cols)), shape=Z.shape)
             Z = A._fold_modes(Z.tocsr(), False) if A.P is not None or \
                 A.nmode != A.nmode_full else Z
             Z = (Z @ B.P if B.P is not None

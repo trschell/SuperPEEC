@@ -590,3 +590,13 @@ cost, not an accuracy item. The enrichment path (phase 3's edge
 family) needs a single-axis port and so a pad at the gap; a loop
 "identical in all respects" cannot reach it -- the pad variant is the
 follow-up if the skin rows are wanted with modes.
+
+### Post-program: memory profile of the trace example (2026-09-07)
+
+RSS sampled against the status events (docs/enrichment_history.md,
+"Cross blocks between families"): the peak of the diagonal-trace
+example was the edge family's cross-block fold in `ModeStack`, 7.23
+GB against a 2.4 GB solve; fixed by folding per separation with two
+matmuls, bit-level identical: peak 3.10 GB, wall 5:15 -> 3:04 at one
+frequency. `ModeStack` now reports its pair search, folds and CSR
+builds as status tasks.

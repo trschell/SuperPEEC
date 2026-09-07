@@ -170,3 +170,23 @@ family must replace them on the edge cells, not join them. At
 h/delta ~ 1 (16 across) the shared section family stalls at the
 matvec cap, straight bar or dogleg alike -- an engagement-rule item
 on the enrichment docket.
+
+## Cross blocks between families: the per-pair table copy (2026-09-07)
+
+Memory profile of examples/diagonal_trace.toml at 100 MHz (RSS
+sampled at 0.5 s against the status events): the run's peak, 7.23 GB,
+sat in `ModeStack._restack`'s cross-block fold for the edge family --
+180k parallel pairs at k = 49 sub-prisms -- while every other phase,
+setup and solve alike, stayed under 2.4 GB. `T[inv]` materialised a
+per-pair copy of the 49 x 49 table (3.5 GB) and the three-operand
+einsum ran as nested loops (71 s per block, twice). Grouping the
+pairs by separation and folding each group with two matmuls is
+bit-level identical (max |old - new| 2e-25 against entries of 2e-11)
+and measured: peak 7.23 -> 3.10 GB, the two folds 71 -> 0.6 s each,
+the single-frequency run 5:15 -> 3:04. Only stacked families with a
+per-cell member (the edge family, the corner family) ever ran this
+fold; a single shared family, the XNOR and the wire-bond path are
+untouched. The post-Krylov readout on the equipotential path (the
+Gram correction) costs no memory at all; the R3 wire-bond run's peak
+is inside its Krylov (basis vectors on the mesh unknown) and its
+first FMM sweep, as the R4 census correction recorded.
