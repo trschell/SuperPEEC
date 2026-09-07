@@ -43,12 +43,16 @@ solver's `.vti`/`.vtp` exports.*
   the causal Djordjevic–Sarkar wideband-Debye dispersion model;
   two-fluid London superconductors (kinetic inductance, VoxHenry's
   material law).
-* Subpixel geometry: round conductors (`[[cylinder]]`) voxelized
-  with per-cell fill fractions — partial-cell resistance is exact
-  (staircase DC error collapses 11.6% -> ~1% on a 3-cell-radius
-  wire) and a sparse exact-integral correction does the same for
-  the near-field inductance, leaving the FFT/FMM structure
-  untouched.
+* Subpixel geometry: round conductors (`[[cylinder]]`) and routed
+  traces at any angle (`[[trace]]`) voxelized with per-cell fill
+  fractions — partial-cell resistance is exact (staircase DC error
+  collapses 11.6% -> ~1% on a 3-cell-radius wire; a 45-degree trace's
+  DC R lands within 0.1% of the same trace axis-aligned at 8 cells
+  across) and a sparse exact-integral correction does the same for
+  the near-field inductance, leaving the FFT/FMM structure untouched.
+  Under enrichment a trace's edge cells carry skin modes anchored to
+  the true tilted edge (R at 100 MHz within 1–3% of the converged
+  value at 2–4 cells per skin depth).
 * Bond wires as polylines or splines: validated round-wire
   cross-section model,
   wire–wire and wire–plane proximity, and a lattice-Green's-function
@@ -199,6 +203,44 @@ is the flagship with all eight bonds as splines;
 `validation/validate_spline.py` gates the handle identity, the
 interpolation, the direction sense, the sagitta and the cost claim.
 
+### Diagonal traces
+
+A trace that is not axis-aligned is a `[[trace]]`: a centreline, a
+width and a z extent. The staircase a voxel lattice would otherwise
+make of it costs +42% in DC resistance at 4 cells across the trace
+and +3% at 16; with the section cut the same trace is within 1% at 4
+and 0.1% at 8 (`validation/validate_trace.py`, the 45-degree bar
+against itself axis-aligned).
+
+```toml
+[[block]]                       # an x pad the trace ends inside
+from_m = [25e-6, 25e-6, 0.0]
+to_m   = [100e-6, 125e-6, 50e-6]
+sigma  = 5.8e7
+
+[[trace]]
+path_m  = [[100e-6, 75e-6], [1237.5e-6, 1212.5e-6]]   # 45 degrees
+width_m = 100e-6
+z_m     = [0.0, 50e-6]
+sigma   = 5.8e7
+
+[port]                          # on the pads' outer x faces
+equipotential = true
+p_faces = [[2, 2, 0, "-x"], ...]
+n_faces = [[104, 93, 0, "+x"], ...]
+
+[solve]
+freq   = [1e5, 1e6, 1e7, 1e8]
+enrich = "auto"                 # section + edge families on a trace
+```
+
+`examples/diagonal_trace.toml` is that file in full: 8 cells across
+the trace, 8 minutes and 7.4 GB for four frequencies. Bends are
+extra points in `path_m`; a closed loop is a path that returns to
+its start with a gap where the port goes. The design, the
+measurements behind every rule and what v1 leaves out are in
+`docs/trace_plan.md`.
+
 ### Blender
 
 `--export-glb` answers a different question from the ParaView export.
@@ -348,6 +390,23 @@ The tables:
   (dielectric; add `dispersion = "djordjevic"` and `f_ref` for the
   causal wideband model), `lambda_l` (London depth — a
   superconductor, alone or two-fluid with `sigma`).
+* `[[cylinder]]` — a round conductor along a lattice axis: `axis`,
+  `center` (the two transverse coordinates, metres), `radius`,
+  `sigma`, optional `from`/`to` (cells) or `from_m`/`to_m` span. Its
+  boundary cells carry exact fill fractions (the section cut below).
+* `[[trace]]` — a routed film trace at any angle in the xy plane:
+  `path_m` (the centreline as a list of `[x, y]` points, metres),
+  `width_m`, `z_m = [z_lo, z_hi]` (the copper's z extent, whole
+  cells), `sigma`, optional `film = "z"` and `name`. Bends are
+  mitred; a run along x or y is cell-for-cell a `[[block]]`. Cells
+  the edge crosses are SECTION CUTS: exact fills, in-plane filaments
+  at the conductance of the face they cross, the same near-field
+  inductance correction as the cylinder, and under enrichment modes
+  anchored to the true edge. A trace ending inside a `[[block]]` pad
+  leaves the pad whole (a cell any primitive fills whole is never
+  carved), and the ports go on the pad's axis-aligned faces. v1
+  limits: the copper thickness must be whole cells, and traces do
+  not combine with off-grid blocks or with `[[wire]]`.
 * `[[wire]]` — a bond wire as a polyline: `points` (list of 3-D
   coordinates; first and last are the bond contacts, whose pad feet
   are found automatically), `radius`, `sigma`, and optional
