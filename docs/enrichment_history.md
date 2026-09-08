@@ -237,3 +237,35 @@ a real-rate palette has no re/im degeneracy and never stalled, so
 London models keep the half-length threshold; the XNOR's L moved
 1.66421 -> 1.67061 pH without its modes, 0.4%, the localised-to-vias
 effect recorded in the film program).
+
+## The XNOR census, and the symmetric half of the spectra (2026-09-07)
+
+memcensus over the BUILT equipotential solver of examples/rsfq_xnor
+(7.16 GB resident, 7.51 GB walked): mode spectra Fu + Fc 1.74 GB (the
+London film palette prunes to km = 2, so the "19.8 GB" the build_fft
+docstring once quoted belonged to an earlier palette), loop basis
+1.30, Gram/GeoMG hierarchy 1.24, M2L top spectra 0.66, tree and model
+1.1. The Krylov-phase peak (24.4 GB) is therefore ~17 GB ABOVE the
+built solver: the lazily allocated FMM leaf buffers and the Krylov
+basis, the R4 mechanism (docs/memory_census_r4.md). Census AFTER one
+matvec: +7.6 GB resident (7.17 -> 14.81), of which the six leaf gather
+buffers (`_ynmr_g` / `_mfil_g`, complex64 already) are 5.5 GB and
+allocator retention ~2; the Krylov phase then adds ~9.6 GB more. That
+last block is NOT mostly the basis (complex64 at rtol 1e-4, inner_m
+10): tracemalloc on the trace example puts the mode-FFT apply's
+transient at ~30 padded-grid slabs, and on the XNOR one complex128
+slab is 0.58 GB -- U (km slabs), F, acc, accf, the scatter buffer and
+the ifft outputs, all complex128 while the spectra they multiply are
+complex64. A complex64 apply with preallocated accumulators is the
+next lever on this model (~2-3 GB), ahead of anything on disk.
+
+The mode-mode spectra are now stored as their upper triangle:
+reciprocity gives Bu[d, m, n] = Bu[-d, n, m] and the kernels are
+real, so the spectrum of block (n, m) is the conjugate of block
+(m, n); km(km+1)/2 + km spectra in place of km^2 + km (on the trace
+example's km = 16 family: 136 + 16 spectra for 256 + 16, Fu 0.13 GB
+for 0.26). Z moves at 3e-7, the complex64 rounding of the spectra
+themselves. XNOR: Fu 1.16 -> 0.87 GB, run peak 24.4 -> 24.1 GB, L
+1.66421 pH unchanged -- small there because km = 2; on a normal-metal
+film family (km 16) it is the difference between 272 and 152 padded
+slabs.

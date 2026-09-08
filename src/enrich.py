@@ -1115,8 +1115,9 @@ class Enrichment:
         spectrum serves correlation and convolution). Tabulated only
         over separations that can occur (stencil clipped to the grid),
         built one kernel at a time and stored single precision -- the
-        spectra ARE the allocation (km^2 x pad complex, 19.8 GB on the
-        RSFQ XNOR) and are smooth mutual inductances far from float32's
+        spectra ARE the allocation (km(km+1)/2 + km of them, each the
+        padded grid complex; km^2 + km before 2026-09-07) and are smooth
+        mutual inductances far from float32's
         floor; ``SPPEEC_MODE_FP64=1`` for A/B. Whole-bounding-box, so
         box-proportional rather than occupancy-proportional."""
         import os
@@ -1143,7 +1144,18 @@ class Enrichment:
                      + idx[:, 2])
         dt = (np.complex128 if os.environ.get('SPPEEC_MODE_FP64') == '1'
               else np.complex64)
-        self.Fu = np.empty((km, km) + self.pad, dtype=dt)
+        # UPPER TRIANGLE ONLY (2026-09-07): reciprocity gives
+        # Bu[d, m, n] = Bu[-d, n, m], and the kernels are real, so the
+        # spectrum of block (n, m) is the conjugate of block (m, n).
+        # km(km+1)/2 spectra in place of km^2 -- the spectra are the
+        # allocation on a large film model.
+        self._iu = np.zeros((km, km), dtype=np.int64)
+        q = 0
+        for m in range(km):
+            for n2 in range(m, km):
+                self._iu[m, n2] = self._iu[n2, m] = q
+                q += 1
+        self.Fu = np.empty((q,) + self.pad, dtype=dt)
         self.Fc = np.empty((km,) + self.pad, dtype=dt)
         wrap = tuple(np.mod(D[:, a], self.pad[a]) for a in range(3))
         slab = np.zeros(self.pad)
@@ -1151,10 +1163,10 @@ class Enrichment:
             slab[...] = 0.0
             slab[wrap] = Bc[:, m]
             self.Fc[m] = sfft.fftn(slab)
-            for n2 in range(km):
+            for n2 in range(m, km):
                 slab[...] = 0.0
                 slab[wrap] = Bu[:, m, n2]
-                self.Fu[m, n2] = sfft.fftn(slab)
+                self.Fu[self._iu[m, n2]] = sfft.fftn(slab)
         del slab
         self._sfft = sfft
 
@@ -1187,7 +1199,10 @@ class Enrichment:
         for m in range(km):
             acc = self.Fc[m].conj()*F               # correlation
             for n2 in range(km):
-                acc += self.Fu[m, n2].conj()*U[n2]
+                # block (m, n2) is stored for n2 >= m; below the
+                # diagonal it is the conjugate of the stored (n2, m)
+                Fmn = self.Fu[self._iu[m, n2]]
+                acc += (Fmn.conj() if n2 >= m else Fmn)*U[n2]
             out_u[m::km] = self._gather(sfft.ifftn(acc))
         accf = np.zeros(self.pad, dtype=np.complex128)
         for m in range(km):
