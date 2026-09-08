@@ -27,7 +27,8 @@ import os as _os
 # docs/memory_census_r4.md missed them: it walks the BUILT solver,
 # before any matvec exists. Measured at R4 they are the single largest
 # store in the whole run, 10.09 GB in six complex128 arrays (e/f/g x
-# _mfil_g/_ynmr_g, 25 harmonics per filament), taking the true peak
+# _ynmr_g, 25 harmonics per filament; one buffer for both operators
+# since 2026-09-08), taking the true peak
 # from the census's 9.45 GB to 18.15.
 #
 # THE DYNAMIC-RANGE TRAP -- the same one validate_mid_fp32 documents
@@ -337,6 +338,7 @@ class LeafLevel(Level):
             m0 = 1/(4*np.pi * eps0)
         else:
             m0 = mu0/(4*np.pi)*self.l[axis]**2
+        self._m0 = float(m0)      # p2m reads the L2P gather through it
         rfil = np.sqrt(posfilx**2 + posfily**2 + posfilz**2)
         # An element can sit EXACTLY at the box expansion centre --
         # possible only with MIXED leaf parities (both transverse axes
@@ -388,16 +390,22 @@ class LeafLevel(Level):
         # operator columns are gathered ONCE into a group-contiguous
         # copy so the loop body is a pure slice + gemv, bit-identical
         # to the old arithmetic (same per-group columns, same dot).
-        if getattr(self, '_mfil_g', None) is None:
-            self._mfil_g, self._mfil_s = _gather_single(
-                self.mfil, self.idx, 1)
+        # ONE gathered buffer serves both operators (2026-09-08): in the
+        # FMM harmonic convention Y_n^{-m} = conj(Y_n^m), so
+        # mfil = conj(ynmr)^T / m0 exactly (measured to 5e-15 on R3),
+        # and the P2M gemv runs TRANSPOSED on the L2P gather with a
+        # conjugated input -- BLAS takes the transpose without a copy.
+        # Two buffers were 5.5 GB of the RSFQ XNOR's 23.5 GB peak.
+        if getattr(self, '_ynmr_g', None) is None:
+            self._ynmr_g, self._ynmr_s = _gather_single(
+                self.ynmr, self.idx, 0)
         i0 = self.idx0
-        sc = self._mfil_s
+        sc = self._ynmr_s/self._m0
         for group in range(msize):
             a, b = i0[group], i0[group+1]
             if b > a:
-                self.above.data[group, :] += sc*np.dot(
-                    self._mfil_g[:, a:b], self.data[a:b])
+                self.above.data[group, :] += sc*np.conj(np.dot(
+                    self._ynmr_g[a:b, :].T, np.conj(self.data[a:b])))
 
     def l2p(self):
         """Local-to-particle: evaluate each box's local expansion at sources.

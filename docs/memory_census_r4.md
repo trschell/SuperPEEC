@@ -288,3 +288,15 @@ count × tree depth, not cells). The build-peak overhang
 Projected to the larger rungs (these transients scale with
 filaments): R5 peak ~93 → **~83–85 GB**; R6 projected peak ~490 →
 **~430–445 GB** — the 624 GB hero node's margin widens accordingly.
+
+> **ONE GATHER BUFFER (2026-09-08).** The P2M table is the conjugate
+> transpose of the L2P table divided by m0 -- in the FMM harmonic
+> convention Y_n^{-m} = conj(Y_n^m), measured to 5e-15 on R3 for all
+> three orientations -- so `p2m` now runs its gemv TRANSPOSED on the
+> single L2P gather (`_ynmr_g`) with a conjugated input, and
+> `_mfil_g` no longer exists. Three complex64 buffers in place of six:
+> R3 peak 5.49 -> 5.29 GB (its buffers were 335 MB); RSFQ XNOR peak
+> 23.47 -> 21.04 GB, L 1.66421 pH and 137 matvecs unchanged (the six
+> were 5.5 GB of its peak). R3's
+> R 0.00504333, L 2.0089e-08, 143 matvecs and wire shares reproduce
+> the recorded run to every printed digit.
