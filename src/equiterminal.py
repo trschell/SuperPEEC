@@ -1621,11 +1621,20 @@ class EquiTerminalSolver:
             # Cholesky, v-cycle accurate with GeoMG/BlockAMG), so the
             # readout is corrected by (Y^T ihat) . G^-1 d and its error
             # drops from O(|r|) to O(|r| x precond defect).
+            # ONE Gram solve per solver (2026-09-07): G is symmetric, so
+            # (Y^T ihat) . G^-1 d = a . d with a = G^-1 Y^T ihat, and a
+            # is GEOMETRIC (ihat is the tree route, proportional to the
+            # current). Solved once at the first readout, to 1e-4: the
+            # readout error is |r| x (Gram defect), so 1e-4 puts it
+            # four decades under the mesh residual; the old per-
+            # frequency solve to 1e-2 x rtol was 1044 s and the memory
+            # peak of the RSFQ XNOR. Every later frequency pays a dot.
             with _spstatus.task('readout: gram correction'):
+                if getattr(self, '_gram_a', None) is None:
+                    self._gram_a = self._gram_solve(
+                        self.YT.dot(ihat)/current, tol=1e-4, rtol=rtol)
                 d = self.YT.dot(zi)
-                c = self._gram_solve(d, rtol=rtol)
-                v = ((np.dot(ihat, zi)
-                      - np.dot(self.YT.dot(ihat), c))/current)
+                v = (np.dot(ihat, zi) - current*np.dot(self._gram_a, d))/current
         info = dict(matvecs=self.matvecs - n0, flag=flag, residual=resid,
                     time=time.perf_counter() - t0)
         if self.verbose:
@@ -1721,15 +1730,49 @@ class EquiTerminalSolver:
         if nd == 0:
             return c0
         n = d.size
-        Gop = LinearOperator((n, n), matvec=lambda x: self.YT.dot(self.Y.dot(x)),
-                             dtype=np.complex128)
-        Pop = LinearOperator((n, n), matvec=self._precond, dtype=np.complex128)
-        c, flag = lgmres(Gop, d, x0=c0, M=Pop, rtol=tol, inner_m=10,
-                         outer_k=3, maxiter=maxiter)
-        r0 = np.linalg.norm(d - Gop.matvec(c0))
-        r1 = np.linalg.norm(d - Gop.matvec(c))
+        # The mode tail of the basis is an identity block, orthogonal to
+        # every loop column, so the Gram is block-diagonal with an
+        # IDENTITY mode block: the correction's mode part is d itself,
+        # and only the loop block needs the solve. Every Krylov vector
+        # is then loop-sized -- on the RSFQ XNOR the modes are 24M of
+        # 32M columns, and this readout set the run's memory high-water
+        # mark (2026-09-07 profile: +7 GB over the Krylov's own peak).
+        nl = n - self.nu
+        if self.nu and getattr(self, '_Yl', None) is None:
+            # the loop columns and their nonzero rows only (the mode
+            # rows of a loop column are zero): a 4.5M-row operator in
+            # place of the 28.5M-row padded one on the XNOR
+            self._Yl = sp.csr_matrix(self.Y[:self.efg + self.term.n, :nl])
+            self._YlT = self._Yl.T.tocsr()
+        Yl, YlT = ((self._Yl, self._YlT) if self.nu else (self.Y, self.YT))
+
+        def gram(x):
+            return YlT.dot(Yl.dot(x))
+
+        def pre(v):
+            if not self.nu:
+                return self._precond(v)
+            # the Gram Cholesky alone: the mode preconditioner is the
+            # mesh system's inverse, not the Gram's, and its input here
+            # would be zero anyway
+            vp = np.zeros(n, dtype=np.complex128)
+            vp[:nl] = v
+            re = self.chol(np.float32(np.real(vp)))
+            im = self.chol(np.float32(np.imag(vp)))
+            return (np.float64(re[:nl]) + 1j*np.float64(im[:nl]))
+
+        Gop = LinearOperator((nl, nl), matvec=gram, dtype=np.complex128)
+        Pop = LinearOperator((nl, nl), matvec=pre, dtype=np.complex128)
+        cl, flag = lgmres(Gop, d[:nl], x0=c0[:nl], M=Pop, rtol=tol,
+                          inner_m=10, outer_k=3, maxiter=maxiter)
+        c = np.concatenate([cl, d[nl:]])
+        c0 = np.concatenate([c0[:nl], d[nl:]])
+        full = LinearOperator((n, n), matvec=lambda x: self.YT.dot(self.Y.dot(x)),
+                              dtype=np.complex128)
+        r0 = np.linalg.norm(d - full.matvec(c0))
+        r1 = np.linalg.norm(d - full.matvec(c))
         self._readout_gram = (r0/nd, r1/nd, int(flag), float(tol))
-        if min(r0, r1) > 1e-4*nd:
+        if min(r0, r1) > 10*tol*nd:
             import warnings
             warnings.warn("port-voltage readout: Gram solve reached only "
                           "%.1e relative (target %g) -- the extracted Z "

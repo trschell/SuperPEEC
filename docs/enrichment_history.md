@@ -190,3 +190,50 @@ untouched. The post-Krylov readout on the equipotential path (the
 Gram correction) costs no memory at all; the R3 wire-bond run's peak
 is inside its Krylov (basis vectors on the mesh unknown) and its
 first FMM sweep, as the R4 census correction recorded.
+
+## The RSFQ XNOR memory profile and the Gram readout (2026-09-07)
+
+RSS sampled at 1 s against the status events, examples/rsfq_xnor.toml
+at 10 GHz (film modes on M0-M7, k = 7, rc (12, 16)), GPU on:
+
+    phase                        dur s   RSS@start   max    RSS@end   (GB)
+    setup (spectra, precond)      1171      0.75    10.83     9.05
+    krylov, 137 matvecs           1912     15.78    24.35    22.86
+    readout: gram correction      1044     16.36    26.87    17.20   <- the peak
+
+The post-Krylov Gram correction, lgmres on Y^T Y over the WHOLE
+basis, set the run's high-water mark (2.5 GB over the Krylov's own)
+and took a third of the solve. Two facts make it unnecessary at that
+size: the mode columns are unit vectors orthogonal to every loop
+column, so the Gram is block-diagonal with an IDENTITY mode block
+(the correction's mode part is d itself), and the mode
+preconditioner is the mesh system's inverse, not the Gram's (its
+single apply left a Gram residual of 744% on the trace example that
+lgmres then iterated down to 3e-7). Solving the loop block only, with
+the mode part exact: loop-sized Krylov vectors (24M of the XNOR's 32M
+columns are modes), first-guess residual 3e-8 on the trace example
+with lgmres returning at once, Z identical to 12 digits. XNOR
+measurement with the loop-block readout, loop columns and their
+nonzero rows sliced out of the basis once (`_Yl`), the Cholesky alone
+as the preconditioner: readout 1044 -> 667 s, its high-water mark
+26.87 -> 24.11 GB, the run's peak 26.87 -> 24.36 GB (now the
+Krylov's own), L 1.66421 pH unchanged. Two more steps the same day:
+(1) the correction is a . d with a = G^-1 Y^T ihat, and a is
+GEOMETRIC (the tree route scales with the current), so it is solved
+ONCE per solver and every frequency's readout is a dot product -- on
+one and the same solution vector the a-form and the c-form agree to
+all 12 printed digits; (2) that one solve targets 1e-4: the readout
+error is |r| x (Gram defect), so 1e-4 already sits four decades under
+the mesh residual, where the old per-frequency target of 1e-2 x rtol
+chased accuracy the solution does not have. XNOR with both:
+readout 1044 -> 28 s, its high-water mark 26.87 -> 18.90 GB, the
+solve phase 3004 -> 2190 s, L 1.66421 pH and 137 matvecs unchanged;
+the run's peak is the Krylov's 24.4 GB.
+
+Without modes the XNOR's peak was the same readout (15.2 -> 21.1 GB,
+153 s; the mode-less run exists because the phase-4 engagement
+threshold had switched the London film modes off at dz/lambda 0.75 --
+a real-rate palette has no re/im degeneracy and never stalled, so
+London models keep the half-length threshold; the XNOR's L moved
+1.66421 -> 1.67061 pH without its modes, 0.4%, the localised-to-vias
+effect recorded in the film program).

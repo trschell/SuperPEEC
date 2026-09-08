@@ -1462,8 +1462,9 @@ def resolve(model, request, port_axis):
 
     THE RULES. The section family engages when a transverse cell
     exceeds the length the current varies on (the skin depth at
-    ``f_ref``, or lambda; half that length until 2026-09-05, which
-    stalled the solve between the two), and its quadrature is k =
+    ``f_ref``; half that length until 2026-09-05, which stalled the
+    solve between the two) -- or half of lambda on a London model,
+    whose real-rate palette has no such degeneracy -- and its quadrature is k =
     min(12, max(7, ceil(2 dx/length))) -- a sub-bar no coarser than half that length
     (k is quadrature, km drives cost; measured +4 delivered points at
     dx/delta = 6 for k 7 -> 12). A given ``k`` is honoured (k = 2 is
@@ -1526,8 +1527,14 @@ def resolve(model, request, port_axis):
                 # example at 0.6), while the plain basis is within ~2%
                 # there (validate_partial's Kelvin razor at dx/delta 1:
                 # 1.1%). k is unchanged: min(12, max(7, ceil(2 dx/length))).
+                # A LONDON profile (real rate, no re/im pair) has no such
+                # degeneracy and never stalled: the RSFQ XNOR at dz/lambda
+                # 0.75 converged in 137 matvecs WITH modes and moved 0.4%
+                # without them (2026-09-07). Real rate keeps 2 dx > length.
+                real_rate = getattr(model, 'superconductor', False)
+                thr = 0.5 if real_rate else 1.0
                 k = (int(min(12, max(7, np.ceil(2*dtc/length))))
-                     if dtc/length > 1 else 1)
+                     if dtc/length > thr else 1)
             if k > 1:
                 kk = tuple(k if (not film or c == int(fnorm)) else 1
                            for c in tr)

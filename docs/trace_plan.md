@@ -600,3 +600,15 @@ GB against a 2.4 GB solve; fixed by folding per separation with two
 matmuls, bit-level identical: peak 3.10 GB, wall 5:15 -> 3:04 at one
 frequency. `ModeStack` now reports its pair search, folds and CSR
 builds as status tasks.
+
+### Post-program correction: the London engagement threshold (2026-09-07)
+
+The phase-4 amendment (engage at dx > length) had switched the RSFQ
+XNOR's London film modes off: dz/lambda = 0.75 there. The stall the
+amendment fixed is the complex-rate degeneracy of a normal-metal
+palette; a London profile (real rate) has no re/im pair and never
+stalled (137 matvecs with modes). London models keep the half-length
+threshold (`resolve`: thr = 0.5 on a superconductor); the XNOR's L
+had moved 1.66421 -> 1.67061 pH (0.4%) without its modes. Same
+profile session: the post-Krylov Gram readout was the XNOR's memory
+peak; solved on the loop block only (docs/enrichment_history.md).
