@@ -1142,6 +1142,7 @@ class Enrichment:
         idx = self.cells - self.org
         self.gidx = ((idx[:, 0]*self.grid[1] + idx[:, 1])*self.grid[2]
                      + idx[:, 2])
+        self._g3 = (idx[:, 0], idx[:, 1], idx[:, 2])
         dt = (np.complex128 if os.environ.get('SPPEEC_MODE_FP64') == '1'
               else np.complex64)
         # UPPER TRIANGLE ONLY (2026-09-07): reciprocity gives
@@ -1170,46 +1171,69 @@ class Enrichment:
         del slab
         self._sfft = sfft
 
-    def _scatter(self, v):
-        flat = np.zeros(int(np.prod(self.grid)), dtype=np.complex128)
-        flat[self.gidx] = v
-        g = np.zeros(self.pad, dtype=np.complex128)
-        g[:self.grid[0], :self.grid[1], :self.grid[2]] = \
-            flat.reshape(self.grid)
-        return g
+    def _scatter(self, v, out):
+        """``v`` (filament values) into the padded slab ``out`` (zeroed
+        here) in the slab's own dtype, by the filaments' 3-D indices --
+        no grid-sized temporary (a reshape of the sub-block copies)."""
+        out[...] = 0.0
+        out[self._g3] = v
+        return out
 
     def _gather(self, g):
-        return g[:self.grid[0], :self.grid[1],
-                 :self.grid[2]].reshape(-1)[self.gidx]
+        return g[self._g3]
 
     def apply_fft(self, u, i_f):
         """Mode blocks by convolution: ``(Zuu u + Zcross i_f, Zcross' u)``.
         A masked mode set is expanded with zeros here and compressed on
-        the way out."""
+        the way out.
+
+        Work slabs are allocated PER CALL and freed on return -- km + 3
+        of them, reused within the call by in-place products -- not
+        cached across matvecs: cached slabs measured +2.9 GB resident
+        through the RSFQ XNOR's Krylov for no change in the peak
+        (2026-09-08). They stay complex128 although the spectra are
+        complex64: single-precision FFTs of the Krylov vectors measured
+        +23% / +11% matvecs on the trace example at 4 / 8 across for Z
+        within 3e-6 (``SPPEEC_MODE_APPLY_FP32=1`` opts in for A/B)."""
         sfft = self._sfft
         km = self.km
+        import os
+        dt = (self.Fu.dtype if os.environ.get('SPPEEC_MODE_APPLY_FP32') == '1'
+              else np.complex128)
         masked = self.nmode != self.nmode_full
         if masked:
             uf = np.zeros(self.nmode_full, dtype=np.complex128)
             uf[self.mode_mask] = u
             u = uf
-        U = np.stack([sfft.fftn(self._scatter(u[m::km])) for m in range(km)])
-        F = sfft.fftn(self._scatter(i_f))
+        U = np.empty((km,) + self.pad, dtype=dt)
+        F = np.empty(self.pad, dtype=dt)
+        acc = np.empty(self.pad, dtype=dt)
+        tmp = np.empty(self.pad, dtype=dt)
+        for m in range(km):
+            U[m] = sfft.fftn(self._scatter(u[m::km], tmp), overwrite_x=True)
+        F[...] = sfft.fftn(self._scatter(i_f, tmp), overwrite_x=True)
         out_u = np.empty(u.size, dtype=np.complex128)
         for m in range(km):
-            acc = self.Fc[m].conj()*F               # correlation
+            np.conjugate(self.Fc[m], out=acc)
+            acc *= F                                # correlation
             for n2 in range(km):
                 # block (m, n2) is stored for n2 >= m; below the
                 # diagonal it is the conjugate of the stored (n2, m)
                 Fmn = self.Fu[self._iu[m, n2]]
-                acc += (Fmn.conj() if n2 >= m else Fmn)*U[n2]
-            out_u[m::km] = self._gather(sfft.ifftn(acc))
-        accf = np.zeros(self.pad, dtype=np.complex128)
-        for m in range(km):
-            accf += self.Fc[m]*U[m]                 # convolution
+                if n2 >= m:
+                    np.conjugate(Fmn, out=tmp)
+                    tmp *= U[n2]
+                else:
+                    np.multiply(Fmn, U[n2], out=tmp)
+                acc += tmp
+            out_u[m::km] = self._gather(sfft.ifftn(acc, overwrite_x=True))
+        np.multiply(self.Fc[0], U[0], out=acc)      # convolution
+        for m in range(1, km):
+            np.multiply(self.Fc[m], U[m], out=tmp)
+            acc += tmp
         if masked:
             out_u = out_u[self.mode_mask]
-        return out_u, self._gather(sfft.ifftn(accf))
+        return out_u, self._gather(sfft.ifftn(acc, overwrite_x=True)).astype(np.complex128)
 
     # -- preconditioning -------------------------------------------------
 

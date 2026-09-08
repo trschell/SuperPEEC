@@ -256,8 +256,37 @@ last block is NOT mostly the basis (complex64 at rtol 1e-4, inner_m
 transient at ~30 padded-grid slabs, and on the XNOR one complex128
 slab is 0.58 GB -- U (km slabs), F, acc, accf, the scatter buffer and
 the ifft outputs, all complex128 while the spectra they multiply are
-complex64. A complex64 apply with preallocated accumulators is the
-next lever on this model (~2-3 GB), ahead of anything on disk.
+complex64. Built the next day (2026-09-08): `apply_fft` scatters by
+3-D index into km + 3 slabs allocated per call and reused within it
+by in-place products (a reshape of the padded slab's sub-block
+copies -- the first version wrote into that copy and moved Z by 5%).
+The slabs stay complex128: single-precision FFTs of the Krylov
+vectors measured +23% / +11% matvecs on the trace example at 4 / 8
+across for Z within 3e-6 (`SPPEEC_MODE_APPLY_FP32=1` opts in for
+A/B). A version that CACHED the slabs across matvecs measured +2.9 GB
+resident through the XNOR's Krylov for a peak of 24.15 GB against
+24.08 -- more memory for nothing, withdrawn before commit. XNOR with
+the per-call version: peak 24.08 -> 23.47 GB, the Krylov's starting
+residency 16.5 -> 15.5, the solve phase 2059 -> 1957 s, L and
+matvecs unchanged -- the grid-sized copies the old scatter and
+gather made on every call, and the in-place products. The
+extrapolation was wrong: on the trace example the
+padded slab is 2 MB and the transient tracemalloc saw was vector-
+sized arrays, not slabs, so "30 slabs" scaled the wrong thing. The
+Krylov-phase excess on the XNOR (~8 GB over the built solver plus
+its leaf buffers) was then measured directly (scratch/
+xnor_matvec_profile.py: tracemalloc plus a 20 ms RSS sampler around
+each operation, from a resident 17.8 GB after two matvecs): the full
+matvec peaks +0.7 GB, the mode-block apply +0.4, the preconditioner
++0.55, the bare FMM sweep +0.15 -- every operation's transient is
+under a gigabyte. The Krylov phase's remaining ~6 GB is therefore the
+Krylov's OWN storage: at rtol 1e-4 the vectors are complex64, 155 MB
+each on the XNOR, and lgmres at inner_m 10 with outer_k 3 keeps
+about thirty of them plus the solver's working vectors. That knob is
+doctrine (inner_m 10 was decided with the user as the efficient
+point), not a bug: inner_m 5 would return ~2 GB for more matvecs.
+The apply change is kept: cleaner, no slower, and its prediction is
+recorded as a miss.
 
 The mode-mode spectra are now stored as their upper triangle:
 reciprocity gives Bu[d, m, n] = Bu[-d, n, m] and the kernels are
