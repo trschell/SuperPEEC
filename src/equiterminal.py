@@ -828,7 +828,11 @@ class EquiTerminalSolver:
             vals += [1.0, -1.0]
         Bt = sp.coo_matrix((vals, (rows, cols)),
                            shape=(nt, nn + 2)).tocsr()
-        Bi = sp.hstack([self.B, sp.csr_matrix((efg, 2))], format='csr')
+        # B is dropped after the first assembly (it is Baug's first efg
+        # rows); a REBUILD (the km-change path) reads it back from there
+        B = (self.B if self.B is not None
+             else self.Baug[:efg, :self.nnode])
+        Bi = sp.hstack([B, sp.csr_matrix((efg, 2))], format='csr')
         blocks = [Bi, Bt]
         if self.nu:
             # redistribution modes carry ZERO net current, so their
@@ -914,7 +918,10 @@ class EquiTerminalSolver:
                                       sp.identity(self.nu, format='csr')],
                                      format='csr')], format='csc')
         self.Y = sp.csc_matrix(Y)
-        self.YT = self.Y.T.tocsc()
+        # Y^T is a CSR VIEW of Y's own arrays (scipy transposes CSC to
+        # CSR without a copy); the separate CSC copy it used to be was
+        # 0.49 GB on the RSFQ XNOR (2026-09-08)
+        self.YT = self.Y.T
         self.meshsize = self.Y.shape[1]
         # Cycle rank of the augmented graph: edges - nodes + COMPONENTS.
         # The single-conductor case had components = 1 hard-coded; with
@@ -973,7 +980,11 @@ class EquiTerminalSolver:
         if div > 1e-9:
             raise RuntimeError("mesh basis is not divergence-free "
                                "(max |B^T Y| = %.3e)" % div)
-        YT32 = self.YT.copy()
+        # the factor's float32 copy stays CSC (a build transient, as it
+        # always was): handed CSR, _GeoMGFactor takes its row-slice
+        # branch, which measured 2x+ slower on the XNOR's assembly
+        # (2026-09-08, 2376 s and counting against 1050-1210)
+        YT32 = self.YT.tocsc()
         YT32.data = np.float32(YT32.data)
         # ('supernodal', 'amd') was hard-coded here and is the WORST of
         # the four combinations measured on a 24k-voxel bar (45201
@@ -1048,8 +1059,12 @@ class EquiTerminalSolver:
         # refused if any entry would round); the factors above already
         # consumed their own full-precision copies
         from port_impedance import shrink_exact_f32
-        for _mat in (self.Y, self.YT, self.B, self.Baug):
+        for _mat in (self.Y, self.Baug):
             shrink_exact_f32(_mat)
+        self.YT = self.Y.T                 # re-taken over the shrunk data
+        # B is Baug's first efg rows (and the spanning tree reads them
+        # there): the separate copy was 0.26 GB on the XNOR
+        self.B = None
 
     def _spanning_tree(self):
         """BFS FOREST over the conductor graph: one tree per component.
@@ -1066,7 +1081,7 @@ class EquiTerminalSolver:
             return self._forest
         import os
         from collections import deque
-        B = self.B.tocoo()
+        B = self.Baug[:self.efg, :self.nnode].tocoo()
         order = np.argsort(B.row, kind='stable')
         r, c, v = B.row[order], B.col[order], B.data[order]
         tail = c[v > 0]
@@ -1479,10 +1494,11 @@ class EquiTerminalSolver:
                      + jw*(self.C @ i_f[self.csel]))
         else:
             c = self.coupler
-            c.i_t = i_t
-            c.i_f = np.ascontiguousarray(i_f[self.csel])
-            c.out_t = np.zeros(self.term.n, dtype=np.complex128)
+            c.i_t = np.array(i_t)     # a COPY: a view would pin the whole
+            c.i_f = np.ascontiguousarray(i_f[self.csel])   # vector (309 MB
+            c.out_t = np.zeros(self.term.n, dtype=np.complex128)  # on the XNOR)
             self.M.traverseRL(extra=c)
+            c.i_t = c.i_f = None      # consumed; not kept between matvecs
             out_f = np.array(self.whole[:efg])
             out_t = self.term.R*i_t + jw*(self.Ltt @ i_t) + jw*c.out_t
         if getattr(self, 'dL_near', None) is not None:
@@ -1550,6 +1566,10 @@ class EquiTerminalSolver:
                 self.nu = self.redist.nmode
                 with _spstatus.task('assemble + preconditioner'):
                     self._build_augmented()
+                # the basis changed size: the readout's cached loop
+                # block and once-per-solver Gram correction go with it
+                self._Yl = self._YlT = None
+                self._gram_a = None
         self._mode_pc = None
         if self.nu and hasattr(self.redist, 'mode_precond'):
             self._mode_pc = self.redist.mode_precond(self.M.jomega)

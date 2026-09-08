@@ -298,3 +298,30 @@ themselves. XNOR: Fu 1.16 -> 0.87 GB, run peak 24.4 -> 24.1 GB, L
 1.66421 pH unchanged -- small there because km = 2; on a normal-metal
 film family (km 16) it is the difference between 272 and 152 padded
 slabs.
+
+## Duplicates in the built equipotential solver (2026-09-08)
+
+Three copies the XNOR census showed that need not exist, universal
+to every run of this path with or without a GPU: `Y^T` was a
+separate CSC copy of the loop basis (0.49 GB on the XNOR) and is now
+a CSR view sharing Y's arrays (scipy transposes CSC to CSR without a
+copy; re-taken after the float32 shrink, which replaces Y's data);
+the incidence matrix `B` (0.26 GB) is the first efg rows of `Baug`
+and is dropped after assembly, the spanning tree reading it there;
+and the terminal coupler kept the previous matvec's WHOLE vector
+alive through a 126-entry view (`i_t`, 0.31 GB) -- it now copies the
+slice and drops both slices after the sweep. One thing this must NOT change: the float32
+copy handed to the Gram factor stays CSC. Handed CSR (the view's
+format), `_GeoMGFactor` takes its row-slice branch, and the XNOR's
+assembly went from 1050-1210 s to over 2400 s before the run was
+stopped -- that branch's cost on this path is a separate question. Two
+things the km-change REBUILD path taught (validate_enrich H caught
+the first): the rebuild reads B back from Baug's first rows, and it
+resets the readout's cached loop block and the once-per-solver Gram
+correction, which are sized by the basis (a latent bug of the same
+day's readout change, not of the dedup); and validate_spmv forms
+its own Gram from `S.YT`, which it now converts to CSC first, as the
+solver does for its factor. Dogleg Z bit-identical;
+XNOR: peak 21.04 -> 20.34 GB, the Krylov's starting residency 13.2 ->
+12.4, assembly 1195 s and the solve 2087 s (both in their usual
+bands), L 1.66421 pH and 137 matvecs unchanged.

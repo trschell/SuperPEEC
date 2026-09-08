@@ -150,7 +150,9 @@ def main():
     check('F: stencil engaged on the equibar Gram',
           getattr(mg, '_sten0', None) is not None)
     if mg._sten0 is not None:
-        YT32 = S.YT.astype(_PRECOND_DT)
+        # S.YT is a CSR view of Y since 2026-09-08; the Gram here is
+        # formed from the CSC copy the solver hands its factor
+        YT32 = S.YT.tocsc().astype(_PRECOND_DT)
         A = ((YT32 @ YT32.T).tocsr()[:S.nplaq][:, :S.nplaq]).tocsr()
         A8 = A.copy()
         A8.data = A8.data.astype(np.int8)
