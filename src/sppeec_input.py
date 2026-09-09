@@ -895,6 +895,16 @@ class Problem:
         pending a wire-aware partition() or a [solve] override.
         """
         leaf, levels = m.partition()
+        # STUDY OVERRIDE (2026-09-09, the leaf-size study): SPPEEC_NLEAF
+        # = "a,b,c" cells per leaf box per axis, SPPEEC_NLEVELS = depth;
+        # the partition rule stays the production choice.
+        import os
+        if os.environ.get('SPPEEC_NLEAF'):
+            leaf = [int(v) for v in os.environ['SPPEEC_NLEAF'].split(',')]
+            if len(leaf) == 1:
+                leaf = leaf*3
+        if os.environ.get('SPPEEC_NLEVELS'):
+            levels = int(os.environ['SPPEEC_NLEVELS'])
         if self.formulation == 'LpPR':
             if levels > 1:
                 return m.build_tree(leaf, levels, capacitive=True,

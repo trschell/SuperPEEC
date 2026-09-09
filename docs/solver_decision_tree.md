@@ -204,3 +204,45 @@ Environment: `SPPEEC_SCHEME=cell` (always), `SPPEEC_GPU=1` (opt-in),
 lives in VRAM and both contractions run there -- ~550 B per occupied
 cell off the host peak; rounding-level differences from the CPU loop),
 `OPENBLAS_NUM_THREADS` / `FFTW_THREADS_TOP` per the CPU-track notes.
+
+## Leaf box size: peak RSS and wall time (2026-09-09)
+
+`partition()` picks the leaf by occupancy (5 cells above 50% fill, 8
+between 5% and 50%, 16 below; per axis by pitch on anisotropic
+cells). Re-measured with `SPPEEC_NLEAF=a,b,c` (a study override on
+`Problem.tree`) on the RSFQlib JTL, configuration A, 100 nm cubic
+cells, 1.12M occupied of a 222 x 720 x 34 box (20.7%), 10 GHz, one
+process per point, L within 2e-4 across every row:
+
+    leaf (cells)   boxes          setup s  solve s  wall s  peak GB  matvecs
+    3              75 x 241 x 12     196      328     525    10.22     89
+    4              56 x 181 x 9      144      151     297     6.62     57
+    5              45 x 145 x 7      125      107     232     5.90     57
+    6              38 x 121 x 6      119      134     254     5.83     88
+    8 (the rule)   28 x 91 x 5       114       95     210     5.53     57
+    10             23 x 73 x 4       114       94     209     5.21     57
+    12             19 x 61 x 3       114      125     239     5.32     88
+    16             14 x 46 x 3       119      104     224     5.33     57
+
+Small boxes cost in both currencies (leaf 3: 2x the peak and the
+wall of the rule's choice); from 8 up the peak is flat within 6%
+with its minimum at 10, and the wall is flat except where the
+matvec count jumps to 88 (leaves 6 and 12 -- the far-field
+truncation shifting the Krylov path, not the tree's cost). The rule
+sits at the knee; a leaf of 10 buys 6% of memory and no time.
+RSFQ XNOR (100 x 100 x 67.5 nm cells, 4.93M occupied of 21.9M,
+22.5%), two larger leaves against the rule's 5 x 5 x 8:
+
+    leaf (cells)     boxes            setup s  solve s  wall s  peak GB  matvecs  L pH
+    5 x 5 x 8 (rule) 125 x 145 x 7     1195     2087    3287    20.34     137    1.66421
+    7 x 7 x 10        89 x 104 x 5     1012     1829    2842    18.53     136    1.66440
+    10 x 10 x 15      63 x 73 x 4       999     1804    2804    18.15     126    1.66439
+
+On both models the rule's leaf sits below the knee: boxes 25-90%
+larger than the rule's cost 9-11% less peak and 14-15% less wall on
+the XNOR, and are flat-to-better on the JTL, with L moving at the
+far-field truncation level (1e-4). The rule's 8-cell leaf for the
+5-50% fill band dates from a time-only study whose worst case was a
+leaf of 2; raising it to 10 (per axis by pitch as now) is the
+candidate change, a doctrine decision -- the anchors and every
+recorded timing would re-base.
