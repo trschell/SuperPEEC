@@ -325,3 +325,19 @@ solver does for its factor. Dogleg Z bit-identical;
 XNOR: peak 21.04 -> 20.34 GB, the Krylov's starting residency 13.2 ->
 12.4, assembly 1195 s and the solve 2087 s (both in their usual
 bands), L 1.66421 pH and 137 matvecs unchanged.
+
+## Allocator tuning: a null result (2026-09-08)
+
+The XNOR under three allocators, RSS sampled per phase: glibc default
+/ glibc with MALLOC_MMAP_THRESHOLD_ and MALLOC_TRIM_THRESHOLD_ pinned
+at 128 kB and MALLOC_ARENA_MAX 2 / jemalloc 5 via LD_PRELOAD. Setup
+maxima 10.18 / 10.09 / 10.05 GB -- identical, so the ~2 GB the
+census cannot attribute after the first matvec is LIVE memory the
+walker does not see (the eighteen opaque pyfftw plans and their
+aligned buffers are the lead), not reclaimable fragmentation. Krylov
+maxima 20.34 / 22.06 / 20.40: the pinned threshold RAISED the peak by
+1.7 GB (mechanism not established; the per-matvec churn of mmapped
+temporaries changes when the kernel sees freed pages, not the live
+set), jemalloc matched the default's peak with higher residency
+between spikes (its decay window keeps freed extents ~10 s). Both
+runs were stopped before their solves ended; nothing to adopt.
