@@ -300,3 +300,18 @@ filaments): R5 peak ~93 → **~83–85 GB**; R6 projected peak ~490 →
 > were 5.5 GB of its peak). R3's
 > R 0.00504333, L 2.0089e-08, 143 matvecs and wire shares reproduce
 > the recorded run to every printed digit.
+
+> **DEVICE-RESIDENT LEAF GATHER, opt-in (2026-09-08).** With
+> `SPPEEC_GPU_LEAF=1` (on top of `SPPEEC_GPU`) the single gather
+> buffer is uploaded once per orientation, the host copy dropped, and
+> P2M runs as a bincount-segmented sum over all leaf boxes at once
+> while L2P is a gathered row-dot -- vectorised, no per-box loop.
+> Rounding-level differences from the CPU loop (summation order), as
+> the GPU m2l path already has; one warning and a permanent CPU
+> fallback for the process on the first failure. Measured: R3 peak
+> 5.29 -> 4.87 GB, R / L / matvecs / wire shares identical to the
+> recorded run; validate_leaf_fp32, validate_vhr and
+> validate_input_lppr clean with the flag on; RSFQ XNOR host peak
+> 20.34 -> 18.97 GB, the solve phase 2087 -> 1837 s (the vectorised
+> device contractions replace a Python loop over ~100k leaf boxes),
+> L 1.66421 pH unchanged; the card held ~3 GB for the three buffers.

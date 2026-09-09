@@ -200,4 +200,7 @@ z, x, info = S.solve(freq, restrt=100, maxiter=3)
 ```
 
 Environment: `SPPEEC_SCHEME=cell` (always), `SPPEEC_GPU=1` (opt-in),
+`SPPEEC_GPU_LEAF=1` (opt-in on top of the GPU: the leaf P2M/L2P gather
+lives in VRAM and both contractions run there -- ~550 B per occupied
+cell off the host peak; rounding-level differences from the CPU loop),
 `OPENBLAS_NUM_THREADS` / `FFTW_THREADS_TOP` per the CPU-track notes.

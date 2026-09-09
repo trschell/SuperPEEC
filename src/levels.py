@@ -115,6 +115,16 @@ def _gpu_probe():
 
 
 _GPU = _gpu_probe()
+# LEAF GATHER ON THE DEVICE, opt-in (SPPEEC_GPU_LEAF=1, 2026-09-08): the
+# per-filament P2M/L2P operator (`_ynmr_g`, 25 complex64 harmonics per
+# filament -- 2.75 GB of the RSFQ XNOR's host peak) lives in VRAM and
+# both contractions run there, vectorised over all leaf boxes at once
+# (a bincount-segmented sum for P2M, a gathered row-dot for L2P).
+# Rounding-level differences from the CPU loop (summation order), as
+# the GPU m2l path has; falls back to the CPU loop for the rest of the
+# process on the first failure, with one warning.
+_GPU_LEAF = _GPU and _os.environ.get('SPPEEC_GPU_LEAF') == '1'
+_LEAF_CHUNK = 1 << 20          # filaments per device chunk (~400 MB c128 x 25)
 from special import *  # noqa: F401,F403
 from greens import *  # noqa: F401,F403
 from stencils import AXIS_OF, PANEL_ORIENTATIONS
@@ -396,6 +406,11 @@ class LeafLevel(Level):
         # and the P2M gemv runs TRANSPOSED on the L2P gather with a
         # conjugated input -- BLAS takes the transpose without a copy.
         # Two buffers were 5.5 GB of the RSFQ XNOR's 23.5 GB peak.
+        if self._leaf_gpu():
+            try:
+                return self._p2m_gpu(msize)
+            except Exception as exc:
+                self._leaf_gpu_off(exc)
         if getattr(self, '_ynmr_g', None) is None:
             self._ynmr_g, self._ynmr_s = _gather_single(
                 self.ynmr, self.idx, 0)
@@ -406,6 +421,76 @@ class LeafLevel(Level):
             if b > a:
                 self.above.data[group, :] += sc*np.conj(np.dot(
                     self._ynmr_g[a:b, :].T, np.conj(self.data[a:b])))
+
+    # -- device-resident leaf gather (opt-in) ---------------------------
+
+    def _leaf_gpu(self):
+        """True when the leaf gather is (to be) device-resident: uploads
+        it on first use and drops the host copy."""
+        global _GPU_LEAF
+        if not _GPU_LEAF:
+            return False
+        if getattr(self, '_ynmr_gd', None) is not None:
+            return True
+        try:
+            import cupy as cp
+            if getattr(self, '_ynmr_g', None) is None:
+                self._ynmr_g, self._ynmr_s = _gather_single(
+                    self.ynmr, self.idx, 0)
+            n = self._ynmr_g.shape[0]
+            self._ynmr_gd = cp.asarray(self._ynmr_g)
+            gid = np.repeat(np.arange(np.size(self.idx0) - 1),
+                            np.diff(self.idx0))[:n]
+            self._gid_d = cp.asarray(gid.astype(np.int32))
+            self._ynmr_g = None            # the host copy is the saving
+            return True
+        except Exception as exc:
+            self._leaf_gpu_off(exc)
+            return False
+
+    def _leaf_gpu_off(self, exc):
+        global _GPU_LEAF
+        import warnings
+        warnings.warn("SPPEEC_GPU_LEAF=1 but the device leaf gather failed "
+                      "(%s: %s) -- CPU loop for the rest of the process"
+                      % (type(exc).__name__, exc))
+        _GPU_LEAF = False
+        self._ynmr_gd = None
+        self._gid_d = None
+
+    def _p2m_gpu(self, msize):
+        """above[g] += sc * conj(sum_{i in g} ynmr_g[i] * conj(data[i]))
+        as a bincount-segmented sum over all boxes at once, in chunks."""
+        import cupy as cp
+        yg, gid = self._ynmr_gd, self._gid_d
+        n, nh = yg.shape
+        sc = self._ynmr_s/self._m0
+        acc = np.zeros((msize, nh), dtype=np.complex128)
+        for a in range(0, n, _LEAF_CHUNK):
+            b = min(a + _LEAF_CHUNK, n)
+            d = cp.asarray(np.conj(self.data[a:b]))
+            prod = yg[a:b]*d[:, None]                    # complex128
+            g = gid[a:b]
+            for k in range(nh):
+                col = prod[:, k]
+                acc[:, k] += (cp.bincount(g, weights=col.real, minlength=msize)
+                              + 1j*cp.bincount(g, weights=col.imag,
+                                               minlength=msize)).get()
+            del prod, d
+        self.above.data += sc*np.conj(acc)
+
+    def _l2p_gpu(self):
+        """data[i] += sc * sum_n ynmr_g[i, n] * above[g(i), n], gathered
+        per filament, in chunks."""
+        import cupy as cp
+        yg, gid = self._ynmr_gd, self._gid_d
+        n = yg.shape[0]
+        sc = self._ynmr_s
+        ab = cp.asarray(self.above.data)
+        for a in range(0, n, _LEAF_CHUNK):
+            b = min(a + _LEAF_CHUNK, n)
+            self.data[a:b] += sc*(yg[a:b]*ab[gid[a:b]]).sum(axis=1).get()
+        del ab
 
     def l2p(self):
         """Local-to-particle: evaluate each box's local expansion at sources.
@@ -418,6 +503,11 @@ class LeafLevel(Level):
         msize = np.size(self.idx0) - 1
         # Same slice + pre-gathered-operator rewrite as p2m -- see the
         # comment there. Bit-identical.
+        if self._leaf_gpu():
+            try:
+                return self._l2p_gpu()
+            except Exception as exc:
+                self._leaf_gpu_off(exc)
         if getattr(self, '_ynmr_g', None) is None:
             self._ynmr_g, self._ynmr_s = _gather_single(
                 self.ynmr, self.idx, 0)
