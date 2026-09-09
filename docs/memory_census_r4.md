@@ -315,3 +315,12 @@ filaments): R5 peak ~93 → **~83–85 GB**; R6 projected peak ~490 →
 > 20.34 -> 18.97 GB, the solve phase 2087 -> 1837 s (the vectorised
 > device contractions replace a Python loop over ~100k leaf boxes),
 > L 1.66421 pH unchanged; the card held ~3 GB for the three buffers.
+
+> **R4 RE-MEASURED 2026-09-08**, default configuration (GPU m2l on,
+> leaf gather on the host): wall 27:58, peak RSS 18.3 GB (20.6 on
+> 2026-09-04, before the one-buffer leaf), R 5.16578 mOhm, L 20.0903
+> nH, 163 matvecs; the peak is inside the Krylov (18.0) with the
+> wire-solver build at 11.8. R5 (200M cells, 3.9x R4's box) projects
+> to ~71 GB by this law, ~63 with BiCGSTAB, and its leaf buffers
+> alone would need ~10 GB of VRAM: not runnable on the 62 GB box,
+> not attempted.
