@@ -246,3 +246,20 @@ far-field truncation level (1e-4). The rule's 8-cell leaf for the
 leaf of 2; raising it to 10 (per axis by pitch as now) is the
 candidate change, a doctrine decision -- the anchors and every
 recorded timing would re-base.
+
+DBC R4 (wire-bond path, 62.5 x 62.5 x 40 nm cells, 51M box), the
+rule's 5 x 5 x 8 against larger leaves, whole-process wall:
+
+    leaf (cells)     boxes          wall s  peak GB  matvecs  R mOhm    L nH
+    5 x 5 x 8 (rule) 65 x 81 x 7     1678    18.3      163    5.16578   20.0903
+    8 x 8 x 12       41 x 51 x 5     1254    15.93     189    5.17834   20.0837
+    12 x 12 x 18     27 x 34 x 3     1241    15.88     222    5.1803    20.0779
+    16 x 16 x 24     21 x 26 x 3     1578    16.21     244    5.18954   20.0778
+
+The peak saturates from 8 x 8 x 12 upward (-13%; 16 x 16 x 24 turns
+back up as the matvec count climbs to 244) and the wall drops 25% at
+8-12, but R drifts +0.24% / +0.28% / +0.46% and L -3e-4 / -6e-4 with the leaf
+-- larger than the XNOR's 1e-4, so on this path the leaf's accuracy
+cost must be measured against a converged reference before a rule
+change. R5 (3.9x R4's box) at the saturated peak projects to ~62 GB:
+still not the 62 GB box (55 free).
