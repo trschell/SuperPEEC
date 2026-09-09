@@ -341,3 +341,25 @@ temporaries changes when the kernel sees freed pages, not the live
 set), jemalloc matched the default's peak with higher residency
 between spikes (its decay window keeps freed extents ~10 s). Both
 runs were stopped before their solves ended; nothing to adopt.
+
+## The unattributed residency, closed (2026-09-09)
+
+scratch/xnor_unaccounted.py on the XNOR after two matvecs (13.2 GB
+resident): the census walks 9.13 GB of arrays; all eighteen pyfftw
+plans' buffers are arrays already in that walk (0.00 GB extra -- the
+top-level M2L's FFTW workspaces are lazy and CPU-path only, never
+allocated on a GPU box); the CUDA context is 0.1-0.3 GB; Python's
+own objects ~0.7 GB. glibc's ledger (mallinfo2): arena 8.63 GB with
+1.64 GB FREE-RETAINED, 3.02 GB in separately mmapped blocks;
+malloc_trim(0) released 1.52 GB (RSS 13.31 -> 11.78). So the
+'unaccounted' memory is the setup's freed transients kept inside the
+arena -- dead weight under the solve's peak, because the Krylov's
+155 MB vectors are far above the mmap threshold and never reuse those
+chunks. That is also why swapping allocators did nothing: the memory
+is freed inside one process, not fragmented across it.
+A malloc_trim(0) at the entry of every Krylov solve was then
+measured and WITHDRAWN: XNOR peak 20.34 -> 20.25 GB, R3 5.29 -> 5.28
+-- the freed chunks are reused by the solve's sub-threshold
+temporaries, so at the peak instant they are live again; the trim
+only lowers residency at quiet moments. The accounting is closed:
+nothing in the unattributed part is a lever on the peak.
