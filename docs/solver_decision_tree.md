@@ -263,3 +263,44 @@ back up as the matvec count climbs to 244) and the wall drops 25% at
 cost must be measured against a converged reference before a rule
 change. R5 (3.9x R4's box) at the saturated peak projects to ~62 GB:
 still not the 62 GB box (55 free).
+
+The drift IS accuracy, measured on R3 (2026-09-09): the multipole
+order moves R by 0.016-0.018% at either leaf (nmax 6 against 4), the
+wire segmentation by 0.01% (12 x 12 x 18 with segments pinned to the
+rule leaf's 0.625 mm cap: 5.05827 against 5.05877 mOhm), while the
+leaf moves it 0.3% -- and models without bond wires drift 1e-4. The
+mechanism is the wire coupler's near/far boundary, which is the
+tree's 27-box rule: its far field is the three-point-source
+approximation from two boxes outward, so a larger leaf pushes it
+farther out. R3 converges from below with the leaf:
+
+    leaf (cells)     boxes         wall s  peak GB  matvecs  R mOhm    L nH
+    5 x 5 x 8 (rule) 65 x 81 x 11   523     5.29     143    5.04333   20.0890
+    8 x 8 x 12       21 x 26 x 4    266     3.89     172    5.05585   20.0855
+    12 x 12 x 18     14 x 17 x 3    325     5.02     195    5.05877   20.0849
+    16 x 16 x 24     11 x 13 x 2    287     7.78     200    5.05949   20.0833
+    20 x 20 x 30      9 x 11 x 2    545    11.25     200    5.05998   20.0840
+
+The limit is 5.060 mOhm; the rule's leaf is 0.33% low. Memory and
+time have a band, best at 1.5-2x the rule's leaf and worse again
+beyond it, where the near-field workspaces of 27 large boxes take
+over (16 x 16 x 24: 7.8 GB, 20 x 20 x 30: 11.3 GB on R3).
+
+The rule's own shapes on R3 (per-axis cubic boxes, leaf0 x dmin):
+
+    leaf0            R3 leaf      wall s  peak GB  matvecs  R mOhm
+    8 (the old rule) 5 x 5 x 8     523     5.29     143    5.04333
+    10               4 x 4 x 10    401     4.17     156    5.05119
+    12 (the rule)    5 x 5 x 12    269     3.98     167    5.05276
+    16               6 x 6 x 16    282     3.87     177    5.05339
+
+**The rule's leaf0 for the 5-50% fill band is 12 since 2026-09-09.**
+On the wire-bond path it halves R3's wall and takes a quarter off
+its peak while moving R 0.2% toward the converged value; on the JTL
+and the XNOR it sits inside the flat band (the JTL's time optimum was
+10, 12 within 15%). The dense (> 50%) and sparse (< 5%) bands were
+not re-measured and keep 5 and 16.
+Every wall time and peak recorded in the documents before 2026-09-09
+(examples campaign, memory census, trace example, this study's own
+"rule" rows) was taken at leaf0 = 8 for this fill band; the R3 and R4
+re-runs at the new rule are the reference from here on.

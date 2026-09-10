@@ -905,14 +905,17 @@ class Problem:
                 leaf = leaf*3
         if os.environ.get('SPPEEC_NLEVELS'):
             levels = int(os.environ['SPPEEC_NLEVELS'])
+        nmax = {}
+        if os.environ.get('SPPEEC_NMAX'):     # multipole order, same study
+            nmax = dict(nmax=int(os.environ['SPPEEC_NMAX']))
         if self.formulation == 'LpPR':
             if levels > 1:
                 return m.build_tree(leaf, levels, capacitive=True,
-                                    fftnear=True, keep_n2n=False)
-            return m.build_tree(leaf, levels, capacitive=True)
+                                    fftnear=True, keep_n2n=False, **nmax)
+            return m.build_tree(leaf, levels, capacitive=True, **nmax)
         if levels == 1 and self.wire_specs:
             leaf, levels = [min(int(d), 5) for d in m.dims], 2
-        return m.build_tree(leaf, levels)
+        return m.build_tree(leaf, levels, **nmax)
 
     def sweeper(self, m, M, verbose=False):
         """The uniform per-frequency solve interface for both

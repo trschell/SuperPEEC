@@ -586,8 +586,8 @@ class VoxelModel:
         """Pick ``(nleaf, numlevels)`` for this geometry.
 
         Applies the fill-dependent leaf rule measured for this repo (see
-        ``main.recommend_leaf``): leaf 5 above 50% fill, 8 between 5% and
-        50%, 16 below -- the optimum moves strongly with occupancy
+        ``main.recommend_leaf``): leaf 5 above 50% fill, 12 between 5% and
+        50% (8 until 2026-09-09), 16 below -- the optimum moves strongly with occupancy
         because in dense geometry the near-field pair count grows as
         ``leaf**3`` per node, while in sparse geometry the neighbouring
         boxes are mostly empty and larger boxes simply cut box count.
@@ -619,7 +619,16 @@ class VoxelModel:
         dims = np.asarray(self.dims, dtype=int)
         ntotal = dims + 1
         fill = self.fill_pct()/100.0
-        leaf0 = 5 if fill > 0.5 else (8 if fill > 0.05 else 16)
+        # 12 in the 5-50% band since 2026-09-09 (was 8, from a time-only
+        # study whose worst case was a leaf of 2): measured on the JTL,
+        # the XNOR, R3 and R4 with peak RSS and wall time, the 8-cell
+        # leaf sat below the knee, and on bond-wire models it was also
+        # 0.3% LOW in R -- the wire coupler's far field starts two boxes
+        # out, so the leaf sets its accuracy (docs/solver_decision_tree.md,
+        # "Leaf box size"). R3: 5x5x12 against 5x5x8 = wall 523 -> 269 s,
+        # peak 5.29 -> 3.98 GB, R 5.0433 -> 5.0528 mOhm toward the 5.060
+        # limit.
+        leaf0 = 5 if fill > 0.5 else (12 if fill > 0.05 else 16)
         if self.anisotropic:
             # ASPECT-COMPENSATING per-axis leaf: multipole truncation
             # degrades over stretched boxes (measured 2026-08-07:
