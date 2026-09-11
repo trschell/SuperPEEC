@@ -305,6 +305,46 @@ Every wall time and peak recorded in the documents before 2026-09-09
 "rule" rows) was taken at leaf0 = 8 for this fill band; the R3 and R4
 re-runs at the new rule are the reference from here on.
 
+## Multipole order nmax (2026-09-10)
+
+`SPPEEC_NMAX` beside the leaf override; the default is 4. At the new
+leaf rule:
+
+    model      nmax   peak GB  wall s   matvecs  R / L
+    R3           3      3.91     258      167    5.05282 mOhm / 20.0859 nH
+    R3           4      3.98     269      167    5.05276      / 20.0863
+    R3           6      6.18    1038      167    5.04850      / 20.0862
+    XNOR         3     17.17   (shared)   126    L 1.66412 pH
+    XNOR         4     18.42   (shared)   126    L 1.66425 pH
+
+nmax 3 against 4: 1e-5 on R3, 8e-5 on the XNOR, for 6.8% of the
+XNOR's peak (the harmonic count (nmax+1)^2 is 16 against 25: the
+leaf gather buffers -36%, the M2L spectra (2 nmax+1)^2 -40%) and a
+few percent of wall. nmax 6 on R3 moves R DOWN 0.08% while the leaf
+ladder moved it UP toward 5.060: raising the order converges to the
+wire coupler's point-source far-field model, enlarging the leaf to
+the exact kernels, and the 0.2% between them is that model's bias,
+which nmax cannot remove. The default stays 4; nmax 3 is a measured,
+cheap memory knob.
+
+### R5 feasibility (2026-09-10)
+
+R4 at the new leaf (8x8x12), all three memory levers stacked:
+
+    config                          peak GB   wall s  matvecs  R mOhm
+    nmax 4, GMRES (reference)        15.93     1254     189    5.17834
+    nmax 3, BiCGSTAB                 15.45     1060     178    5.18898
+    nmax 3, BiCGSTAB, GPU leaf       14.46     1015     178    5.18898
+
+The levers return 1.5 GB of 15.9 (9%), not the 30% the census
+arithmetic promised: the R4 peak is set by the assembled solver
+(loop basis, preconditioner, spectra), of which the leaf gather and
+the Krylov basis are minor shares. R5 has roughly 3.9x the occupied
+cells of R4, so its projected peak is ~56 GB host against 55 GB
+available on the 62 GB box: NOT launchable here in any configuration.
+BiCGSTAB converges R4 in fewer matvecs than GMRES (178 vs 189) and
+1.2x faster wall; its R is within the leaf-ladder scatter (0.2%).
+
 R5 was then tried by hand (nmax 3, BiCGSTAB, GPU leaf) and died in
 the first matvec with cupy OutOfMemory, 11.57 GB held on the 12.3 GB
 RTX 4070 SUPER: the CARD, not the host (40 GB RSS at that point),
