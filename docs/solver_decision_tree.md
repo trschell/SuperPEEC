@@ -304,3 +304,17 @@ Every wall time and peak recorded in the documents before 2026-09-09
 (examples campaign, memory census, trace example, this study's own
 "rule" rows) was taken at leaf0 = 8 for this fill band; the R3 and R4
 re-runs at the new rule are the reference from here on.
+
+R5 was then tried by hand (nmax 3, BiCGSTAB, GPU leaf) and died in
+the first matvec with cupy OutOfMemory, 11.57 GB held on the 12.3 GB
+RTX 4070 SUPER: the CARD, not the host (40 GB RSS at that point),
+is the binding limit. VRAM profile of R4 in the same configuration
+(1 s nvidia-smi sampler): 0.48 GB idle, 2.22 GB after the GeoMG
+hierarchy upload (1.77 GB), 6.25 GB flat through the Krylov (leaf
+gather 1.65 GB = 12.9 M filaments x 16 complex64 harmonics, the
+rest the P2P slab spectra, index packs and the cupy pool). R5 has
+4.0x the filaments and a 7.46 GB GeoMG hierarchy: ~23 GB of VRAM
+with the GPU leaf, ~16 GB without. Neither fits. The only R5 path
+on this card is SPPEEC_GPU_BUDGET_GB=3 (forces the GeoMG apply to
+the CPU fallback, ~3x slower solve), no GPU leaf (host +6.6 GB),
+P2P on the device: ~50 GB host, several hours, untested.
