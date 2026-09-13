@@ -194,7 +194,16 @@ z, i, info = S.solve(freq)
 M = model.build_tree(leaf, levels, capacitive=True)   # or circulant=True
 model.prepare(M, freq)
 S = LpPRSolver(model, M, precond='diagschur'|'reluctance',
-               ccap='band', wsolve='auto')
+               ccap='band', wsolve='auto',
+               sdsolve='auto'|'splu'|'amg')   # TOML: [solve] schur_solver
+# sdsolve='auto' (default, 2026-09-13): exact LU of the nodal Schur
+# complement below systemmat.SCHUR_AUTO_NODES (50 000) nodes, smoothed-
+# aggregation k-cycles at or above; the SA contraction probe (rho < 0.5)
+# falls back to the LU with a warning. S.schur_state says which ran.
+# Why the gate: the LU fill grows N^1.6 (253 MB at 24k nodes, 7.4 GB at
+# 192k), the hierarchy ~1.2x nnz(S_d). Measured on dielectric plate
+# pairs SA does NOT contract (rho 0.6-0.8 even after equilibration), so
+# dielectric boards currently fall back to the LU.
 z, x, info = S.solve(freq, restrt=100, maxiter=3)
 # ALWAYS check info['true_residual']
 ```
@@ -304,6 +313,30 @@ Every wall time and peak recorded in the documents before 2026-09-09
 (examples campaign, memory census, trace example, this study's own
 "rule" rows) was taken at leaf0 = 8 for this fill band; the R3 and R4
 re-runs at the new rule are the reference from here on.
+
+### Capacitive trees and thin boards (2026-09-13)
+
+`VoxModel.partition(capacitive=True)` -- what `Problem.tree` passes on the
+LpPR path -- keeps leaf 5 regardless of fill: the 12/16 bands above were
+measured on the inductive near field, and the capacitive tree's measured
+configuration (33 -> 0.2 GB lean at the 320^2 board) is leaf 5. Two
+related guards, found the hard way: a collapsed isotropic clamp (leaf <
+3, i.e. a thin board) on a model above 10 000 occupied cells now always
+takes the thin-axis escape instead of a single-level tree, whose
+capacitive near field is dense in the occupied nodes (51 GB in
+`p2pinit3` on a 12k-cell 80^2 pdn); and the 8 -> 12 leaf change had
+moved the 320^2 pdn's escape test (321/12 = 27 boxes < 32) back to
+single-level -- fixed by the same guard. Compact models and all
+anchors keep their trees.
+
+### LpPR setup memory under band W (2026-09-13)
+
+`diagschurprecinit(ccap='diag')` used to obtain the diagonal of C_cap by
+probing `_pext_solve` with a dense identity, which under the band W of
+the lean tree forms W @ I -- a dense next x next transient (14.0 GB at
+19k external nodes on the 80^2 FR4 pdn, for a 0.8 GB resident solver).
+It now reads diag(W) directly, bit-identical (same matvecs, residual
+and Z on that board), so the lean LpPR path's setup is O(next) again.
 
 ## Multipole order nmax (2026-09-10)
 

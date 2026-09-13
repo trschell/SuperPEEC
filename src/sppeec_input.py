@@ -82,7 +82,7 @@ _SCHEMA = {
              'p_faces', 'n_faces', 'name', 'equipotential'},
     'solve': {'freq', 'rtol', 'current', 'foot_model', 'basis',
               'amg_cycles', 'method', 'gram_solver', 'formulation',
-              'enrich', 'maxiter'},
+              'enrich', 'maxiter', 'schur_solver'},
 }
 
 _FACE = {'+x': (0, 1), '-x': (0, -1), '+y': (1, 1), '-y': (1, -1),
@@ -416,6 +416,14 @@ class Problem:
         if self.gram_solver not in ('geo', 'amg'):
             raise ValueError("solve.gram_solver must be 'geo' or "
                              "'amg', got %r" % (self.gram_solver,))
+
+        # LpPR Schur solve inside the diagschur preconditioner: 'auto'
+        # (default: exact LU below SCHUR_AUTO_NODES nodes, multigrid at
+        # or above, contraction-guarded), 'lu', or 'amg'
+        self.schur_solver = str(solve.get('schur_solver', 'auto'))
+        if self.schur_solver not in ('auto', 'lu', 'amg'):
+            raise ValueError("solve.schur_solver must be 'auto', 'lu' or "
+                             "'amg', got %r" % (self.schur_solver,))
 
         # -- sub-cell enrichment (equipotential path only) ------------
         # "auto" | "off" | a table; the rules live in enrich.resolve
@@ -894,7 +902,7 @@ class Problem:
         bump to the shipped example's shape rule -- INTERIM POLICY
         pending a wire-aware partition() or a [solve] override.
         """
-        leaf, levels = m.partition()
+        leaf, levels = m.partition(capacitive=(self.formulation == 'LpPR'))
         # STUDY OVERRIDE (2026-09-09, the leaf-size study): SPPEEC_NLEAF
         # = "a,b,c" cells per leaf box per axis, SPPEEC_NLEVELS = depth;
         # the partition rule stays the production choice.
@@ -1110,7 +1118,10 @@ class _LpPRSweep:
         m.prepare(M, prob.freqs[0] if prob.freqs else 1e6)
         self.prob = prob
         self.verbose = verbose
-        self.S = LpPRSolver(m, M)
+        sd = {'auto': 'auto', 'lu': 'splu', 'amg': 'amg'}[prob.schur_solver]
+        self.S = LpPRSolver(m, M, sdsolve=sd)
+        if verbose:
+            print("LpPR Schur solve: %s" % self.S.schur_state, flush=True)
         self.nports = len(m.ports)
         self.sol = None          # no wire solver on this path
         self._x = self._f = None

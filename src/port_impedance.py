@@ -2342,8 +2342,10 @@ class LpPRSolver:
         self.Kprime = _LO((self.S.wholesize, self.S.wholesize),
                           matvec=self.S.rescaleLpPR, dtype=np.complex128)
         if precond == 'diagschur':
+            precopts.setdefault('sdsolve', 'auto')
             self.S.diagschurprecinit(**precopts)
             pv = self.S.precondDiagSchur
+            self.schur_state = self.S.schur_state
         else:
             self.S.reluctanceprecinit(**precopts)
             pv = self.S.precondReluctance

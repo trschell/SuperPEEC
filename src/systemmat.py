@@ -23,6 +23,8 @@ from scipy.sparse.linalg import bicgstab
 from scipy.sparse.linalg import lgmres
 from scipy.sparse.linalg import cg
 from scipy.sparse.csgraph import reverse_cuthill_mckee
+import warnings
+
 import pyamg
 from pyamg.krylov import gmres
 from pyamg.krylov import fgmres
@@ -99,6 +101,12 @@ def print_res(rk):
     # if S.numiters % 10 == 0 or S.numiters < 10:
     print(np.linalg.norm(rk))
 
+
+# The node count at and above which diagschurprecinit(sdsolve='auto')
+# takes the multigrid Schur solve instead of the exact sparse LU. By the
+# measured N^1.6 fill law the LU factor is ~0.8 GB here (complex128,
+# 16 B/nnz) and ~7 GB at 192k nodes; the SA hierarchy is ~1.2x nnz(S_d).
+SCHUR_AUTO_NODES = 50000
 
 class SystemMat:
     def __init__(self, M, jomega):
@@ -633,6 +641,13 @@ class SystemMat:
                 shape=(nn, nn)).tocsr()
             self._Ccap = np.asarray(self._CcapBand.diagonal(),
                                     dtype=np.complex128)
+        elif self._ext.size and ccap == 'diag' and self._Wband is not None:
+            # BAND W: the eye-probe below would form W @ I, a DENSE
+            # next x next transient (measured 14 GB at 19k external
+            # nodes on an 80^2 pdn, 2026-09-13) whose diagonal is just
+            # diag(W). Bit-identical, O(next).
+            self._Ccap[self._ext] = np.real(
+                np.asarray(self._Wband.diagonal()))
         elif self._ext.size:
             Pinv_ext = np.asarray(self._pext_solve(np.eye(self._ext.size)))
             self._Ccap[self._ext] = np.real(np.diag(Pinv_ext))
@@ -854,8 +869,9 @@ class SystemMat:
         ----------
         ccap : {'diag', 'full'}
             Capacitance block of S_d; see :meth:`reluctanceprecinit`.
-        sdsolve : {'splu', 'amg'}
-            How S_d is inverted per frequency (see
+        sdsolve : {'splu', 'amg', 'auto'}
+            How S_d is inverted per frequency ('auto': 'amg' at or
+            above ``SCHUR_AUTO_NODES`` nodes, else 'splu'; see
             :meth:`_factorDiagSchur`). 'splu' (default): exact complex
             sparse LU, MMD_AT_PLUS_A ordering -- cheap on thin/sparse
             structures (quasi-2-D node graphs), O(n^2)-flop on solid
@@ -873,6 +889,24 @@ class SystemMat:
             so 'amg' is always safe to request.
         """
         M = self.M
+        if sdsolve not in ('splu', 'amg', 'auto'):
+            raise ValueError("sdsolve must be 'splu', 'amg' or 'auto', "
+                             "got %r" % (sdsolve,))
+        if sdsolve == 'auto':
+            # SIZE GATE (2026-09-13): the exact factor of S_d is a
+            # 3-D nodal Laplacian LU whose fill was measured to grow
+            # as N^1.6 (253 MB at 24k nodes, 7.4 GB at 192k); the
+            # k-cycle SA solve is O(n). Below the gate the factor is
+            # cheap and exact; above it multigrid, with the
+            # contraction guard in _factorDiagSchur falling back to
+            # splu whenever SA does not contract.
+            sdsolve = 'amg' if self.nodesize >= SCHUR_AUTO_NODES \
+                else 'splu'
+            self.schur_state = '%s (auto: %d nodes %s %d)' % (
+                sdsolve, self.nodesize,
+                '>=' if sdsolve == 'amg' else '<', SCHUR_AUTO_NODES)
+        else:
+            self.schur_state = '%s (requested)' % sdsolve
         self._sdsolve = sdsolve
         self._mnaprecassembly(ccap=ccap)
         self._Rdiag = np.concatenate([
@@ -979,6 +1013,8 @@ class SystemMat:
                       np.linalg.norm(r2)/max(np.linalg.norm(r1), 1e-300))
             if rho < 0.5:
                 k = int(min(12, max(2, np.ceil(np.log(1e-3)/np.log(rho)))))
+                self.schur_state = '%s; SA rho %.2f, k %d' % (
+                    getattr(self, 'schur_state', 'amg'), rho, k)
                 if _os.environ.get('SPPEEC_GPU', '0') == '1':
                     # device-resident k-cycle apply (GPUAMG preserves
                     # the complex dtype); measured motivation: the S_d
@@ -1011,6 +1047,10 @@ class SystemMat:
                 self._sd_solve = sd_amg
                 return
             # cycle not solidly convergent: exact splu below
+            self.schur_state = 'splu (amg requested, SA rho %.2f >= 0.5)' % rho
+            warnings.warn("diagschur: smoothed aggregation on S_d "
+                          "contracts only %.2f per cycle -- falling back "
+                          "to the exact sparse LU" % rho)
         try:
             luSd = splu(Sd, permc_spec='MMD_AT_PLUS_A')
         except RuntimeError:                        # singular: pin the gauge

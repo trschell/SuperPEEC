@@ -427,7 +427,13 @@ The tables:
   cross-section basis -- only when the cell size fails to resolve the
   skin depth at the sweep's highest frequency, so it costs nothing
   where it buys nothing; a table sets `families`, `k`, `reach`, `rc`
-  and `f_ref` (the doctrine's rule 13).
+  and `f_ref` (the doctrine's rule 13). On the LpPR path
+  `schur_solver = "auto" | "lu" | "amg"` picks how the diagschur
+  preconditioner inverts its nodal Schur complement: `auto` (the
+  default) takes the exact sparse LU below 50 000 nodes and smoothed
+  aggregation multigrid at or above it, guarded by a contraction
+  probe that falls back to the LU (with a warning) whenever the
+  cycle does not contract.
 
 The full set of rules — including the conventions that make results
 refinement-stable — is `docs/input_doctrine.md`, and `examples/`

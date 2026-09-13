@@ -582,7 +582,7 @@ class VoxelModel:
 
     # -- octree tree construction -----------------------------------
 
-    def partition(self):
+    def partition(self, capacitive=False):
         """Pick ``(nleaf, numlevels)`` for this geometry.
 
         Applies the fill-dependent leaf rule measured for this repo (see
@@ -629,6 +629,14 @@ class VoxelModel:
         # peak 5.29 -> 3.98 GB, R 5.0433 -> 5.0528 mOhm toward the 5.060
         # limit.
         leaf0 = 5 if fill > 0.5 else (12 if fill > 0.05 else 16)
+        if capacitive:
+            # CAPACITIVE TREES KEEP LEAF 5 (2026-09-13): the 12/16 bands
+            # were measured on the INDUCTIVE near field; the capacitive
+            # tree's measured configuration (33 -> 0.2 GB lean at 320^2,
+            # Problem.tree) is leaf 5, and its stored-n2n variant costs
+            # ~27*leaf^3 entries per external node.
+            leaf0 = 5
+        occupied = int(np.asarray(self.struc()).sum())
         if self.anisotropic:
             # ASPECT-COMPENSATING per-axis leaf: multipole truncation
             # degrades over stretched boxes (measured 2026-08-07:
@@ -665,8 +673,15 @@ class VoxelModel:
         # pair, pdn_planes 320x320x4, 2026-08-07) is the same pancake
         # one step further: it used to fall through to a single-level
         # tree, so judge those by the fill-rule leaf instead.
+        # A collapsed clamp on a LARGE model must never fall through to
+        # a single-level tree (dense near field in the occupied nodes:
+        # measured 51 GB in p2pinit3 on a 12k-cell capacitive board,
+        # 2026-09-13), so above 10k occupied cells it takes the escape
+        # regardless of the 32-box test -- which the 2026-09-09 leaf
+        # change (8 -> 12) had silently moved past the 320^2 pdn.
         if (int(np.ceil(ntotal/leaf).max()) >= 32 if leaf >= 3
-                else int(np.ceil(ntotal/leaf0).max()) >= 32):
+                else (int(np.ceil(ntotal/leaf0).max()) >= 32
+                      or occupied > 10000)):
             nleaf = np.minimum(leaf0, ntotal)      # span thin axes
             ng = np.ceil(ntotal/nleaf).astype(int)
             nleaf[ng == 2] = ntotal[ng == 2]       # 2 boxes -> span
