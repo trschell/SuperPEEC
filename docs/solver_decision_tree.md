@@ -338,6 +338,20 @@ the lean tree forms W @ I -- a dense next x next transient (14.0 GB at
 It now reads diag(W) directly, bit-identical (same matvecs, residual
 and Z on that board), so the lean LpPR path's setup is O(next) again.
 
+### The Schur factor's hidden 4 GiB (2026-09-14)
+
+`_factorDiagSchur` factors S_d with SuperLU under the MMD_AT_PLUS_A
+ordering. In SuperLU's default UNSYMMETRIC mode that factor's internal
+supernodal storage was 15x its own L+U nnz: on the 160^2 FR4 pdn (99k
+nodes) 308 s and +3.94 GiB resident for a factor that exports as 0.27
+GiB -- and the census could not see it (it lives inside the SuperLU
+object, entered by memcensus only since today). `options=
+dict(SymmetricMode=True)` on the same ordering: 1.7 s, +0.36 GiB, the
+same nnz. S_d is structurally symmetric, so that is now the call.
+Orderings on this board for the record: COLAMD 4.2 s / +0.70 GiB,
+MMD_ATA 4.4 s / +0.73, NATURAL 44 s / +2.26, MMD_AT_PLUS_A unsymmetric
+308 s / +3.94, MMD_AT_PLUS_A symmetric 1.7 s / +0.36.
+
 ## Multipole order nmax (2026-09-10)
 
 `SPPEEC_NMAX` beside the leaf override; the default is 4. At the new

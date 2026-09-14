@@ -1051,8 +1051,16 @@ class SystemMat:
             warnings.warn("diagschur: smoothed aggregation on S_d "
                           "contracts only %.2f per cycle -- falling back "
                           "to the exact sparse LU" % rho)
+        # SYMMETRIC MODE (2026-09-14): S_d is structurally symmetric, and
+        # SuperLU's default unsymmetric mode on the MMD_AT_PLUS_A ordering
+        # kept a supernodal factor 15x larger than its own L+U nnz --
+        # measured on the 160^2 FR4 pdn (99k nodes): 308 s and +3.94 GiB
+        # resident for a 0.27 GiB factor, against 1.7 s and +0.36 GiB in
+        # SymmetricMode for the same nnz. The whole 4 GiB was invisible to
+        # the census (it lives inside the SuperLU object).
         try:
-            luSd = splu(Sd, permc_spec='MMD_AT_PLUS_A')
+            luSd = splu(Sd, permc_spec='MMD_AT_PLUS_A',
+                        options=dict(SymmetricMode=True))
         except RuntimeError:                        # singular: pin the gauge
             Sd = Sd.tolil()
             g = self._gnd

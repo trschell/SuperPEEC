@@ -29,6 +29,8 @@ Use::
     memcensus.report(rows, opaque, vram, groups=memcensus.DBC_GROUPS)
 """
 import re
+import types
+import sys
 
 import numpy as np
 import scipy.sparse as sp
@@ -79,6 +81,15 @@ def census(roots, max_items=2_000_000):
             raise RuntimeError("census walked past %d items -- a root "
                                "reaches far more than solver state; "
                                "narrow the roots" % max_items)
+        if isinstance(obj, types.BuiltinMethodType):
+            # a bound method of a C-extension object (SuperLU.solve, a
+            # cholmod Factor's solve) -- checked BEFORE the stop list,
+            # which otherwise drops every C-implemented callable: the
+            # object behind it is the thing that owns the memory
+            own = getattr(obj, '__self__', None)
+            if own is not None and not isinstance(own, (type(sys), type)):
+                stack.append((own, path + '.<self>'))
+            continue
         if isinstance(obj, _STOP) or obj is None:
             continue
         if isinstance(obj, np.ndarray):
@@ -126,7 +137,6 @@ def census(roots, max_items=2_000_000):
             for i, v in enumerate(obj):
                 stack.append((v, "%s[%d]" % (path, i)))
             continue
-        import types
         if isinstance(obj, types.FunctionType):
             # CLOSURES HOLD SOLVER STATE in this codebase: _GeoSplit's
             # __call__ captures the whole GeoMG factor + Schur cholesky
@@ -164,11 +174,32 @@ def census(roots, max_items=2_000_000):
                 walked = True
             except AttributeError:
                 pass
-        if not walked and type(obj).__module__ not in (
-                'builtins', 'numpy'):
-            # an extension object we cannot enter: count it honestly
-            key = type(obj).__module__ + '.' + type(obj).__name__
-            opaque[key] = opaque.get(key, 0) + 1
+        tname = type(obj).__name__
+        if not walked and (tname in ('SuperLU', 'FFTW') or
+                           type(obj).__module__ not in ('builtins', 'numpy')):
+            # extension objects whose buffers ARE reachable through a
+            # known attribute (2026-09-14, the LpPR survey: 504 FFTW
+            # plans and one SuperLU factor held 4 GB the walk called
+            # opaque): push those buffers and count the object too.
+            # SuperLU's type reports __module__ 'builtins', hence the
+            # name test ahead of the module test.
+            key = type(obj).__module__ + '.' + tname
+            entered = False
+            if key.endswith('.FFTW'):                  # pyfftw plans
+                for name in ('input_array', 'output_array'):
+                    arr = getattr(obj, name, None)
+                    if isinstance(arr, np.ndarray):
+                        stack.append((arr, path + '.' + name))
+                        entered = True
+            elif key.endswith('SuperLU'):              # scipy splu
+                for name in ('L', 'U', 'perm_r', 'perm_c'):
+                    try:
+                        stack.append((getattr(obj, name), path + '.' + name))
+                        entered = True
+                    except Exception:
+                        pass
+            opaque[key + (' (entered)' if entered else '')] = \
+                opaque.get(key + (' (entered)' if entered else ''), 0) + 1
     rows.sort(reverse=True)
     vram.sort(reverse=True)
     return rows, opaque, vram
