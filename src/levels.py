@@ -125,6 +125,25 @@ _GPU = _gpu_probe()
 # process on the first failure, with one warning.
 _GPU_LEAF = _GPU and _os.environ.get('SPPEEC_GPU_LEAF') == '1'
 _LEAF_CHUNK = 1 << 20          # filaments per device chunk (~400 MB c128 x 25)
+
+# LEAF CONTRACTIONS WITHOUT THE GATHER (2026-09-14, the memory survey's
+# item 2). The per-filament buffer `_ynmr_g = ynmr[idx]` (25 complex64
+# per filament: 2.4 GiB on R4 and the XNOR, the largest resident array
+# of every LpR solve, and the R5 VRAM blocker) is an EXPANSION of the
+# tiny per-slot table `ynmr` ((slots per box) x nh, ~300 kB) by the slot
+# index `idx` that every filament already carries. P2M and L2P are
+# therefore a scatter of the box's filament data into a (boxes x slots)
+# image and ONE GEMM against the fp64 table, chunked over boxes so the
+# image stays ~64 MB:
+#     above[g] += (1/m0) * sum_i conj(ynmr[idx_i]) d_i   ->  img @ conj(ynmr)/m0
+#     data[i]  += sum_n ynmr[idx_i, n] above[g, n]        ->  (above @ ynmr.T)[g, idx]
+# Exact in fp64 (the gather path rounded the table to complex64 with an
+# fp64 scale), no per-filament table on host or device, BLAS-3 instead
+# of a Python loop over boxes. SPPEEC_LEAF_PATH=gather restores the old
+# path for A/B; the device flag SPPEEC_GPU_LEAF now means "run the
+# chunked GEMMs on the card" (table + one chunk image resident).
+_LEAF_PATH = _os.environ.get('SPPEEC_LEAF_PATH', 'gemm')
+_LEAF_IMG_ELEMS = 1 << 22     # image elements per chunk (64 MB complex128)
 from special import *  # noqa: F401,F403
 from greens import *  # noqa: F401,F403
 from stencils import AXIS_OF, PANEL_ORIENTATIONS
@@ -374,6 +393,71 @@ class LeafLevel(Level):
                     n, m, thetafil, phifil)
         self.ynmr = np.transpose(self.ynmr)
 
+    def _leaf_chunks(self):
+        """(g0, g1, a, b): box range and its contiguous filament range,
+        sized so the (g1-g0) x slots image is ~_LEAF_IMG_ELEMS."""
+        npos = int(np.prod(self.n))
+        i0 = self.idx0
+        msize = int(np.size(i0)) - 1
+        cb = max(1, _LEAF_IMG_ELEMS//max(1, npos))
+        for g0 in range(0, msize, cb):
+            g1 = min(g0 + cb, msize)
+            a, b = int(i0[g0]), int(i0[g1])
+            if b > a:
+                yield g0, g1, a, b
+
+    def _leaf_rows(self, g0, g1):
+        """Box-local row of every filament in boxes g0:g1 (contiguous)."""
+        return np.repeat(np.arange(g1 - g0), np.diff(self.idx0[g0:g1+1]))
+
+    def _p2m_gemm(self, msize):
+        """above[g] += img @ conj(ynmr)/m0, chunked over boxes."""
+        npos = int(np.prod(self.n))
+        T = getattr(self, '_ynmr_cT', None)
+        if T is None:
+            T = self._ynmr_cT = np.ascontiguousarray(np.conj(self.ynmr))/self._m0
+        idx = self.idx
+        for g0, g1, a, b in self._leaf_chunks():
+            img = np.zeros((g1 - g0, npos), dtype=np.complex128)
+            img[self._leaf_rows(g0, g1), idx[a:b]] = self.data[a:b]
+            self.above.data[g0:g1, :] += img @ T
+
+    def _l2p_gemm(self):
+        """data[i] += (above @ ynmr.T)[g(i), idx_i], chunked over boxes."""
+        YT = getattr(self, '_ynmr_T', None)
+        if YT is None:
+            YT = self._ynmr_T = np.ascontiguousarray(self.ynmr.T)
+        idx = self.idx
+        for g0, g1, a, b in self._leaf_chunks():
+            out = self.above.data[g0:g1, :] @ YT
+            self.data[a:b] += out[self._leaf_rows(g0, g1), idx[a:b]]
+
+    def _p2m_gemm_gpu(self, msize):
+        import cupy as cp
+        npos = int(np.prod(self.n))
+        T = getattr(self, '_ynmr_cT_d', None)
+        if T is None:
+            T = self._ynmr_cT_d = cp.asarray(np.conj(self.ynmr)/self._m0)
+        idx = self.idx
+        for g0, g1, a, b in self._leaf_chunks():
+            img = cp.zeros((g1 - g0, npos), dtype=cp.complex128)
+            img[cp.asarray(self._leaf_rows(g0, g1)), cp.asarray(idx[a:b])] = \
+                cp.asarray(self.data[a:b])
+            self.above.data[g0:g1, :] += (img @ T).get()
+            del img
+
+    def _l2p_gemm_gpu(self):
+        import cupy as cp
+        YT = getattr(self, '_ynmr_T_d', None)
+        if YT is None:
+            YT = self._ynmr_T_d = cp.asarray(np.ascontiguousarray(self.ynmr.T))
+        idx = self.idx
+        for g0, g1, a, b in self._leaf_chunks():
+            out = cp.asarray(self.above.data[g0:g1, :]) @ YT
+            self.data[a:b] += out[cp.asarray(self._leaf_rows(g0, g1)),
+                                  cp.asarray(idx[a:b])].get()
+            del out
+
     def p2m(self, accumulate=False):
         """Particle-to-multipole: form each box's multipole expansion.
 
@@ -406,6 +490,13 @@ class LeafLevel(Level):
         # and the P2M gemv runs TRANSPOSED on the L2P gather with a
         # conjugated input -- BLAS takes the transpose without a copy.
         # Two buffers were 5.5 GB of the RSFQ XNOR's 23.5 GB peak.
+        if _LEAF_PATH != 'gather':
+            if _GPU_LEAF:
+                try:
+                    return self._p2m_gemm_gpu(msize)
+                except Exception as exc:
+                    self._leaf_gpu_off(exc)
+            return self._p2m_gemm(msize)
         if self._leaf_gpu():
             try:
                 return self._p2m_gpu(msize)
@@ -503,6 +594,13 @@ class LeafLevel(Level):
         msize = np.size(self.idx0) - 1
         # Same slice + pre-gathered-operator rewrite as p2m -- see the
         # comment there. Bit-identical.
+        if _LEAF_PATH != 'gather':
+            if _GPU_LEAF:
+                try:
+                    return self._l2p_gemm_gpu()
+                except Exception as exc:
+                    self._leaf_gpu_off(exc)
+            return self._l2p_gemm()
         if self._leaf_gpu():
             try:
                 return self._l2p_gpu()

@@ -324,3 +324,20 @@ filaments): R5 peak ~93 → **~83–85 GB**; R6 projected peak ~490 →
 > to ~71 GB by this law, ~63 with BiCGSTAB, and its leaf buffers
 > alone would need ~10 GB of VRAM: not runnable on the 62 GB box,
 > not attempted.
+
+> **LEAF GATHER RETIRED (2026-09-14).** The per-filament buffer was an
+> EXPANSION of the tiny per-slot table `ynmr` ((slots per box) x 25,
+> ~300 kB) by the slot index `idx` every filament already carries.
+> P2M and L2P are now a scatter of each box chunk's filament data into
+> a (boxes x slots) image and one GEMM against the fp64 table
+> (`levels._p2m_gemm` / `_l2p_gemm`, ~64 MB image chunks): no
+> per-filament table on host or device, exact in fp64 where the gather
+> rounded to complex64, and BLAS-3 in place of a Python loop over boxes
+> (numex1_m2, 192k voxels: apply 0.21 s vs 0.26 s; agreement 8e-11 =
+> the old complex64 rounding). `SPPEEC_LEAF_PATH=gather` keeps the old
+> path for A/B; `SPPEEC_GPU_LEAF=1` now runs the chunked GEMMs on the
+> card (a speed option only -- there is nothing left to move for
+> memory). Measured peaks with the gather gone (memory survey harness, one
+> process each): R3 4.47 -> 4.24 GiB, R4 15.77 -> 13.43 GiB, RSFQ XNOR
+> 18.32 -> 15.93 GiB; R3 wall 5:43 -> 3:56; answers unchanged to the
+> old path's complex64 rounding (R3 R 5.04932 -> 5.04931 mOhm).

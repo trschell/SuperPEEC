@@ -209,9 +209,11 @@ z, x, info = S.solve(freq, restrt=100, maxiter=3)
 ```
 
 Environment: `SPPEEC_SCHEME=cell` (always), `SPPEEC_GPU=1` (opt-in),
-`SPPEEC_GPU_LEAF=1` (opt-in on top of the GPU: the leaf P2M/L2P gather
-lives in VRAM and both contractions run there -- ~550 B per occupied
-cell off the host peak; rounding-level differences from the CPU loop),
+`SPPEEC_LEAF_PATH=gather` (A/B only: restores the per-filament leaf
+gather buffer that the 2026-09-14 GEMM contractions retired -- 2.4 GiB
+on R4 and the XNOR, see memory_census_r4.md), `SPPEEC_GPU_LEAF=1`
+(opt-in on top of the GPU: the chunked leaf GEMMs run on the card; a
+speed option, nothing is left to move for memory),
 `OPENBLAS_NUM_THREADS` / `FFTW_THREADS_TOP` per the CPU-track notes.
 
 ## Leaf box size: peak RSS and wall time (2026-09-09)

@@ -102,15 +102,16 @@ rm -f _anchor_tmp.py
 # (numpy 2.3.5 / scipy 1.16.3). Rounding dust, not an answer change; the
 # physics gate was 44 validators green. Previous values:
 # 1.0187104968887117e-30 / 3.755716373280479e-30 / 2.680201690959317e-31.
-echo "expected (this machine, stock env, measured 2026-09-08 after the"
-echo "one-buffer leaf gather (levels.p2m runs transposed on the L2P"
-echo "gather: setup2/3 moved 0.8% / 0.6% in these 1e-30 residual norms,"
-echo "the summation order; 2026-09-03 values were 3.740159228711359e-30"
-echo "/ 2.34153831468213e-31). A rebuild or another machine re-bases"
-echo "these -- record your own values on first green run):"
+echo "expected (this machine, stock env, measured 2026-09-14 after the"
+echo "leaf gather was retired (levels.p2m/l2p are scatter + fp64 GEMM,"
+echo "no complex64 per-filament table: setup2/3 moved 5% / 12% in these"
+echo "1e-30 residual norms, the fp32 rounding gone; 2026-09-08 values"
+echo "were 3.7093588498020906e-30 / 2.3549912821232075e-31). A rebuild"
+echo "or another machine re-bases these -- record your own values on"
+echo "first green run):"
 echo "          setup1 1.0187104968887117e-30"
-echo "          setup2 3.7093588498020906e-30"
-echo "          setup3 2.3549912821232075e-31"
+echo "          setup2 3.510274846426644e-30"
+echo "          setup3 2.636780921840921e-31"
 # LINE COUNTS. The enrichment unification (docs/enrichment_plan.md) is
 # gated on src/ SHRINKING; this prints the numbers the plan's ledger
 # records per phase so a green suite and the size are read together.
