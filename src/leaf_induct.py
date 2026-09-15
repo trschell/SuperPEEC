@@ -373,7 +373,8 @@ class LeafInduct(LeafLevel):
         cp_ = cp
         n0, n1, n2 = (int(v) for v in self.n)
         S = gp['shape']
-        dev = cp_.asarray(self.data)
+        from gpu_xfer import to_device, to_host
+        dev = to_device(self.data, cp_)
         out = cp_.empty_like(dev)
 
         def spec(cx):
@@ -406,5 +407,5 @@ class LeafInduct(LeafLevel):
             res = cp_.fft.ifftn(tgt, axes=(1, 2, 3))[:, :n0, :n1, :n2]
             out[pk['srcidx']] = res.reshape(
                 pk['size'], gp['nflat']).ravel()[pk['flatpos']]
-        self.data[:] = cp_.asnumpy(out)
+        to_host(out, cp_, out=self.data)
 

@@ -529,7 +529,8 @@ class LeafLevel(Level):
                 self._ynmr_g, self._ynmr_s = _gather_single(
                     self.ynmr, self.idx, 0)
             n = self._ynmr_g.shape[0]
-            self._ynmr_gd = cp.asarray(self._ynmr_g)
+            from gpu_xfer import to_device
+            self._ynmr_gd = to_device(self._ynmr_g, cp)
             gid = np.repeat(np.arange(np.size(self.idx0) - 1),
                             np.diff(self.idx0))[:n]
             self._gid_d = cp.asarray(gid.astype(np.int32))
@@ -1338,7 +1339,8 @@ class TopLevel:
         free, _total = cp.cuda.runtime.memGetInfo()
         need_work = 4*nn*G*16
         if ft2.nbytes + need_work < 0.85*free:
-            self._gpu_ft = cp.asarray(ft2)
+            from gpu_xfer import to_device
+            self._gpu_ft = to_device(ft2, cp)
             self._gpu_ft_host = None
         else:
             self._gpu_ft = None                    # stream per channel

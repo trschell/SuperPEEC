@@ -20,6 +20,11 @@ The dual-GPU transfer-overhead numbers still need a real 2-GPU box --
 this validator proves correctness of the plumbing, not the ~10 ms
 transfer estimate.
 """
+import os as _os_keep
+# This validator compares the DEVICE GeoMG against the HOST hierarchy
+# level by level; production releases the host level-0 objects once
+# the device core is up (2026-09-15), so keep them here.
+_os_keep.environ['SPPEEC_KEEP_HOST_COPIES'] = '1'
 import os as _op
 import sys as _sp
 _sp.path[:0] = [_op.path.join(_op.path.dirname(

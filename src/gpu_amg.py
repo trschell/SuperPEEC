@@ -111,8 +111,9 @@ class GPUPlainAMG:
 
     def __call__(self, b):
         cp = self.cp
-        x = self.core.solve(cp.asarray(np.asarray(b, self.core.dtype)))
-        return np.float32(cp.asnumpy(x))
+        from gpu_xfer import to_device, to_host
+        x = self.core.solve(to_device(np.asarray(b, self.core.dtype), cp))
+        return np.float32(to_host(x, cp))
 
 
 class GPUBlockAMG:
@@ -270,19 +271,18 @@ class GPUGeoCore:
             with cp.cuda.Device(dev):
                 return up()
 
+        from gpu_xfer import csr_to_device, to_device
         self.A = [_on(self.devs[i],
-                      lambda L=L: csp.csr_matrix(L.astype(self.dtype)))
+                      lambda L=L: csr_to_device(L, cp, csp, self.dtype))
                   for i, L in enumerate(mg.levels)]
         self.P = [_on(self.devs[i],
-                      lambda P=P: csp.csr_matrix(
-                          P.tocsr().astype(self.dtype)))
+                      lambda P=P: csr_to_device(P, cp, csp, self.dtype))
                   for i, P in enumerate(mg.Ps)]
         self.R = [_on(self.devs[i],
-                      lambda P=P: csp.csr_matrix(
-                          P.T.tocsr().astype(self.dtype)))
+                      lambda P=P: csr_to_device(P.T, cp, csp, self.dtype))
                   for i, P in enumerate(mg.Ps)]
         self.dinv = [_on(self.devs[min(i, nlev - 1)],
-                         lambda d=d: cp.asarray(d.astype(self.dtype)))
+                         lambda d=d: to_device(d, cp, self.dtype))
                      for i, d in enumerate(mg.dinv)]
         self.pinv = _on(self.devs[-1],
                         lambda: cp.asarray(
@@ -353,7 +353,8 @@ class GPUGeoBlock:
         cp = self.cp
         dt = self.core.dtype
         with cp.cuda.Device(self.core.devs[0]):
-            bg = cp.asarray(np.asarray(b, dt))
+            from gpu_xfer import to_device, to_host
+            bg = to_device(np.asarray(b, dt), cp)
             rp = bg[self.loc]
             yp = self.core.solve(rp)
             out = cp.empty(self.n, dtype=dt)
@@ -366,5 +367,5 @@ class GPUGeoBlock:
                 out[self.mac] = ym
             else:
                 out[self.loc] = yp
-            return np.float32(cp.asnumpy(out))
+            return np.float32(to_host(out, cp))
 

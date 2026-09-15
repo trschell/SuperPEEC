@@ -17,6 +17,11 @@ The claims these kernels ship under, each checked here:
 loopmg's end-to-end behaviour (int8 hierarchy on a real solve, on vs
 off byte-identical) is covered by validate_status's A/B run.
 """
+import os as _os_keep
+# Check G inspects the HOST GeoMG level-0 stencil; production releases
+# the host level-0 objects once the device core is up (2026-09-15).
+_os_keep.environ['SPPEEC_KEEP_HOST_COPIES'] = '1'
+
 import os as _op
 import sys as _sp
 _sp.path[:0] = [_op.path.join(_op.path.dirname(

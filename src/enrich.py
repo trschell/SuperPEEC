@@ -1159,6 +1159,8 @@ class Enrichment:
         self.Fu = np.empty((q,) + self.pad, dtype=dt)
         self.Fc = np.empty((km,) + self.pad, dtype=dt)
         self._Fu_d = self._Fc_d = None          # device copies are stale
+        self._fft_gen = getattr(self, '_fft_gen', 0) + 1
+        self._spec_dtype = dt
         wrap = tuple(np.mod(D[:, a], self.pad[a]) for a in range(3))
         slab = np.zeros(self.pad)
         for m in range(km):
@@ -1199,7 +1201,7 @@ class Enrichment:
         sfft = self._sfft
         km = self.km
         import os
-        dt = (self.Fu.dtype if os.environ.get('SPPEEC_MODE_APPLY_FP32') == '1'
+        dt = (self._spec_dtype if os.environ.get('SPPEEC_MODE_APPLY_FP32') == '1'
               else np.complex128)
         # ON THE CARD when there is one (2026-09-14): the km + 3 padded-
         # grid slabs were 3.1 GiB per matvec on the RSFQ XNOR, the
@@ -1221,6 +1223,10 @@ class Enrichment:
                               "host path for the rest of the run"
                               % (type(exc).__name__, exc))
                 self._gpu_apply = False
+        if self.Fu is None:
+            # the host spectra were released after the device upload
+            # (2026-09-15); a fallback rebuilds them once
+            self.build_fft()
         masked = self.nmode != self.nmode_full
         if masked:
             uf = np.zeros(self.nmode_full, dtype=np.complex128)
@@ -1261,6 +1267,7 @@ class Enrichment:
     def _apply_fft_gpu(self, u, i_f, dt):
         """apply_fft on the device: slabs, FFTs and products in cupy,
         the spectra resident on the card after the first call."""
+        import os
         import cupy as cp
         km = self.km
         # the spectra are rebuilt per frequency (set_frequency ->
@@ -1268,27 +1275,41 @@ class Enrichment:
         # were uploaded from, so a rebuild re-uploads (the first cut
         # cached them once and validate_corner's 1e5 -> 1e9 sweep ran
         # the second frequency against stale spectra)
-        key = (id(self.Fu), id(self.Fc))
+        key = getattr(self, '_fft_gen', 0)
         if getattr(self, '_Fu_d', None) is None or \
                 getattr(self, '_Fu_key', None) != key:
-            self._Fu_d = cp.asarray(self.Fu)
-            self._Fc_d = cp.asarray(self.Fc)
-            self._g3_d = tuple(cp.asarray(g) for g in self._g3)
+            if self.Fu is None:
+                self.build_fft()
+                key = self._fft_gen
+            from gpu_xfer import to_device
+            self._Fu_d = to_device(self.Fu, cp)
+            self._Fc_d = to_device(self.Fc, cp)
+            self._g3_d = tuple(to_device(g, cp) for g in self._g3)
             self._Fu_key = key
+            # the host copies are dead weight once uploaded (1.35 GiB
+            # on the RSFQ XNOR, memory survey 2026-09-14): release
+            # them; the host path rebuilds on a fallback
+            self._spec_dtype = self.Fu.dtype
+            if os.environ.get('SPPEEC_KEEP_HOST_COPIES') != '1':
+                self.Fu = self.Fc = None
+                # the upload staged through cupy's pinned pool, which
+                # would otherwise keep a pinned copy of the spectra
+                cp.get_default_pinned_memory_pool().free_all_blocks()
         Fu, Fc, g3 = self._Fu_d, self._Fc_d, self._g3_d
         masked = self.nmode != self.nmode_full
         if masked:
             uf = np.zeros(self.nmode_full, dtype=np.complex128)
             uf[self.mode_mask] = u
             u = uf
+        from gpu_xfer import to_device, to_host
         U = cp.empty((km,) + self.pad, dtype=dt)
         tmp = cp.empty(self.pad, dtype=dt)
         for m in range(km):
             tmp[...] = 0.0
-            tmp[g3] = cp.asarray(u[m::km])
+            tmp[g3] = to_device(u[m::km], cp)
             U[m] = cp.fft.fftn(tmp)
         tmp[...] = 0.0
-        tmp[g3] = cp.asarray(i_f)
+        tmp[g3] = to_device(i_f, cp)
         F = cp.fft.fftn(tmp)
         acc = cp.empty(self.pad, dtype=dt)
         out_u = np.empty(u.size, dtype=np.complex128)
@@ -1303,12 +1324,12 @@ class Enrichment:
                 else:
                     cp.multiply(Fmn, U[n2], out=tmp)
                 acc += tmp
-            out_u[m::km] = cp.fft.ifftn(acc)[g3].get()
+            out_u[m::km] = to_host(cp.fft.ifftn(acc)[g3], cp)
         cp.multiply(Fc[0], U[0], out=acc)
         for m in range(1, km):
             cp.multiply(Fc[m], U[m], out=tmp)
             acc += tmp
-        out_f = cp.fft.ifftn(acc)[g3].get().astype(np.complex128)
+        out_f = to_host(cp.fft.ifftn(acc)[g3], cp).astype(np.complex128)
         del U, F, acc, tmp
         if masked:
             out_u = out_u[self.mode_mask]

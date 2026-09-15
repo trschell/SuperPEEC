@@ -822,6 +822,22 @@ class _GeoMGFactor:
                 from gpu_amg import GPUGeoBlock
                 self._gpu = GPUGeoBlock(self)
                 self.gpu_state = 'gpu ' + self._gpu.core.placement
+                # the device core holds its own copy of every level;
+                # __call__ never reaches the host V-cycle once it is
+                # up, so the host level-0 csr and the certified stencil
+                # tiles (0.72 + 0.64 GiB on R4, memory survey
+                # 2026-09-14) are released. Coarse levels stay (small,
+                # and the Schur block's build read them already).
+                if os.environ.get('SPPEEC_KEEP_HOST_COPIES') != '1':
+                    mg = self.mg
+                    mg.levels[0] = None
+                    mg._sten0 = None
+                    mg._wdi0_t = None
+                    try:
+                        import cupy
+                        cupy.get_default_pinned_memory_pool().free_all_blocks()
+                    except Exception:
+                        pass
             except Exception as exc:
                 self.gpu_state = ('cpu fallback (%s: %s)'
                                   % (type(exc).__name__, exc))

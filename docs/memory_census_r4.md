@@ -341,3 +341,34 @@ filaments): R5 peak ~93 → **~83–85 GB**; R6 projected peak ~490 →
 > process each): R3 4.47 -> 4.24 GiB, R4 15.77 -> 13.43 GiB, RSFQ XNOR
 > 18.32 -> 15.93 GiB; R3 wall 5:43 -> 3:56; answers unchanged to the
 > old path's complex64 rounding (R3 R 5.04932 -> 5.04931 mOhm).
+
+> **HOST COPIES OF DEVICE-RESIDENT DATA RELEASED (2026-09-15).** With
+> the GPU on, two host arrays were dead weight after their upload: the
+> enrichment spectra (`Fu`/`Fc`, 1.35 GiB on the XNOR -- the mode apply
+> runs on the card since 2026-09-14) and the GeoMG level-0 objects (the
+> csr and the certified stencil tiles, 0.72 + 0.64 GiB on R4 -- the
+> factor's apply never reaches the host V-cycle once the device core
+> is up). Both are now released after the upload; a device fallback
+> rebuilds the spectra once (`build_fft`), and the GeoMG host V-cycle
+> is unreachable by construction while the device core exists.
+> Measured together with the chunked transfers below: R3 peak 3.76 ->
+> 3.11 GB (CLI), R4 15.77 -> 13.43 -> 13.09 -> 8.89 GiB and the RSFQ XNOR
+> 18.32 -> 15.93 -> 15.78 -> 11.42 GiB across the three days of the
+> campaign; answers unchanged, same matvec counts.
+
+> **THE "CUDA DRIVER MIRROR" WAS THE DRIVER'S TRANSFER STAGING AREA
+> (2026-09-15).** A pageable host->device copy goes through a staging
+> region the driver maps from /dev/zero, sized to the LARGEST single
+> transfer and kept for the life of the process: file-backed, private,
+> dirty, counted in RSS and by the OOM killer. Measured: a 0.81 GiB
+> upload leaves 1.0 GiB of it; the same upload in 64 MB slices 0.13.
+> R4's 2.42 GiB segment was the size of its largest uploads (the GeoMG
+> hierarchy, the top-level M2L tables). Every large transfer now goes
+> through `gpu_xfer.to_device/to_host/csr_to_device` in 64 MB slices
+> (hierarchy upload, per-apply vectors, the enrichment spectra and
+> mode vectors, the near-field data, the top-level tables). This is
+> also why releasing the host copy of device-resident data (the
+> spectra, GeoMG level 0) looked like no gain at first: the upload's
+> staging area took the place of the copy. Measured: the file-backed
+> segment on R4 2.68 -> 0.41 GiB, on the XNOR 3.10 -> 0.40 GiB; peaks
+> R4 13.09 -> 8.89 GiB, XNOR 15.78 -> 11.42 GiB (releases included).
