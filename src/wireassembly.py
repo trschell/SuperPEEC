@@ -1331,24 +1331,43 @@ class WireBondSolver:
 
     # -- operator + solve (the A1 pattern with the foot term) -----------
 
-    def _coupled(self, i_f, i_w):
+    def _coupled(self, i_f, i_w, out=None):
+        """``(v_f, v_w)`` for filament and wire currents. With ``out``
+        (a persistent ``efg + nwel`` buffer) the filament half is written
+        in place instead of copied and the pair is returned as views of
+        it -- the matvec's temporaries were 0.85 GiB per apply on R4
+        (memory survey 2026-09-14): the copy of ``whole``, the
+        concatenation and the coupler's current references all held a
+        0.2 GiB vector each at the peak."""
         wcs, M = self.wc, self.M
         self.whole[:self.efg] = i_f
         wcs.i_f = np.ascontiguousarray(i_f, dtype=np.complex128)
         wcs.i_w = np.ascontiguousarray(i_w, dtype=np.complex128)
         wcs.out_w = np.zeros(self.nwel, dtype=np.complex128)
         M.traverseRL(extra=wcs)
-        v_f = np.array(self.whole[:self.efg])
         v_w = (self.r_w*i_w
                + M.jomega*(wcs.wire_matvec(i_w) + wcs.out_w)
                + self.Afoot.T @ (self.Rfoot*(self.Afoot @ i_w)))
-        return v_f, v_w
+        wcs.i_f = wcs.i_w = None            # release the current vector
+        if out is None:
+            return np.array(self.whole[:self.efg]), v_w
+        out[:self.efg] = self.whole[:self.efg]
+        out[self.efg:] = v_w
+        return out[:self.efg], out[self.efg:]
 
     def _matvec(self, x):
         self.matvecs += 1
+        buf = getattr(self, '_vfw', None)
+        if buf is None or buf.size != self.efg + self.nwel:
+            buf = self._vfw = np.empty(self.efg + self.nwel,
+                                       dtype=np.complex128)
+        BT = getattr(self, '_BmatT', None)
+        if BT is None:
+            BT = self._BmatT = self.Bmat.T.tocsr()
         i = self.Bmat @ x
-        v_f, v_w = self._coupled(i[:self.efg], i[self.efg:])
-        return self.Bmat.T @ np.concatenate([v_f, v_w])
+        self._coupled(i[:self.efg], i[self.efg:], out=buf)
+        del i                                # before the transposed product
+        return BT @ buf
 
     def _precond(self, vec):
         return self.chol(np.real(vec)) + 1j*self.chol(np.imag(vec))

@@ -363,3 +363,27 @@ measured and WITHDRAWN: XNOR peak 20.34 -> 20.25 GB, R3 5.29 -> 5.28
 temporaries, so at the peak instant they are live again; the trim
 only lowers residency at quiet moments. The accounting is closed:
 nothing in the unattributed part is a lever on the peak.
+
+## The FFT apply on the card (2026-09-14)
+
+The memory survey's solve-phase instrument put the enrichment apply at
+3.06 GiB per matvec on the RSFQ XNOR -- the km + 3 padded-grid
+complex128 work slabs (640 x 735 x 77, 0.54 GiB each), the largest
+single item of that solve and larger than the leaf gather. The slabs
+cannot be fewer without recomputing FFTs (the double loop needs every
+mode transform at once), and single-precision slabs were measured to
+cost 11-23% matvecs, so `apply_fft` now runs on the device when there
+is one: the spectra uploaded once (complex64), the slabs cuFFT's, the
+same complex128 arithmetic. Agreement with the host path 6e-16 on the
+JTL, 8x faster there (0.17 vs 1.36 s per apply). `SPPEEC_MODE_APPLY_GPU=0`
+opts out; any device failure falls back to the host path for the rest
+of the run. Measured on the XNOR (solve-phase survey, 126 matvecs both): the
+mode apply's per-call transient 3.06 -> 0.42 GiB and its time 4.4 ->
+0.37 s, the matvec 8.0 -> 3.6 s; the per-matvec transient 3.62 -> 1.27
+GiB. The PEAK moved only 15.93 -> 15.78 GiB, because with the slabs
+gone the peak instant is the full Krylov basis (two complex64 vectors
+per iteration, 3.4 GiB by the twentieth) plus the preconditioner's
+0.6 GiB per apply -- the next items. The wire-bond wrapper on R4 went
+the same way the same day: persistent output buffer and early release
+of the current vector, per-matvec transient 1.27 -> 0.91 GiB, peak
+13.43 -> 13.09 GiB.

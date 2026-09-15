@@ -209,7 +209,11 @@ z, x, info = S.solve(freq, restrt=100, maxiter=3)
 ```
 
 Environment: `SPPEEC_SCHEME=cell` (always), `SPPEEC_GPU=1` (opt-in),
-`SPPEEC_LEAF_PATH=gather` (A/B only: restores the per-filament leaf
+`SPPEEC_MODE_APPLY_GPU=0` (opt-out: the enrichment's FFT mode apply
+runs on the card by default when there is one -- its km + 3 padded-grid
+complex128 slabs were 3.1 GiB per matvec on the RSFQ XNOR, the largest
+single item of that solve; device agreement 6e-16, 8x faster on the
+JTL; host fallback on any device failure), `SPPEEC_LEAF_PATH=gather` (A/B only: restores the per-filament leaf
 gather buffer that the 2026-09-14 GEMM contractions retired -- 2.4 GiB
 on R4 and the XNOR, see memory_census_r4.md), `SPPEEC_GPU_LEAF=1`
 (opt-in on top of the GPU: the chunked leaf GEMMs run on the card; a

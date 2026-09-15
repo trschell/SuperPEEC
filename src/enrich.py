@@ -1158,6 +1158,7 @@ class Enrichment:
                 q += 1
         self.Fu = np.empty((q,) + self.pad, dtype=dt)
         self.Fc = np.empty((km,) + self.pad, dtype=dt)
+        self._Fu_d = self._Fc_d = None          # device copies are stale
         wrap = tuple(np.mod(D[:, a], self.pad[a]) for a in range(3))
         slab = np.zeros(self.pad)
         for m in range(km):
@@ -1200,6 +1201,26 @@ class Enrichment:
         import os
         dt = (self.Fu.dtype if os.environ.get('SPPEEC_MODE_APPLY_FP32') == '1'
               else np.complex128)
+        # ON THE CARD when there is one (2026-09-14): the km + 3 padded-
+        # grid slabs were 3.1 GiB per matvec on the RSFQ XNOR, the
+        # largest single item of that solve (memory survey); on the
+        # device they are cuFFT's and the host peak drops by the whole
+        # amount. Same arithmetic in complex128; spectra uploaded once
+        # (complex64, 1.35 GiB on the XNOR). SPPEEC_MODE_APPLY_GPU=0
+        # opts out; any device failure falls back to the host path for
+        # the rest of the process.
+        if getattr(self, '_gpu_apply', None) is None:
+            self._gpu_apply = (os.environ.get('SPPEEC_MODE_APPLY_GPU', '1') != '0'
+                               and os.environ.get('SPPEEC_GPU', 'auto') != '0')
+        if self._gpu_apply:
+            try:
+                return self._apply_fft_gpu(u, i_f, dt)
+            except Exception as exc:
+                import warnings
+                warnings.warn("mode apply on the device failed (%s: %s) -- "
+                              "host path for the rest of the run"
+                              % (type(exc).__name__, exc))
+                self._gpu_apply = False
         masked = self.nmode != self.nmode_full
         if masked:
             uf = np.zeros(self.nmode_full, dtype=np.complex128)
@@ -1236,6 +1257,62 @@ class Enrichment:
         return out_u, self._gather(sfft.ifftn(acc, overwrite_x=True)).astype(np.complex128)
 
     # -- preconditioning -------------------------------------------------
+
+    def _apply_fft_gpu(self, u, i_f, dt):
+        """apply_fft on the device: slabs, FFTs and products in cupy,
+        the spectra resident on the card after the first call."""
+        import cupy as cp
+        km = self.km
+        # the spectra are rebuilt per frequency (set_frequency ->
+        # build_fft); the device copies are keyed to the arrays they
+        # were uploaded from, so a rebuild re-uploads (the first cut
+        # cached them once and validate_corner's 1e5 -> 1e9 sweep ran
+        # the second frequency against stale spectra)
+        key = (id(self.Fu), id(self.Fc))
+        if getattr(self, '_Fu_d', None) is None or \
+                getattr(self, '_Fu_key', None) != key:
+            self._Fu_d = cp.asarray(self.Fu)
+            self._Fc_d = cp.asarray(self.Fc)
+            self._g3_d = tuple(cp.asarray(g) for g in self._g3)
+            self._Fu_key = key
+        Fu, Fc, g3 = self._Fu_d, self._Fc_d, self._g3_d
+        masked = self.nmode != self.nmode_full
+        if masked:
+            uf = np.zeros(self.nmode_full, dtype=np.complex128)
+            uf[self.mode_mask] = u
+            u = uf
+        U = cp.empty((km,) + self.pad, dtype=dt)
+        tmp = cp.empty(self.pad, dtype=dt)
+        for m in range(km):
+            tmp[...] = 0.0
+            tmp[g3] = cp.asarray(u[m::km])
+            U[m] = cp.fft.fftn(tmp)
+        tmp[...] = 0.0
+        tmp[g3] = cp.asarray(i_f)
+        F = cp.fft.fftn(tmp)
+        acc = cp.empty(self.pad, dtype=dt)
+        out_u = np.empty(u.size, dtype=np.complex128)
+        for m in range(km):
+            cp.conjugate(Fc[m], out=acc)
+            acc *= F
+            for n2 in range(km):
+                Fmn = Fu[self._iu[m, n2]]
+                if n2 >= m:
+                    cp.conjugate(Fmn, out=tmp)
+                    tmp *= U[n2]
+                else:
+                    cp.multiply(Fmn, U[n2], out=tmp)
+                acc += tmp
+            out_u[m::km] = cp.fft.ifftn(acc)[g3].get()
+        cp.multiply(Fc[0], U[0], out=acc)
+        for m in range(1, km):
+            cp.multiply(Fc[m], U[m], out=tmp)
+            acc += tmp
+        out_f = cp.fft.ifftn(acc)[g3].get().astype(np.complex128)
+        del U, F, acc, tmp
+        if masked:
+            out_u = out_u[self.mode_mask]
+        return out_u, out_f
 
     def mode_precond(self, jw):
         """Block-Jacobi inverse of ``Ru + jw*Zuu_self`` per group of
