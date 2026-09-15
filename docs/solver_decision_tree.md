@@ -395,8 +395,11 @@ arithmetic promised: the R4 peak is set by the assembled solver
 the Krylov basis are minor shares. R5 has roughly 3.9x the occupied
 cells of R4, so its projected peak is ~56 GB host against 55 GB
 available on the 62 GB box: NOT launchable here in any configuration.
-BiCGSTAB converges R4 in fewer matvecs than GMRES (178 vs 189) and
-1.2x faster wall; its R is within the leaf-ladder scatter (0.2%).
+CORRECTION (2026-09-15): the two "BiCGSTAB" rows above ran lgmres --
+the wire-bond sweeper did not forward `[solve] method` until that day
+(the equipotential sweeper did), so their 178-vs-189 matvecs and the
+1.2x wall were nmax 3 alone. The real BiCGSTAB numbers for R4 are in
+the memory survey's campaign log (internal_docs).
 
 R5 was then tried by hand (nmax 3, BiCGSTAB, GPU leaf) and died in
 the first matvec with cupy OutOfMemory, 11.57 GB held on the 12.3 GB

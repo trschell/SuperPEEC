@@ -1034,8 +1034,12 @@ class _LpRSweep:
                 self.m.prepare(self.M, freq)
                 self.sol = self.prob.solver(self.M, freq, model=self.m,
                                             verbose=self.verbose)
+            # `method` was not forwarded on this path until 2026-09-15:
+            # [solve] method = "bicgstab" was silently lgmres on every
+            # wire-bond model (the equipotential path forwarded it)
             Z, info = self.sol.solve(freq, current=self.prob.current,
                                      rtol=self.prob.rtol,
+                                     method=self.prob.method,
                                      **_maxiter_kw(self.prob))
         _status_result(freq, Z, info)
         return Z, info
