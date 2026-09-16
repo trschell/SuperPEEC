@@ -517,3 +517,59 @@ GiB above the numpy one's: the block read buffer (at most 512 MB,
 R4 and 2e-6 on the XNOR, where BiCGSTAB moved R by 2.5e-4 and L by
 3.5e-4. The R3 R values are all within 0.003% of the 1e-7 reference;
 the streamed ones within 0.0003%.
+
+## The build transient: the loop-Gram hierarchy on the card (2026-09-15)
+
+With the streamed basis the R4 peak had left the solve phase and sat
+in the build, inside the wire-bond solver's construction on the first
+solve call. A build survey (RSS marks on every constructor step,
+aborting at the first matvec, 3 minutes on R4) attributed it, in GiB
+resident before / peak inside / after each step:
+
+    step                                    in    peak    out
+    wire coupler tables                   0.82    2.17   1.89
+    incidence / spanning forest           1.89    5.14   2.70
+    loop basis (_build_cycles)            2.75    6.02   3.00
+    plaquette geometry                    5.26    6.58   5.62
+    Gram product on the host              5.04      --   6.30
+    hierarchy build (GeoMG.__init__)      6.30    8.17   7.00
+      of which stencil extraction         6.24    8.10   7.00
+    macro Schur loop (host V-cycles, 32 s)  7.00    7.00   7.00
+    GPU upload, then host release         7.00    7.73   5.65
+
+The peak was two host transients of 1.5-1.9 GiB (the Galerkin coarse
+product and the stencil certification) on a base that existed only
+because the full plaquette Gram lived on the host until its upload:
+the GPU core wanted level 0 as a host CSR, while the CPU path had
+long avoided the Gram (tier 3: stencil from a sampled basis product,
+coarse levels by colour probing).
+
+Now (port_impedance._GeoMGFactor, gpu_amg, loopmg.GeoMG) the GPU
+path never forms the Gram on the host: `gpu_amg.gram_on_device`
+builds level 0 on the card from the basis in row chunks (the full
+product at R4 size needs 8.7 GB of pool for a 1.5 GB result; 1M-row
+chunks stay under 4 GB), `gpu_amg.device_galerkin` takes level 1 as
+P0^T A0 P0 on the device (exactly what the colour probes assembled,
+verified bit-identical, without their 81 host passes and int64
+triplet lists), the hierarchy constructor takes that through its new
+`coarse0` hook (`mv0` is the matvec-probing variant), no host stencil
+is built, and the macro Schur block is assembled through the device
+V-cycles. The same survey afterwards:
+
+    hierarchy build (GeoMG.__init__)      5.84    7.01   6.25
+    GPU core                              5.85    6.02   5.90
+    geometric factor, total time          42 s -> 5 s
+
+R4 peak 8.17 -> 7.01 GiB; R3 answer and matvec count unchanged
+(R 5.04931 mOhm, L 2.00861 nH, 167). SPPEEC_KEEP_HOST_COPIES=1
+restores the host stencil path (validate_gpu_geomg compares host and
+device applies through it); a device failure at any step falls back
+to it with a warning. Device memory during the build: the Gram (1 GB
+at R4) plus the chunked product's buffers; R5 remains out of this
+card's reach for the reasons in the R5 section.
+
+What sets the R4 build peak now, in order: the hierarchy
+constructor's aggregation and level bookkeeping (a 1.2 GiB sum of
+mid-sized temporaries), the plaquette geometry (6.44), and the loop
+basis construction (6.02 on a 2.75 base -- the largest single
+transient left in the build, 3.3 GiB).

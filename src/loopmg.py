@@ -420,7 +420,8 @@ class GeoMG:
     """
 
     def __init__(self, A, normal, base, nu=2, omega=2.0/3.0,
-                 max_coarse=400, max_levels=12, basis=None):
+                 max_coarse=400, max_levels=12, basis=None, mv0=None,
+                 coarse0=None):
         self.nu = int(nu)
         self.omega = float(omega)
         self.levels = []
@@ -438,16 +439,27 @@ class GeoMG:
         # coarsening) falls back to materialising A classically.
         use_basis = False
         P0 = nrm1 = bs1 = None
+        # mv0 / coarse0 (2026-09-15): the GPU path holds the level-0
+        # Gram on the card and supplies either a level-0 matvec (the
+        # coarse level is then probed through it) or, better, coarse0
+        # = P0 -> P0^T A0 P0 taken on the device (the probes' 81 host
+        # passes and their int64 triplet assembly were a 1.2 GiB
+        # transient on R4). With either, the host stencil is not built
+        # at all (its extraction and tile images were the R4 build
+        # peak once the host Gram was gone); without both, the
+        # certified stencil serves the probes and the host apply.
+        self._mv0 = None
         if A is None:
             got = None
-            if _STEN:
+            if mv0 is None and coarse0 is None and _STEN:
                 try:
                     got = _Stencil0.build(
                         None, normal, base, np.dtype(basis.dtype),
                         None, basis=basis, omega=self.omega)
                 except Exception:       # never break a solve
                     got = None
-            if got is not None:
+            if got is not None or mv0 is not None \
+                    or coarse0 is not None:
                 P0, nrm1, bs1 = self._aggregate(normal.copy(),
                                                 base.copy())
                 if P0.shape[1] < basis.shape[0]:
@@ -461,13 +473,18 @@ class GeoMG:
         # Galerkin product or scipy silently upcasts every coarse
         # operator back to float64.
         if use_basis:
-            self._sten0, self._wdi0_t = got
+            if got is not None:
+                self._sten0, self._wdi0_t = got
+            self._mv0 = (mv0 if mv0 is not None else
+                         self._sten0.matvec if got is not None else None)
             self.dtype = basis.dtype
             n0 = basis.shape[0]
             self.levels.append(None)     # level 0 lives in the stencil
             P0 = P0.tocsr().astype(self.dtype)
             self.Ps.append(P0)
-            A = self._probe_coarse(P0, nrm1, bs1)
+            A = (sp.csr_matrix(coarse0(P0)).astype(self.dtype)
+                 if coarse0 is not None
+                 else self._probe_coarse(P0, nrm1, bs1))
             nrm, bs = nrm1, bs1
             # level-0 nnz never counted exactly (no matrix); ~10.7
             # entries/row measured across the geometry family --
@@ -522,7 +539,8 @@ class GeoMG:
         # (matvec and one fused sweep), so any geometry that breaks a
         # stencil assumption silently keeps the csr. The probe below
         # reproduces exactly what _smooth would compute.
-        if self._sten0 is None and len(self.levels) > 1 and _STEN:
+        if self._sten0 is None and self.levels[0] is not None \
+                and len(self.levels) > 1 and _STEN:
             def _probe(x, b):
                 A0 = self.levels[0]
                 wdi = self._wdi[0]
@@ -603,8 +621,8 @@ class GeoMG:
                             continue
                         e = np.zeros(nc, dtype=self.dtype)
                         e[sel] = 1.0
-                        w = self._sten0.matvec(
-                            np.ascontiguousarray(P0 @ e))
+                        w = np.asarray(self._mv0(
+                            np.ascontiguousarray(P0 @ e)), self.dtype)
                         z = P0T @ w
                         r = np.flatnonzero(z)
                         if r.size == 0:

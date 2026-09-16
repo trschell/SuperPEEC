@@ -119,7 +119,7 @@ def main():
     # C. synthetic budget: total no longer fits one device's budget.
     # Budget chosen between the biggest half and the total, so a
     # 2-device split fits but single-device residency does not.
-    core = GPUGeoCore(fac.mg, fac.cycles)
+    core = GPUGeoCore(fac.mg, fac.cycles, basis=fac._basis)
     lev0 = None
     # recompute the two halves the same way the constructor does
     itm = np.dtype(core.dtype).itemsize
@@ -128,7 +128,9 @@ def main():
         M = M.tocsr()
         return M.nnz*itm + M.indices.nbytes + M.indptr.nbytes
 
-    lev = [csr_bytes(L) for L in fac.mg.levels]
+    # level 0 may live only on the device (built there from the basis)
+    lev = [csr_bytes(L) if L is not None else csr_bytes(core.A[0].get())
+           for L in fac.mg.levels]
     for i, P in enumerate(fac.mg.Ps):
         lev[i] += 2*csr_bytes(P)
     for i, d in enumerate(fac.mg.dinv):
@@ -140,7 +142,7 @@ def main():
           budget < total, 'l0 %d, rest %d bytes' % (lev0, rest))
     os.environ['SPPEEC_GPU_BUDGET_GB'] = repr(budget/1e9)
     if ndev >= 2:
-        core2 = GPUGeoCore(fac.mg, fac.cycles)
+        core2 = GPUGeoCore(fac.mg, fac.cycles, basis=fac._basis)
         check('auto split engages on multi-GPU box',
               core2.placement.startswith('split('), core2.placement)
         fac2 = _GeoMGFactor(YT, normal[:nplaq], base[:nplaq], nplaq)
@@ -150,7 +152,7 @@ def main():
               'rel %.2e' % rel)
     else:
         try:
-            GPUGeoCore(fac.mg, fac.cycles)
+            GPUGeoCore(fac.mg, fac.cycles, basis=fac._basis)
             check('over-budget single-GPU raises', False, 'no raise')
         except RuntimeError as exc:
             check('over-budget single-GPU raises', 'split' in str(exc),
@@ -161,7 +163,10 @@ def main():
               fac2.gpu_state)
         y2 = fac2(b)
         rel = np.linalg.norm(y2 - y_cpu)/np.linalg.norm(y_cpu)
-        check('fallback apply is the CPU apply', rel == 0.0,
+        # to fp32 rounding, not bit-identical: the GPU factor assembles
+        # its macro Schur block through the device V-cycles (2026-09-15),
+        # the fallback through the host stencil ones
+        check('fallback apply is the CPU apply', rel < 1e-6,
               'rel %.2e' % rel)
     del os.environ['SPPEEC_GPU_BUDGET_GB']
 

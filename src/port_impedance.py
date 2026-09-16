@@ -803,18 +803,19 @@ class _GeoMGFactor:
             self.B = (Yp @ Ym.T).tocsr()
             C = (Ym @ Ym.T).toarray()
             del Ym
-            if os.environ.get('SPPEEC_GPU') == '0':
-                # TIER 3: hand the plaquette basis in; the level-0
-                # Gram -- the measured build peak-setter -- is only
-                # materialised if stencil certification falls back
-                # inside GeoMG. CPU-only for now: the GPU geo path
-                # still uploads level-0 as csr (the parked GPU
-                # stencil lifts this).
-                A, basis = None, Yp
-            else:
-                A, basis = (Yp @ Yp.T).tocsr(), None
-                del Yp
-            gnnz = ((A.nnz if A is not None else int(nplaq*10.7))
+            # THE GRAM IS NEVER FORMED ON THE HOST (2026-09-15). Both
+            # paths take the tier-3 construction: the level-0 stencil
+            # from a sampled basis product, coarse levels by colour
+            # probing; the GPU core builds its CSR level 0 on the card
+            # from the basis, in row chunks (gpu_amg.gram_on_device).
+            # Measured on R4: the host Gram (1 GB) plus the Galerkin
+            # and stencil-certification transients (1.5-1.9 GiB each)
+            # set the run's peak, 8.17 GiB, during a 32 s host Schur
+            # loop. If stencil certification falls back inside GeoMG
+            # the Gram is materialised there as before.
+            A, basis = None, Yp
+            del Yp
+            gnnz = (int(nplaq*10.7)
                     + 2*self.B.nnz + int(np.count_nonzero(C)))
         else:
             G = (YT @ YT.T).tocsr().astype(_PRECOND_DT, copy=False)
@@ -825,34 +826,56 @@ class _GeoMGFactor:
             C = G[self.mac][:, self.mac].toarray()
             del G
             basis = None
-        self.mg = loopmg.GeoMG(A, geom_normal, geom_base, nu=nu,
-                               omega=omega, max_coarse=max_coarse,
-                               basis=basis)
-        del A, basis               # alive inside mg (or dropped by
-        self.cycles = int(cycles)  # the stencil); not needed here
+        # DEVICE LEVEL 0 FIRST (2026-09-15): when the GPU apply is
+        # wanted, the Gram is built on the card from the basis before
+        # the hierarchy, and GeoMG probes its coarse levels through it
+        # -- no host stencil, no tile images, no host probes (the R4
+        # build peak after the host Gram went: 7.66 GiB, 28 s).
+        # SPPEEC_KEEP_HOST_COPIES=1 keeps the host stencil path (the
+        # GPU validator compares host and device applies).
+        self._A0_d = None
+        mv0 = None
+        if (A is None and basis is not None and not self.rest.size
+                and _gpu_amg_wanted()
+                and os.environ.get('SPPEEC_KEEP_HOST_COPIES') != '1'):
+            try:
+                import cupy as cp
+                import cupyx.scipy.sparse as csp
+                from gpu_amg import gram_on_device, device_galerkin
+                self._A0_d = gram_on_device(basis, cp, csp, self._dt)
+                mv0 = device_galerkin(self._A0_d, cp, csp, self._dt)
+            except Exception as exc:
+                self._A0_d = None
+                mv0 = None
+                warnings.warn("device Gram build failed (%s: %s); host "
+                              "stencil path" % (type(exc).__name__, exc))
+        try:
+            self.mg = loopmg.GeoMG(A, geom_normal, geom_base, nu=nu,
+                                   omega=omega, max_coarse=max_coarse,
+                                   basis=basis, coarse0=mv0)
+        except Exception as exc:
+            if mv0 is None:
+                raise
+            warnings.warn("GeoMG probing through the device Gram "
+                          "failed (%s: %s); host stencil path"
+                          % (type(exc).__name__, exc))
+            self._A0_d = None
+            self.mg = loopmg.GeoMG(A, geom_normal, geom_base, nu=nu,
+                                   omega=omega, max_coarse=max_coarse,
+                                   basis=basis)
+        del mv0
+        # the basis stays only while a device level 0 may still be
+        # built from it (the stencil path leaves levels[0] None); if
+        # the stencil failed, GeoMG formed the Gram itself and the
+        # core uploads that
+        self._basis = (basis if self.mg.levels[0] is None
+                       and self._A0_d is None else None)
+        del A, basis
+        self.cycles = int(cycles)
         self.nnz = self.mg.nnz
         self.nnz_ratio = self.nnz/max(gnnz, 1)
-        # Schur complement of the macro block, C - B^T A^-1 B. The
-        # dense A^-1 B is never held: each column's v-cycle result is
-        # contracted against B^T immediately (2026-08-26). Holding all
-        # nmac columns -- twice, list + column_stack -- was a
-        # 2 * nmac * nloc * 4 B setup transient: +6.3 GB on the
-        # 1.1M-cell RSFQ JTL (390 macro columns x 2.2M loops) against a
-        # 1.3 GB resident solver, and ~1 TB at hero scale. Column-wise
-        # csc @ 1-D is the same arithmetic in the same order as the
-        # 2-D product (gated bit-identical).
-        if self.nmac:
-            BT = self.B.T
-            BtAiB = None
-            for j in range(self.nmac):
-                col = BT @ self._A(self.B[:, j].toarray().ravel())
-                if BtAiB is None:
-                    BtAiB = np.empty((self.nmac, self.nmac), dtype=col.dtype)
-                BtAiB[:, j] = col
-            self.S = lu_factor(np.float64(C - BtAiB))
-        else:
-            self.S = None
         self.n = n
+        self.S = None
         # GPU apply, same auto policy as the AMG factors (the
         # remedy the GeoMG adoption was conditioned on, 2026-08-12).
         # gpu_state answers "did the GPU apply actually engage, and
@@ -871,15 +894,16 @@ class _GeoMGFactor:
                 self.gpu_state = 'gpu ' + self._gpu.core.placement
                 # the device core holds its own copy of every level;
                 # __call__ never reaches the host V-cycle once it is
-                # up, so the host level-0 csr and the certified stencil
-                # tiles (0.72 + 0.64 GiB on R4, memory survey
-                # 2026-09-14) are released. Coarse levels stay (small,
-                # and the Schur block's build read them already).
+                # up, so the host level-0 csr (if any), the certified
+                # stencil tiles and the basis are released. Coarse
+                # levels stay (small).
                 if os.environ.get('SPPEEC_KEEP_HOST_COPIES') != '1':
                     mg = self.mg
                     mg.levels[0] = None
                     mg._sten0 = None
                     mg._wdi0_t = None
+                    mg._mv0 = None
+                    self._basis = None
                     try:
                         import cupy
                         cupy.get_default_pinned_memory_pool().free_all_blocks()
@@ -892,6 +916,33 @@ class _GeoMGFactor:
                     warnings.warn("SPPEEC_GPU=1 but GPU GeoMG setup "
                                   "failed (%s: %s) -- CPU apply"
                                   % (type(exc).__name__, exc))
+        self._A0_d = None              # the core holds it now
+        if self._gpu is None and self.mg.levels[0] is None \
+                and self.mg._sten0 is None:
+            raise RuntimeError("GeoMG: no level-0 operator on either "
+                               "side (stencil absent, GPU unavailable)")
+        # dense A^-1 B is never held: each column's v-cycle result is
+        # contracted against B^T immediately (2026-08-26). Holding all
+        # nmac columns -- twice, list + column_stack -- was a
+        # 2 * nmac * nloc * 4 B setup transient: +6.3 GB on the
+        # 1.1M-cell RSFQ JTL (390 macro columns x 2.2M loops) against a
+        # 1.3 GB resident solver, and ~1 TB at hero scale. Column-wise
+        # csc @ 1-D is the same arithmetic in the same order as the
+        # 2-D product (gated bit-identical). Through the device core
+        # when there is one (2026-09-15; was a 32 s host loop on R4).
+        if self.nmac:
+            BT = self.B.T
+            solve = (self._gpu.solve_local if self._gpu is not None
+                     else self._A)
+            BtAiB = None
+            for j in range(self.nmac):
+                col = BT @ solve(self.B[:, j].toarray().ravel())
+                if BtAiB is None:
+                    BtAiB = np.empty((self.nmac, self.nmac), dtype=col.dtype)
+                BtAiB[:, j] = col
+            self.S = lu_factor(np.float64(C - BtAiB))
+        if self._gpu is not None:
+            self._gpu.S = self.S
 
     def _A(self, r):
         return self.mg(r, cycles=self.cycles)

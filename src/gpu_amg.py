@@ -183,7 +183,7 @@ class GPUGeoCore:
     two-device split that fits, else raise (caller falls back to the
     CPU apply). ``self.placement`` records the decision."""
 
-    def __init__(self, mg, cycles, devices=None):
+    def __init__(self, mg, cycles, devices=None, basis=None, A0=None):
         import os
         import cupy as cp
         import cupyx.scipy.sparse as csp
@@ -204,6 +204,10 @@ class GPUGeoCore:
         itm = np.dtype(self.dtype).itemsize
 
         def _csr_bytes(M):
+            if M is None:            # level 0 built on the device
+                if A0 is not None:   # already resident: no new bytes
+                    return 0
+                return mg._nnz0_est*(itm + 4) + (mg.sizes[0] + 1)*4
             M = M.tocsr()
             return M.nnz*itm + M.indices.nbytes + M.indptr.nbytes
 
@@ -267,13 +271,25 @@ class GPUGeoCore:
                                  self.split[1],
                                  sum(lev_bytes[1:])/1e9))
 
+        if mg.levels[0] is None and basis is None and A0 is None:
+            raise RuntimeError("GeoMG level 0 lives in the stencil and "
+                               "no basis was given to build it on the "
+                               "device")
+
         def _on(dev, up):
             with cp.cuda.Device(dev):
                 return up()
 
         from gpu_xfer import csr_to_device, to_device
-        self.A = [_on(self.devs[i],
-                      lambda L=L: csr_to_device(L, cp, csp, self.dtype))
+        def _level(i, L):
+            if L is not None:
+                return csr_to_device(L, cp, csp, self.dtype)
+            if i != 0:
+                raise RuntimeError("GeoMG level %d is not materialised" % i)
+            if A0 is not None:
+                return A0 if A0.dtype == self.dtype else A0.astype(self.dtype)
+            return gram_on_device(basis, cp, csp, self.dtype)
+        self.A = [_on(self.devs[i], lambda i=i, L=L: _level(i, L))
                   for i, L in enumerate(mg.levels)]
         self.P = [_on(self.devs[i],
                       lambda P=P: csr_to_device(P, cp, csp, self.dtype))
@@ -327,6 +343,60 @@ class GPUGeoCore:
         return x
 
 
+def gram_on_device(basis, cp, csp, dtype, rows_per=None):
+    """``basis @ basis.T`` as a device CSR, the product taken in row
+    chunks so cuSPARSE's work buffers stay bounded (the whole product
+    at R4 size took 8.7 GB of pool for a 1.5 GB result; 2M-row chunks
+    4.7 GB). The basis is uploaded once and dropped afterwards; the
+    host never sees the Gram (2026-09-15)."""
+    import os
+    from gpu_xfer import csr_to_device
+    rows_per = int(rows_per or os.environ.get('SPPEEC_GRAM_CHUNK_ROWS',
+                                              '1000000'))
+    Yd = csr_to_device(basis.tocsr(), cp, csp, dtype)
+    YdT = Yd.T.tocsr()
+    n = Yd.shape[0]
+    parts = []
+    for r0 in range(0, n, rows_per):
+        parts.append((Yd[r0:r0 + rows_per] @ YdT).tocsr())
+    del Yd, YdT
+    A = parts[0] if len(parts) == 1 else csp.vstack(parts, format='csr')
+    del parts
+    A.sum_duplicates()
+    cp.get_default_memory_pool().free_all_blocks()
+    return A
+
+
+def device_spmv(A_d, cp, dtype):
+    """A host-in/host-out matvec through a device CSR (for the coarse-
+    level probes of loopmg.GeoMG)."""
+    from gpu_xfer import to_device, to_host
+
+    def mv(x):
+        with cp.cuda.Device(A_d.data.device.id):
+            return to_host(A_d @ to_device(np.asarray(x, dtype), cp), cp)
+    return mv
+
+
+def device_galerkin(A_d, cp, csp, dtype):
+    """P0 -> (P0^T A0 P0) as a host CSR, the products on the device
+    (exactly what the colour probes assemble, without the 81 passes
+    and the triplet lists)."""
+    from gpu_xfer import csr_to_device
+
+    def coarse(P0):
+        with cp.cuda.Device(A_d.data.device.id):
+            P_d = csr_to_device(P0.tocsr(), cp, csp, dtype)
+            AP = (A_d @ P_d).tocsr()
+            A1 = (P_d.T.tocsr() @ AP).tocsr()
+            del AP, P_d
+            out = A1.get()
+            del A1
+            cp.get_default_memory_pool().free_all_blocks()
+            return out
+    return coarse
+
+
 class GPUGeoBlock:
     """GPU apply for ``_GeoMGFactor`` (geometric MG local block +
     exact macro Schur) -- the mirror of :class:`GPUBlockAMG`."""
@@ -336,7 +406,9 @@ class GPUGeoBlock:
         import cupyx.scipy.sparse as csp
         self.cp = cp
         self.core = GPUGeoCore(factor.mg, factor.cycles,
-                               devices=devices)
+                               devices=devices,
+                               basis=getattr(factor, '_basis', None),
+                               A0=getattr(factor, '_A0_d', None))
         self.n = factor.n
         self.nmac = factor.nmac
         # block-level arrays live on the ENTRY device (level 0's)
@@ -348,6 +420,15 @@ class GPUGeoBlock:
                 else None
         self._lu_solve = factor._lu_solve
         self.S = factor.S
+
+    def solve_local(self, rp):
+        """The local (plaquette) block solve for a host vector."""
+        cp = self.cp
+        dt = self.core.dtype
+        with cp.cuda.Device(self.core.devs[0]):
+            from gpu_xfer import to_device, to_host
+            yp = self.core.solve(to_device(np.asarray(rp, dt), cp))
+            return to_host(yp, cp)
 
     def __call__(self, b):
         cp = self.cp
