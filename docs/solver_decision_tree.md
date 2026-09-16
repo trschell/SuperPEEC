@@ -573,3 +573,43 @@ constructor's aggregation and level bookkeeping (a 1.2 GiB sum of
 mid-sized temporaries), the plaquette geometry (6.44), and the loop
 basis construction (6.02 on a 2.75 base -- the largest single
 transient left in the build, 3.3 GiB).
+
+### The particular current on the card (2026-09-16)
+
+The loop basis construction (`WireBondSolver._build_cycles`) was the
+largest single transient left in the R4 build, 3.3 GiB on a 2.75 GiB
+base: the node Laplacian's pyamg smoothed-aggregation setup (2.05 GiB
+of temporaries, a 0.64 GiB hierarchy, 28 s) plus the float64 incidence
+transpose and the Laplacian itself on the host, all for the one-time
+potential solve that gives the smooth particular current ihat_f = B phi.
+
+A tree current was tried first -- the feasible pattern read off the
+spanning forest, no matrix, no solve (subtree sums of the injections
+by one triangular solve in the pointer-jumped depth order). It
+satisfies KCL to 1e-14 and is REJECTED: R3 took 299 matvecs against
+167 and R moved 5.7%, because the port readout V = ihat . v uses this
+pattern as its test vector and a rough one amplifies the residual
+error. "Any feasible pattern is equally valid" holds in exact
+arithmetic only; the smooth potential-flow pattern is load-bearing.
+It stays as SPPEEC_IHAT=tree for reference.
+
+Shipped: the same Laplacian solve on the device
+(`wireassembly._laplacian_current_gpu`). The incidence goes up once in
+chunks, B^T B is formed there, grounded through the forest's roots
+(one per component, isolated nodes their own -- no host
+connected-components pass), solved by Jacobi-preconditioned CG in
+float64 to 1e-12, and the current and its KCL residual are formed
+there too. Measured on R3's captured system (923k nodes, 6M nnz):
+
+    solver                                  time    host RSS   KCL resid
+    pyamg SA + CG (before)                 7.2 s   +0.44 GiB   2e-13
+    pyamg lean (fp32, unsmoothed) + CG    24.8 s   +0.30 GiB   5e-12
+    device CG + Jacobi, 3300 iterations    1.1 s   +0.00 GiB   5e-14
+
+R4 build survey: the step's transient 3.3 -> 0.5 GiB, 33 -> 22 s; R3
+answer and matvec count unchanged (167), wall 3:45 -> 3:26. The run
+peak stays at 7.06 GiB, now set by the GeoMG constructor's aggregation
+bookkeeping (5.90 -> 7.06) with the plaquette geometry close behind
+(6.76): the next two build targets, ~1.2 GiB of temporaries each.
+SPPEEC_IHAT=amg keeps the pyamg construction, which is also the
+fallback on any device failure.

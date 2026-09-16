@@ -63,6 +63,8 @@ Gram/AMG, paths, feet, far tables and Wff persist across the sweep.
 """
 import time
 
+import os
+import warnings
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import LinearOperator, lgmres
@@ -587,6 +589,92 @@ class WireEddySolver:
 
 
 # ------------------------------------------------------------- stage A2
+
+def _laplacian_current_gpu(B, parent, rhs, tol=1e-12, maxiter=50000):
+    """ihat_f = B phi with (B^T B) phi = rhs, everything on the device.
+    Returns (ihat_f on the host, max |B^T ihat_f - rhs|)."""
+    import cupy as cp
+    import cupyx.scipy.sparse as csp
+    from gpu_xfer import csr_to_device, to_device, to_host
+    Bd = csr_to_device(B.tocsr(), cp, csp, np.float64)
+    BTd = Bd.T.tocsr()
+    Ld = (BTd @ Bd).tocsr()
+    nn = Ld.shape[0]
+    d = to_device((parent >= 0).astype(np.float64), cp)   # 0 at roots
+    Dg = csp.diags(d)
+    Lg = (Dg @ Ld @ Dg + csp.diags(1.0 - d)).tocsr()
+    del Ld, Dg
+    b0 = to_device(np.asarray(rhs, np.float64), cp)
+    b = b0*d
+    dinv = 1.0/Lg.diagonal()
+    x = cp.zeros(nn, np.float64)
+    r = b.copy()
+    z = dinv*r
+    p = z.copy()
+    rz = cp.vdot(r, z)
+    bn = float(cp.linalg.norm(b))
+    it = 0
+    while it < maxiter and bn > 0.0:
+        Ap = Lg @ p
+        alpha = rz/cp.vdot(p, Ap)
+        x += alpha*p
+        r -= alpha*Ap
+        it += 1
+        if it % 50 == 0 and float(cp.linalg.norm(r)) <= tol*bn:
+            break
+        z = dinv*r
+        rz_new = cp.vdot(r, z)
+        p = z + (rz_new/rz)*p
+        rz = rz_new
+    del Lg, r, z, p, dinv
+    ihat_d = Bd @ x
+    resid = float(cp.abs(BTd @ ihat_d - b0).max())
+    out = to_host(ihat_d, cp)
+    del Bd, BTd, ihat_d, x, b, b0
+    cp.get_default_memory_pool().free_all_blocks()
+    return out, resid
+
+
+def _tree_current(parent, pedge, psign, rhs, efg, BT):
+    """The filament current that carries the nodal injections ``rhs``
+    along the spanning forest: on each tree filament the net injection
+    of the subtree below it. Returns the efg-vector; the sign
+    convention is settled against ``BT`` (one residual each way).
+    """
+    nn = parent.size
+    non = np.flatnonzero(parent >= 0)
+    # depth by pointer jumping: O(N log depth)
+    depth = (parent >= 0).astype(np.int64)
+    jump = parent.copy()
+    while True:
+        act = np.flatnonzero(jump >= 0)
+        if act.size == 0:
+            break
+        j = jump[act]
+        depth[act] += depth[j]
+        jump[act] = jump[j]
+    # subtree sums: (I - C) sub = rhs with C[parent, child] = 1 --
+    # unit upper triangular once the nodes are ordered by depth
+    order = np.argsort(depth, kind='stable')
+    pos = np.empty(nn, dtype=np.int64)
+    pos[order] = np.arange(nn)
+    M = sp.eye(nn, format='csc') - sp.csc_matrix(
+        (np.ones(non.size), (pos[parent[non]], pos[non])), shape=(nn, nn))
+    from scipy.sparse.linalg import splu
+    lu = splu(M.tocsc(), permc_spec='NATURAL')
+    sub = np.empty(nn)
+    sub[order] = lu.solve(np.asarray(rhs, np.float64)[order])
+    del lu, M
+    ihat = np.zeros(efg)
+    ihat[pedge[non]] = psign[non]*sub[non]
+    r1 = np.abs(BT @ ihat - rhs).max()
+    if r1 > 1e-9:
+        ihat = -ihat
+        r2 = np.abs(BT @ ihat - rhs).max()
+        if r2 > r1:
+            ihat = -ihat
+    return ihat
+
 
 class WireBondSolver:
     """Stage A2: wires GALVANICALLY attached to the voxel bulk.
@@ -1212,7 +1300,57 @@ class WireBondSolver:
         # kernel and leaves a strictly positive definite system. The
         # ANSWER IS UNCHANGED: ihat_f = B phi and B annihilates
         # per-component constants, so grounding moves the gauge only.
+        # TREE CURRENT (2026-09-16): the feasible pattern read straight
+        # off the spanning forest -- subtree sums of the injections,
+        # one per tree filament -- with no matrix, no solve and no
+        # Python walk: the depth order comes from pointer jumping on
+        # the parent array (the forest is depth-first, millions deep),
+        # the subtree sums from one unit-triangular solve in that
+        # order. The Laplacian AMG this replaces was 2.05 GiB of setup
+        # transient, a 0.64 GiB hierarchy and 28 s on R4, for a
+        # pattern the homogeneous DOFs correct anyway -- BUT MEASURED
+        # WORSE on R3 (2026-09-16): 299 matvecs against 167 and R moved
+        # 5.7%, because the port readout V = ihat . v uses this pattern
+        # as its test vector and a rough one amplifies the residual
+        # error. The smooth potential-flow pattern is load-bearing;
+        # the tree current stays as SPPEEC_IHAT=tree for reference.
+        # ON THE CARD (2026-09-16, the shipped path): the Laplacian
+        # formed from the incidence on the device, grounded through
+        # the forest's roots (one per component; isolated nodes are
+        # their own), solved by Jacobi-preconditioned CG in float64 --
+        # measured on R3: 1.1 s and no host memory against pyamg's
+        # 7.2 s and 0.44 GiB (28 s and 2.05 GiB on R4). The current
+        # and its KCL residual are formed there too, so the host never
+        # holds the float64 incidence transpose or the Laplacian.
+        # SPPEEC_IHAT=amg keeps the pyamg construction (also the
+        # fallback on any device failure).
+        mode = os.environ.get('SPPEEC_IHAT', 'gpu')
+        if mode == 'gpu' and os.environ.get('SPPEEC_GPU', 'auto') != '0':
+            try:
+                self.ihat_f, resid = _laplacian_current_gpu(
+                    self.B, self.parent, rhs)
+            except Exception as exc:
+                warnings.warn("device Laplacian solve failed (%s: %s); "
+                              "pyamg path" % (type(exc).__name__, exc))
+                mode = 'amg'
+            else:
+                if resid > 1e-9:
+                    raise RuntimeError("Laplacian CG ihat residual %g"
+                                       % resid)
+                self._chords_build(chord_wires, wcomp, adj, _wire_into)
+                return
         BT = self.B.T.tocsc().astype(np.float64)
+        if mode == 'tree':
+            self.ihat_f = _tree_current(self.parent, self.pedge,
+                                        self.psign, rhs, self.efg, BT)
+            resid = np.abs(BT @ self.ihat_f - rhs).max()
+            if resid > 1e-9:
+                raise RuntimeError("tree ihat violates KCL (residual "
+                                   "%g) -- the port/foot pattern is "
+                                   "inconsistent" % resid)
+            del BT
+            self._chords_build(chord_wires, wcomp, adj, _wire_into)
+            return
         try:
             import pyamg
             import scipy.sparse.csgraph as _csg
@@ -1253,7 +1391,17 @@ class WireBondSolver:
             sol_ = lsqr(BT, rhs, atol=1e-11, btol=1e-11,
                         iter_lim=20000)
             self.ihat_f = sol_[0]
-        # sharing cycles: chord wire forward + tree route back
+        self._chords_build(chord_wires, wcomp, adj, _wire_into)
+
+    def _chords_build(self, chord_wires, wcomp, adj, _unused=None):
+        """Sharing cycles: chord wire forward + tree route back."""
+        wr, wv_ = [], []
+
+        def _wire_into(j, sgn):
+            for seg in np.where(self.wire_of_seg == j)[0]:
+                a, b = self.wc.seg0[seg], self.wc.seg0[seg + 1]
+                wr.extend(range(a, b))
+                wv_.extend([sgn/(b - a)]*(b - a))
         self._chords = []
         for j in chord_wires:
             c1, c2 = wcomp[j]
