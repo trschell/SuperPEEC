@@ -92,8 +92,9 @@ Optional, for GPU acceleration on CUDA 12 systems:
 
     pip install "cupy-cuda12x[ctk]"
 
-Build the native extension modules (Fortran FMM kernels and the
-H-matrix solver) in the repository root:
+Build the native extension modules (Fortran FMM kernels, the
+streamed-basis Krylov kernel and the H-matrix solver) in the
+repository root:
 
     make -f Makefile_multipole
 
@@ -433,7 +434,13 @@ The tables:
   default) takes the exact sparse LU below 50 000 nodes and smoothed
   aggregation multigrid at or above it, guarded by a contraction
   probe that falls back to the LU (with a warning) whenever the
-  cycle does not contract.
+  cycle does not contract. On the LpR path `method = "lgmres" |
+  "bicgstab" | "gmres_stream"` picks the outer Krylov method:
+  `lgmres` (the default) keeps a small in-memory basis, `bicgstab`
+  holds about eight work vectors with a non-monotone residual, and
+  `gmres_stream` runs full GMRES with the Arnoldi basis streamed to
+  a file (`SPPEEC_STREAM_DIR`, default `~/.cache/sppeec/krylov`), so
+  the solve-phase footprint stops growing with the iteration count.
 
 The full set of rules — including the conventions that make results
 refinement-stable — is `docs/input_doctrine.md`, and `examples/`

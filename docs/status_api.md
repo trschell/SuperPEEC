@@ -104,7 +104,7 @@ Field notes, in reading order:
 Two kinds of task percent exist, and they are honest in different
 ways:
 
-* **`krylov`** (lgmres/bicgstab — every LpR-family outer solve):
+* **`krylov`** (lgmres/bicgstab/gmres_stream — every LpR-family outer solve):
   `pct = matvecs / budget` where the budget is the hard iteration cap
   (`maxiter × inner_m`). It never overshoots; a converging solve
   simply finishes early. On **lgmres** the detail also carries a true

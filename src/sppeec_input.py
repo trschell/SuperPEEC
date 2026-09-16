@@ -392,8 +392,10 @@ class Problem:
         self.solver_basis = str(solve.get('basis', 'auto'))
         self.amg_cycles = int(solve.get('amg_cycles', 4))
         # outer Krylov: 'lgmres' (default, small basis inner_m=10 --
-        # the efficient memory/time point) or 'bicgstab' (leanest at
-        # ~8 work vectors, for a hard memory ceiling)
+        # the efficient memory/time point), 'bicgstab' (~8 work
+        # vectors, non-monotone residual) or 'gmres_stream' (full
+        # GMRES with the basis streamed to disk: ~4 vectors in memory
+        # whatever the iteration count -- the scalability option)
         self.method = str(solve.get('method', 'lgmres'))
         # outer Krylov cycle cap (matvec budget = maxiter * inner_m);
         # None keeps each solver's own default (30). Exists for large
@@ -407,9 +409,9 @@ class Problem:
                 raise ValueError("solve.maxiter must be an integer >= 1 "
                                  "(outer Krylov cycles)")
             self.maxiter = int(self.maxiter)
-        if self.method not in ('bicgstab', 'lgmres'):
-            raise ValueError("solve.method must be 'bicgstab' or "
-                             "'lgmres', got %r" % (self.method,))
+        if self.method not in ('bicgstab', 'lgmres', 'gmres_stream'):
+            raise ValueError("solve.method must be 'bicgstab', 'lgmres' "
+                             "or 'gmres_stream', got %r" % (self.method,))
         # loop-Gram preconditioner under basis='overcomplete':
         # 'geo' (geometric MG, default) or 'amg' (smoothed aggregation)
         self.gram_solver = str(solve.get('gram_solver', 'geo'))

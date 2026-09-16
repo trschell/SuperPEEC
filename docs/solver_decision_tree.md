@@ -414,3 +414,106 @@ with the GPU leaf, ~16 GB without. Neither fits. The only R5 path
 on this card is SPPEEC_GPU_BUDGET_GB=3 (forces the GeoMG apply to
 the CPU fallback, ~3x slower solve), no GPU leaf (host +6.6 GB),
 P2P on the device: ~50 GB host, several hours, untested.
+
+## The streamed Krylov basis (2026-09-15)
+
+`[solve] method = "gmres_stream"` (`krylov_stream.gmres_stream`) is
+full GMRES within the same matvec budget as lgmres, with the Arnoldi
+basis written one vector per record to an unlinked file under
+`SPPEEC_STREAM_DIR` (default `~/.cache/sppeec/krylov`; NOT the system
+temp directory, which is a RAM-backed tmpfs on the development box).
+About five complex128 work vectors and one complex64 read buffer stay
+in memory whatever the iteration count, so the solve phase no longer
+grows with the iteration count at all: on R3 the resident set at the
+start of each matvec was 2.13 GiB at the first and 2.18 GiB at the
+last, where lgmres climbs ~0.18-0.26 GiB per iteration on the
+flagships (its basis was 2.5 GiB on R4, 3.4 GiB on the XNOR).
+
+Three things decided the design, each measured on the DBC R3 at
+1 MHz, rtol 1e-4, against an lgmres reference at rtol 1e-7 (463
+matvecs, R 5.04916 mOhm, L 2.00861 nH):
+
+    solver                              matvecs   R mOhm     R error
+    lgmres(10), the default                167    5.04931    +0.003%
+    streamed, RIGHT-preconditioned          97    5.04283    -0.125%
+    streamed, left, complex64 arithmetic   602    5.04791    -0.025%  (stalled, budget)
+    streamed, left, complex128 arithmetic  138    5.049176   +0.0003%
+
+1. Precondition on the LEFT, like lgmres. GMRES minimises the norm
+   it iterates in; the preconditioned residual |P^-1 r| is close to
+   the error itself, so minimising it shapes the error away from
+   the slow global directions the resistance functional reads,
+   whereas the textbook right-preconditioned form minimises |r| and
+   left 40x more error in R at the same true residual (L, 96% of
+   |Z| at this frequency, was unaffected either way). Termination
+   stays on the true residual: one extra matvec plus a pass over
+   the basis, every ten steps and whenever the tracked ratio of the
+   two norms predicts convergence (with a 0.8 margin -- the ratio
+   drifts as the solve closes in).
+2. Arithmetic in complex128, storage in complex64. A full cycle in
+   single-precision arithmetic stalled at |P^-1 r|/|b| ~ 1e-4 for
+   hundreds of steps: the Arnoldi relation only holds to single
+   precision over a long cycle, and lgmres only survives in single
+   because it restarts every ten steps. With the inner products,
+   Gram-Schmidt updates and Hessenberg in double, the stored basis
+   rounded once per vector floors the true residual at ~3e-8 -- the
+   same floor the single-precision lgmres basis has, and the same
+   `precision = "auto"` rule (double storage below rtol 1e-5) covers
+   it.
+3. Never trust a residual prediction alone. The ratio |P^-1 r|/|r|
+   taken from the initial residual (a rough port injection) is
+   pessimistic by up to 5x for the late residual (smooth, in the
+   directions the preconditioner amplifies most); a solver that
+   only checked when the prediction said so marched blind to the
+   300-matvec budget (24 minutes on R3).
+
+Cost: the Gram-Schmidt reads k vectors at step k, k^2/2 vectors per
+cycle in total. The kernel's page cache serves the reads from RAM
+while the box has room and evicts under pressure; the process RSS
+never sees them (positional reads, not a memory map). A first version
+did the projections as a numpy loop, one vector at a time: 0.12 s per
+R4-sized vector (every vector moved through memory three times in
+complex128 on one core), which made the orthogonalisation cost as
+much as the matvec on R4 and more on the XNOR (solve 1222 s against
+971 s for lgmres). The shipped version reads the basis in blocks (at
+most 512 MB of complex64 vectors, on four threads -- page-cache
+copies are single-core bound) and does the projections and the
+update in `krylov_kernels.f90`, an OpenMP kernel that streams the
+block once per pass in the stored precision and accumulates in
+double: 0.037 s per vector, 0.026 of it the read. Build it with
+`make -f Makefile_multipole krylov_kernels`; without the module the
+solver falls back to the numpy loop. Wall-time comparison against
+lgmres on the same code: see the table below (measured after the
+kernel).
+Not the default: lgmres remains the default for the same reason
+BiCGSTAB is not -- the streamed basis is the scalability option, for
+solves where the Krylov basis is what does not fit.
+
+Measured with the solve survey (one frequency, the box otherwise
+idle, the same code for every row; "numpy" = the first orthogonal-
+isation, "kernel" = the shipped one):
+
+    flagship   method             matvecs  solve s  s/step  peak GiB  answer
+    DBC R3     lgmres(10)            167      168    1.01     2.97    R 5.049315 mOhm, L 2.008609 nH
+    DBC R3     streamed, numpy       138      240    1.75     2.45    R 5.049176, L 2.008611
+    DBC R3     streamed, kernel      133      159    1.20     2.68    R 5.049174, L 2.008611
+    DBC R4     lgmres(10)            178     1016    5.74     9.37    R 5.178324, L 2.008375
+    DBC R4     streamed, numpy       133     1332   10.09     8.17    R 5.178328, L 2.008375
+    RSFQ XNOR  lgmres(10)            126      986    7.89    11.71    L 1.664255 pH
+    RSFQ XNOR  streamed, numpy       100     1222   12.34    10.42    L 1.664252 pH
+
+The R4 and XNOR rows with the kernel were not measured (the user
+judged the wall-time question settled by R3); from the per-vector
+benchmark the kernel removes ~4 of the 5 s of per-step overhead on
+R4, which would put the streamed solve below lgmres there too, as it
+is on R3 (159 against 168 s: fewer matvecs, and 26 s of reads plus
+projections over the whole solve against 130 s in the operators).
+
+The peak has LEFT the solve phase on R4: it falls 92 s into the run,
+in the build, and the solve phase sits flat between 5.2 and 5.8 GiB
+where lgmres ends at 8.96. On R3 the kernel version's peak is 0.23
+GiB above the numpy one's: the block read buffer (at most 512 MB,
+`SPPEEC_STREAM_BLOCK_MB`). The answers agree with lgmres to 1e-6 on
+R4 and 2e-6 on the XNOR, where BiCGSTAB moved R by 2.5e-4 and L by
+3.5e-4. The R3 R values are all within 0.003% of the 1e-7 reference;
+the streamed ones within 0.0003%.

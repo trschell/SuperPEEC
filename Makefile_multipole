@@ -7,7 +7,7 @@
 PY ?= python3
 F77FLAGS = -cpp -O3 -march=native -funroll-loops
 
-all: mp_fortran fmmtop f_setup meshgraph_aux hodlrnat
+all: mp_fortran fmmtop f_setup meshgraph_aux krylov_kernels hodlrnat
 
 # optional: the H-LU native solve (hodlr.py falls back to python
 # without it, but validate_hodlr_native requires it)
@@ -36,6 +36,12 @@ f_setup:
 meshgraph_aux:
 	cd src && FC=gfortran $(PY) -m numpy.f2py -c -m meshgraph_aux meshgraph_aux.f \
 	  --f77flags="$(F77FLAGS)" --opt="-O3"
+
+# the streamed-basis projections (krylov_stream falls back to a numpy
+# loop without it, ~5x slower per basis vector at R4 size)
+krylov_kernels:
+	cd src && FC=gfortran $(PY) -m numpy.f2py -c -m krylov_kernels krylov_kernels.f90 \
+	  --f90flags="-O3 -march=native -funroll-loops -fopenmp" --opt="-O3" -lgomp
 
 clean:
 	rm -f src/*.so

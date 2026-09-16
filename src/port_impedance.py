@@ -233,9 +233,21 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
     back to lgmres automatically, warm-started from the bicgstab
     iterate when it is finite.
 
+    ``method='gmres_stream'`` (2026-09-15) is the SCALABILITY option:
+    full GMRES within the same matvec budget with the Arnoldi basis
+    streamed to a file (``SPPEEC_STREAM_DIR``, default
+    ``~/.cache/sppeec/krylov``; see :mod:`krylov_stream`). About four
+    vectors stay in memory whatever the iteration count, against
+    lgmres's two per iteration, so the solve-phase footprint stops
+    growing with the iteration count; a full basis also needs no
+    more matvecs than lgmres(10). The price is disk traffic that
+    grows as k^2/2 vectors per cycle, served from the page cache
+    when the box has room.
+
     ``maxiter``/``inner_m`` set the lgmres budget; the bicgstab
-    iteration cap is the SAME matvec budget (maxiter*inner_m total,
-    at 2 matvecs/iteration). Note the default maxiter rose to 30 as
+    iteration cap and the streamed solver's budget are the SAME
+    matvec budget (maxiter*inner_m total, at 2 matvecs/iteration
+    for bicgstab). Note the default maxiter rose to 30 as
     inner_m fell to 10, holding that budget at 300 matvecs.
 
     ``precision`` -- fp32 campaign phase 2, the KRYLOV BASIS dtype:
@@ -283,6 +295,7 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
             "tolerance and burn the whole iteration budget. Use "
             "'auto' (which picks double here) or loosen rtol."
             % (rtol, _SINGLE_RTOL_FLOOR))
+    Aop_d, Pop_d = Aop, Pop        # the complex128 operators
     if single:
         n = Aop.shape[0]
         c64 = np.complex64
@@ -316,9 +329,9 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
             return None
         return np.asarray(g, ref.dtype)
 
-    if method not in ('lgmres', 'bicgstab'):
-        raise ValueError("method must be 'bicgstab' or 'lgmres', "
-                         "got %r" % (method,))
+    if method not in ('lgmres', 'bicgstab', 'gmres_stream'):
+        raise ValueError("method must be 'bicgstab', 'lgmres' or "
+                         "'gmres_stream', got %r" % (method,))
     # CHECKPOINT/RESUME (2026-08-26, after a 4.4 h R5 solve died ONE
     # outer cycle short of tolerance under a dropped ssh session).
     # SPPEEC_CHECKPOINT=path: every outer-cycle callback dumps the
@@ -397,6 +410,40 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
                                    maxiter=maxiter, inner_m=inner_m,
                                    x0=_cast_x0(x0, rhs),
                                    callback=_snoop))
+        if method == 'gmres_stream':
+            # THE STREAMED BASIS (2026-09-15): full GMRES within the
+            # same matvec budget, Arnoldi vectors on disk, ~4 vectors
+            # in memory whatever the iteration count. See
+            # krylov_stream. Falls back to lgmres if the basis file
+            # cannot be opened.
+            from krylov_stream import gmres_stream
+            _restart = os.environ.get('SPPEEC_STREAM_RESTART')
+            _on_res = (_status.krylov_residual if _status.enabled()
+                       else None)
+            # the solver's arithmetic is complex128 whatever the
+            # basis dtype: hand it the unwrapped operators (counted)
+            _A = Aop_d
+            if _status.enabled():
+                def _counted_d(v, _mv=Aop_d.matvec):
+                    _status.tick_matvec()
+                    return _mv(v)
+                _A = LinearOperator(Aop_d.shape, matvec=_counted_d,
+                                    dtype=np.complex128)
+            try:
+                x, flag, _ = gmres_stream(
+                    _A, np.asarray(rhs, np.complex128), Pop_d, rtol=rtol,
+                    budget=int(maxiter)*int(inner_m),
+                    restart=int(_restart) if _restart else None,
+                    x0=_cast_x0(x0, np.asarray(rhs, np.complex128)),
+                    callback=_snoop, on_residual=_on_res,
+                    basis_dtype=np.complex64 if single else np.complex128)
+            except OSError as exc:
+                warnings.warn("streamed Krylov basis unavailable (%s); "
+                              "falling back to lgmres" % (exc,))
+                x, flag = lgmres(Aop, rhs, M=Pop, rtol=rtol,
+                                 maxiter=maxiter, inner_m=inner_m,
+                                 x0=_cast_x0(x0, rhs), callback=_snoop)
+            return _finish(x, flag)
         cap = max(1, (int(maxiter)*int(inner_m))//2)
         x, flag = bicgstab(Aop, rhs, M=Pop, rtol=rtol, maxiter=cap,
                            x0=_cast_x0(x0, rhs))
