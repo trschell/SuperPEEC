@@ -351,19 +351,29 @@ def gram_on_device(basis, cp, csp, dtype, rows_per=None):
     host never sees the Gram (2026-09-15)."""
     import os
     from gpu_xfer import csr_to_device
+    # 500k rows (2026-09-16): with 1M the XNOR's build peaked the card
+    # at 10.3 of 12 GB (the spectra already resident); the chunk's
+    # cuSPARSE work buffers scale with its rows
     rows_per = int(rows_per or os.environ.get('SPPEEC_GRAM_CHUNK_ROWS',
-                                              '1000000'))
+                                              '500000'))
     Yd = csr_to_device(basis.tocsr(), cp, csp, dtype)
     YdT = Yd.T.tocsr()
     n = Yd.shape[0]
+    pool = cp.get_default_memory_pool()
     parts = []
     for r0 in range(0, n, rows_per):
         parts.append((Yd[r0:r0 + rows_per] @ YdT).tocsr())
+        # the chunk's cuSPARSE work buffers go back to the pool at odd
+        # sizes and would stay cached for the whole product: the card
+        # saw 6.9 GB held for 3.1 GB live on R4 (device survey
+        # 2026-09-16). Return them to the driver after every chunk.
+        pool.free_all_blocks()
     del Yd, YdT
     A = parts[0] if len(parts) == 1 else csp.vstack(parts, format='csr')
     del parts
     A.sum_duplicates()
-    cp.get_default_memory_pool().free_all_blocks()
+    pool.free_all_blocks()
+    cp.get_default_pinned_memory_pool().free_all_blocks()
     return A
 
 
@@ -382,17 +392,20 @@ def device_galerkin(A_d, cp, csp, dtype):
     """P0 -> (P0^T A0 P0) as a host CSR, the products on the device
     (exactly what the colour probes assemble, without the 81 passes
     and the triplet lists)."""
-    from gpu_xfer import csr_to_device
+    from gpu_xfer import csr_to_device, csr_to_host
 
     def coarse(P0):
         with cp.cuda.Device(A_d.data.device.id):
+            pool = cp.get_default_memory_pool()
             P_d = csr_to_device(P0.tocsr(), cp, csp, dtype)
             AP = (A_d @ P_d).tocsr()
+            pool.free_all_blocks()
             A1 = (P_d.T.tocsr() @ AP).tocsr()
             del AP, P_d
-            out = A1.get()
+            out = csr_to_host(A1, cp)
             del A1
-            cp.get_default_memory_pool().free_all_blocks()
+            pool.free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
             return out
     return coarse
 
@@ -415,6 +428,14 @@ class GPUGeoBlock:
         with cp.cuda.Device(self.core.devs[0]):
             self.loc = cp.asarray(factor.loc)
             self.mac = cp.asarray(factor.mac) if factor.nmac else None
+            # the identity set (2026-09-16): columns the caller
+            # preconditions itself (the equipotential path's
+            # redistribution modes) pass through unchanged. Until now
+            # a factor with one never got a device block, which left
+            # the RSFQ XNOR on host V-cycles: a 1720 s host Schur loop
+            # and 0.57 GiB of host transient per apply.
+            self.rest = (cp.asarray(factor.rest) if factor.rest.size
+                         else None)
             self.B = csp.csr_matrix(
                 factor.B.astype(self.core.dtype)) if factor.nmac \
                 else None
@@ -448,5 +469,7 @@ class GPUGeoBlock:
                 out[self.mac] = ym
             else:
                 out[self.loc] = yp
+            if self.rest is not None:
+                out[self.rest] = bg[self.rest]
             return np.float32(to_host(out, cp))
 

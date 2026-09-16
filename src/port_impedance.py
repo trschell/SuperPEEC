@@ -835,8 +835,7 @@ class _GeoMGFactor:
         # GPU validator compares host and device applies).
         self._A0_d = None
         mv0 = None
-        if (A is None and basis is not None and not self.rest.size
-                and _gpu_amg_wanted()
+        if (A is None and basis is not None and _gpu_amg_wanted()
                 and os.environ.get('SPPEEC_KEEP_HOST_COPIES') != '1'):
             try:
                 import cupy as cp
@@ -883,11 +882,7 @@ class _GeoMGFactor:
         # CPU fallback is otherwise invisible in production runs.
         self._gpu = None
         self.gpu_state = 'cpu (SPPEEC_GPU=0)'
-        if self.rest.size:
-            # GPUGeoBlock mirrors loc/mac only; the identity set is not
-            # part of its contract
-            self.gpu_state = 'cpu (explicit macro set)'
-        elif _gpu_amg_wanted():
+        if _gpu_amg_wanted():
             try:
                 from gpu_amg import GPUGeoBlock
                 self._gpu = GPUGeoBlock(self)
@@ -932,14 +927,19 @@ class _GeoMGFactor:
         # when there is one (2026-09-15; was a 32 s host loop on R4).
         if self.nmac:
             BT = self.B.T
+            # column j of a CSR matrix is an O(nnz) scan; once as CSC
+            # the extraction is O(nnz of the column) (the XNOR has
+            # thousands of macro columns)
+            Bc = self.B.tocsc()
             solve = (self._gpu.solve_local if self._gpu is not None
                      else self._A)
             BtAiB = None
             for j in range(self.nmac):
-                col = BT @ solve(self.B[:, j].toarray().ravel())
+                col = BT @ solve(Bc[:, j].toarray().ravel())
                 if BtAiB is None:
                     BtAiB = np.empty((self.nmac, self.nmac), dtype=col.dtype)
                 BtAiB[:, j] = col
+            del Bc
             self.S = lu_factor(np.float64(C - BtAiB))
         if self._gpu is not None:
             self._gpu.S = self.S

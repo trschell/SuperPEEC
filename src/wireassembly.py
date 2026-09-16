@@ -596,14 +596,17 @@ def _laplacian_current_gpu(B, parent, rhs, tol=1e-12, maxiter=50000):
     import cupy as cp
     import cupyx.scipy.sparse as csp
     from gpu_xfer import csr_to_device, to_device, to_host
+    pool = cp.get_default_memory_pool()
     Bd = csr_to_device(B.tocsr(), cp, csp, np.float64)
     BTd = Bd.T.tocsr()
     Ld = (BTd @ Bd).tocsr()
+    pool.free_all_blocks()            # the product's work buffers
     nn = Ld.shape[0]
     d = to_device((parent >= 0).astype(np.float64), cp)   # 0 at roots
     Dg = csp.diags(d)
     Lg = (Dg @ Ld @ Dg + csp.diags(1.0 - d)).tocsr()
     del Ld, Dg
+    pool.free_all_blocks()
     b0 = to_device(np.asarray(rhs, np.float64), cp)
     b = b0*d
     dinv = 1.0/Lg.diagonal()
@@ -631,7 +634,11 @@ def _laplacian_current_gpu(B, parent, rhs, tol=1e-12, maxiter=50000):
     resid = float(cp.abs(BTd @ ihat_d - b0).max())
     out = to_host(ihat_d, cp)
     del Bd, BTd, ihat_d, x, b, b0
-    cp.get_default_memory_pool().free_all_blocks()
+    pool.free_all_blocks()
+    # the pinned host staging of the transfers is cached by cupy's
+    # pinned pool as anonymous host memory (+0.4 GiB unattributed on
+    # the XNOR, device survey 2026-09-16): return it
+    cp.get_default_pinned_memory_pool().free_all_blocks()
     return out, resid
 
 

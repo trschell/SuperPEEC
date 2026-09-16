@@ -613,3 +613,49 @@ bookkeeping (5.90 -> 7.06) with the plaquette geometry close behind
 (6.76): the next two build targets, ~1.2 GiB of temporaries each.
 SPPEEC_IHAT=amg keeps the pyamg construction, which is also the
 fallback on any device failure.
+
+## The device ledger (2026-09-16)
+
+The memory survey now covers the card (device used, cupy pool in use
+and held, device items by attribute path). Measured peaks on the 12 GB
+RTX 4070 SUPER, GiB: R3 card 3.04 / live 1.15 / resident 0.78; R4
+5.52 / 3.06 / 2.07; XNOR 8.71 / 5.77 / 1.96. The card's peaks are
+transients and pool cache, not resident structures: R4's first reading
+was 8.31 because the row-chunked Gram product's cuSPARSE work buffers
+stayed cached in cupy's pool at odd sizes for the whole product --
+`gpu_amg.gram_on_device`, `device_galerkin` and
+`wireassembly._laplacian_current_gpu` now return the pool's free blocks
+after every chunk, and the pinned host pool after the transfers (its
+cache was +0.4 GiB of unattributed host memory on the XNOR). The
+XNOR's card peak is the mode apply's five complex128 padded-grid slabs
+per matvec (2.7 GiB) cycling through the pool through the whole solve.
+Resident: the GeoMG level 0 (R4 1.2 GiB), the mode spectra (XNOR 1.35),
+and the top-level FMM transfer table in complex128 everywhere (R3
+0.40). R5 on this card would need level 0 in int8 data or the
+two-card split, before the FMM device tables and leaf data.
+
+### The XNOR's preconditioner on the card (2026-09-16)
+
+The device ledger showed no GeoMG hierarchy on the card for the RSFQ
+XNOR, and an instrumented build survey showed why: `GPUGeoBlock`
+declined any factor with an identity set (columns the caller
+preconditions itself), and the equipotential path passes its
+redistribution modes as exactly that set. So the XNOR's macro Schur
+block was assembled by 1720 s of host V-cycles (29 of the build's 31
+minutes), every preconditioner apply ran on the host with its 0.57
+GiB transient, and none of the device-side GeoMG changes above ever
+reached it. The block now passes the identity set through unchanged
+(`out[rest] = b[rest]`), and the factor no longer excludes it.
+
+    RSFQ XNOR, 1 frequency        before      after
+    solver build                  1069 s      268 s
+    solve (126 matvecs)           1024 s      581 s
+    whole run                     2105 s      862 s
+    host peak                    12.21 GiB   11.71 GiB
+    card peak / resident          8.7 / 2.0  10.3 / 3.6 GiB
+    L                             unchanged to 1e-8
+
+The card is now the XNOR's tight resource: the build peak is the
+row-chunked Gram product beside the resident spectra (the chunk
+default went from 1M to 500k rows, `SPPEEC_GRAM_CHUNK_ROWS`), and the
+solve holds the spectra, the hierarchy and the mode apply's slabs.

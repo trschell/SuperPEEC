@@ -51,3 +51,11 @@ def csr_to_device(M, cp, csp, dtype=None):
     indices = to_device(M.indices, cp)
     indptr = to_device(M.indptr, cp)
     return csp.csr_matrix((data, indices, indptr), shape=M.shape)
+
+
+def csr_to_host(D, cp):
+    """scipy csr_matrix from a cupyx csr, downloaded in slices."""
+    import scipy.sparse as sp
+    D = D.tocsr()
+    return sp.csr_matrix((to_host(D.data, cp), to_host(D.indices, cp),
+                          to_host(D.indptr, cp)), shape=D.shape)
