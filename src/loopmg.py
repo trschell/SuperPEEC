@@ -367,8 +367,9 @@ def plaquette_geometry(Y, fil_axis, fil_cell, nplaq):
     nonzeros, so the index array reshapes to (nplaq, 4). The min/max
     over the 4 edges run one edge at a time (2026-09-17): the
     (nplaq, 4, 3) int64 gather was a 1.5 GiB transient on R4 (12M
-    plaquettes) for a 0.29 GiB result. Compact dtypes on the way out:
-    normal fits int8, base int32 (a lattice index).
+    plaquettes) for a 0.29 GiB result. The cells come out int32 (a
+    lattice index); the normal stays int64 because the coarse-level
+    probes and the stencil build multiply it by Python ints.
     """
     Yc = Y.tocsc()
     ptr = Yc.indptr[:nplaq + 1]
@@ -393,7 +394,9 @@ def plaquette_geometry(Y, fil_axis, fil_cell, nplaq):
     if not np.all(ok):
         raise RuntimeError("%d plaquette(s) span a single axis -- not a "
                            "lattice face" % int((~ok).sum()))
-    normal = (3 - amin - amax).astype(np.int8)
+    # normal stays int64 (0.1 GB at R4): the probes and the stencil
+    # multiply it by Python ints that do not fit int8 (numpy 2 raises)
+    normal = (3 - amin.astype(np.int64) - amax.astype(np.int64))
     return normal, base
 
 class GeoMG:

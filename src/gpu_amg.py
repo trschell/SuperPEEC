@@ -137,6 +137,8 @@ class GPUBlockAMG:
         self.S = factor.S
         self.B = csp.csr_matrix(
             factor.B.astype(self.core.dtype)) if factor.nmac else None
+        self.BT = csp.csr_matrix(
+            factor.B.T.tocsr().astype(self.core.dtype)) if factor.nmac else None
 
     def __call__(self, b):
         cp = self.cp
@@ -148,7 +150,7 @@ class GPUBlockAMG:
         if self.nmac:
             rm = bg[self.mac]
             ym_cpu = self._lu_solve(self.S, np.float64(
-                cp.asnumpy(rm - self.B.T @ yp)))
+                cp.asnumpy(rm - _rows_dot(self.BT, yp, cp))))
             ym = cp.asarray(ym_cpu.astype(dt))
             out[self.loc] = yp - self.core.solve(self.B @ ym)
             out[self.mac] = ym
@@ -343,6 +345,22 @@ class GPUGeoCore:
         return x
 
 
+def _rows_dot(BT, yp, cp):
+    """``BT @ yp`` as one fixed-order reduction per row (2026-09-17).
+    The macro block's transpose has a handful of rows with millions of
+    nonzeros each, and cuSPARSE reduces such rows with atomics: the
+    product differed by ~5e-7 apply to apply, which a ten-step lgmres
+    cycle never notices but which broke the Arnoldi relation of the
+    streamed full-GMRES cycle (R4 stalled at 1.9e-4 where it had
+    converged in 133 steps). cupy's reduction is a fixed tree."""
+    out = cp.empty(BT.shape[0], dtype=yp.dtype)
+    ptr = BT.indptr.get()
+    for j in range(BT.shape[0]):
+        a, b = int(ptr[j]), int(ptr[j + 1])
+        out[j] = cp.sum(BT.data[a:b]*yp[BT.indices[a:b]]) if b > a else 0
+    return out
+
+
 def gram_on_device(basis, cp, csp, dtype, rows_per=None):
     """``basis @ basis.T`` as a device CSR, the product taken in row
     chunks so cuSPARSE's work buffers stay bounded (the whole product
@@ -398,6 +416,10 @@ def device_galerkin(A_d, cp, csp, dtype):
         with cp.cuda.Device(A_d.data.device.id):
             pool = cp.get_default_memory_pool()
             P_d = csr_to_device(P0.tocsr(), cp, csp, dtype)
+            # one product each way (2026-09-17): a row-chunked form
+            # trips CUSPARSE_STATUS_INSUFFICIENT_RESOURCES on R4-sized
+            # chunks; the whole product needs ~3.6 GB of work buffers
+            # beside the Gram and runs cleanly on a free 12 GB card
             AP = (A_d @ P_d).tocsr()
             pool.free_all_blocks()
             A1 = (P_d.T.tocsr() @ AP).tocsr()
@@ -439,6 +461,16 @@ class GPUGeoBlock:
             self.B = csp.csr_matrix(
                 factor.B.astype(self.core.dtype)) if factor.nmac \
                 else None
+            # B^T as its own CSR (2026-09-17): `self.B.T @ yp` was a
+            # CSC-transposed spmv on the device, which cuSPARSE runs
+            # with atomics -- not bit-reproducible apply to apply. A
+            # preconditioner that is not the same map every time
+            # breaks the Arnoldi relation of a long GMRES cycle (the
+            # streamed basis stalled at 1.9e-4 on R4 where it had
+            # converged in 133 steps); lgmres's ten-step cycles hid it.
+            self.BT = csp.csr_matrix(
+                factor.B.T.tocsr().astype(self.core.dtype)) if factor.nmac \
+                else None
         self._lu_solve = factor._lu_solve
         self.S = factor.S
 
@@ -463,7 +495,7 @@ class GPUGeoBlock:
             if self.nmac:
                 rm = bg[self.mac]
                 ym_cpu = self._lu_solve(self.S, np.float64(
-                    cp.asnumpy(rm - self.B.T @ yp)))
+                    cp.asnumpy(rm - _rows_dot(self.BT, yp, cp))))
                 ym = cp.asarray(ym_cpu.astype(dt))
                 out[self.loc] = yp - self.core.solve(self.B @ ym)
                 out[self.mac] = ym

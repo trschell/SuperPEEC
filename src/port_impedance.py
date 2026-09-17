@@ -443,6 +443,16 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
                 x, flag = lgmres(Aop, rhs, M=Pop, rtol=rtol,
                                  maxiter=maxiter, inner_m=inner_m,
                                  x0=_cast_x0(x0, rhs), callback=_snoop)
+            if flag == 2:
+                # the true residual stalled under the streamed cycle
+                # (krylov_stream's stall guard): lgmres finishes from
+                # the streamed iterate, ten-step cycles from the true
+                # residual
+                warnings.warn("streamed Krylov basis: true residual "
+                              "stalled; lgmres finishes from its iterate")
+                x, flag = lgmres(Aop, rhs, M=Pop, rtol=rtol,
+                                 maxiter=maxiter, inner_m=inner_m,
+                                 x0=_cast_x0(x, rhs), callback=_snoop)
             return _finish(x, flag)
         cap = max(1, (int(maxiter)*int(inner_m))//2)
         x, flag = bicgstab(Aop, rhs, M=Pop, rtol=rtol, maxiter=cap,

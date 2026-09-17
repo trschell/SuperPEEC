@@ -73,6 +73,8 @@ CHECK_EVERY = int(os.environ.get('SPPEEC_STREAM_CHECK_EVERY', '10'))
 # little optimistic; without a margin the R3 solve paid four
 # near-miss checks (true residual 1.10, 1.03, 1.008 x tol) in a row
 CHECK_MARGIN = float(os.environ.get('SPPEEC_STREAM_CHECK_MARGIN', '0.8'))
+STALL_CHECKS = int(os.environ.get('SPPEEC_STREAM_STALL_CHECKS', '3'))
+STALL_TOL = float(os.environ.get('SPPEEC_STREAM_STALL_TOL', '0.02'))
 _VERBOSE = os.environ.get('SPPEEC_STREAM_VERBOSE') == '1'
 
 
@@ -83,6 +85,18 @@ def stream_dir():
                          'krylov')
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def _mem_available():
+    """MemAvailable in bytes (Linux), else None."""
+    try:
+        with open('/proc/meminfo') as fh:
+            for line in fh:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1])*1024
+    except OSError:
+        pass
+    return None
 
 
 def _on_ram_fs(path):
@@ -284,7 +298,29 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
     if bnorm == 0.0:
         return np.zeros(n, dt), 0, 0
     tol = rtol*bnorm
-    restart = int(budget if restart is None else min(restart, budget))
+    if restart is None:
+        # the cycle length is bounded by MEMORY, not only by the matvec
+        # budget (2026-09-17): the basis file is only fast while the
+        # page cache holds it, and a wire-bond budget of 600 steps on
+        # R4 (96 MB vectors) let a non-converging cycle grow to 40 GB
+        # on a 62 GB box -- every later step then read the whole
+        # basis from the drive. Default: half of what is available
+        # now; SPPEEC_STREAM_BYTES overrides the byte budget,
+        # SPPEEC_STREAM_RESTART the length itself.
+        restart = budget
+        bytes_env = os.environ.get('SPPEEC_STREAM_BYTES')
+        avail = _mem_available()
+        cap = (float(bytes_env) if bytes_env
+               else (0.5*avail if avail else None))
+        if cap:
+            per = n*np.dtype(basis_dtype).itemsize
+            restart = int(min(budget, max(20, cap//per)))
+            if restart < budget:
+                warnings.warn("streamed Krylov basis: restart every %d "
+                              "steps (%.1f GB of basis per cycle against "
+                              "%.1f GB available)"
+                              % (restart, restart*per/1e9, avail/1e9))
+    restart = int(min(restart, budget))
     restart = max(1, restart)
     nmv = 0
     if x0 is not None:
@@ -295,6 +331,21 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
         x = np.zeros(n, dt)
         r = b.copy()
     flag = 1
+    # STALL GUARD (2026-09-17): left preconditioning minimises |M r|,
+    # which is close to the error and is why the answers come out so
+    # accurate -- but the TRUE residual, the tolerance's quantity, can
+    # trail it in the directions M damps most. Measured on R4: two
+    # runs on the same code sat at |r|/|b| ~1.9e-4 for 100+ steps
+    # while |M r| fell to 1e-6, where a third run had converged in
+    # 133 and R3 always does. lgmres survives by restarting every ten
+    # steps from the true residual. So: if STALL_CHECKS consecutive
+    # true-residual checks fail to improve the best |r| by STALL_TOL,
+    # end the cycle and restart from the best iterate; a cycle that
+    # stalls right after a restart ends the solve with flag 2, and
+    # krylov_solve hands the iterate to lgmres.
+    best_true = beta_true = float(np.linalg.norm(r))
+    stalled_checks = 0
+    restarted_after_stall = False
     H = np.zeros((restart + 1, restart), np.complex128)
     cs = np.zeros(restart, np.float64)
     sn = np.zeros(restart, np.complex128)
@@ -381,6 +432,28 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                 nmv += 1
                 nchecks += 1
                 true = float(np.linalg.norm(r))
+                if true < best_true*(1.0 - STALL_TOL):
+                    best_true = true
+                    stalled_checks = 0
+                else:
+                    stalled_checks += 1
+                if stalled_checks >= STALL_CHECKS and not cycle_end:
+                    if restarted_after_stall:
+                        flag = 2                  # stalled twice: give up
+                        x = u
+                        done = True
+                        if _VERBOSE:
+                            print("gmres_stream: true residual stalled "
+                                  "at %.3e after a restart -- handing "
+                                  "over" % (true/bnorm), flush=True)
+                        break
+                    cycle_end = True              # restart from here
+                    restarted_after_stall = True
+                    stalled_checks = 0
+                    if _VERBOSE:
+                        print("gmres_stream: true residual stalled at "
+                              "%.3e (k %d) -- restarting the cycle"
+                              % (true/bnorm, k), flush=True)
                 if _VERBOSE:
                     print("gmres_stream: k %d nmv %d |Mr|/|b| %.3e "
                           "predicted %.3e true %.3e ratio %.3g"
@@ -399,7 +472,8 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
             if callback is not None:
                 callback(x)
             if done:
-                flag = 0
+                if flag != 2:
+                    flag = 0
                 break
         if _VERBOSE:
             print("gmres_stream: done flag %d, %d matvecs (%d residual "

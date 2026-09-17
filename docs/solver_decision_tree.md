@@ -785,3 +785,53 @@ KCL check (5.30) and the spanning forest (5.03). The R3 answer is
 5.04932 against 5.04931 mOhm, 2e-6 within the 1e-4 tolerance, with
 the geometry and hierarchy bit-identical: rounding in the solve, not
 in what is built.
+
+### The streamed basis, hardened (2026-09-17)
+
+Three things the campaign's closing measurements turned up, all in
+`krylov_stream`/`gpu_amg` now:
+
+1. **A true-residual stall guard.** Left preconditioning minimises
+   |M r|, close to the error, which is why the answers come out so
+   accurate -- but the true residual, the tolerance's quantity, can
+   trail it: on R4 two runs sat at |r|/|b| ~1.5e-4 for 100+ steps
+   while |M r| fell to 1e-6, where a third run had converged in 133
+   and R3 always does. The stored complex64 basis's rounding
+   accumulates over a long cycle (a unit case that floored at 3e-8 in
+   one cycle reached 4e-10 after a restart). So: three consecutive
+   true-residual checks without a 2% improvement end the cycle and
+   restart from the best iterate (`SPPEEC_STREAM_STALL_CHECKS`,
+   `_STALL_TOL`); a cycle that stalls again ends the solve with flag 2
+   and `krylov_solve` hands the iterate to lgmres. R4 with the guard:
+   176 steps to the stall, a restart, 15 more -- 191 matvecs, the
+   same as lgmres (178 or 189), the answer to 1e-5 of it.
+2. **A memory-bounded cycle length.** The basis file is only fast
+   while the page cache holds it; the wire-bond path's budget of 600
+   steps let a stalled cycle grow to 40 GB on this 62 GB box and
+   every later step read the whole basis from the drive. The cycle
+   length is now the smaller of the budget and half the memory
+   available at solve time divided by the vector size
+   (`SPPEEC_STREAM_BYTES`, `SPPEEC_STREAM_RESTART`).
+3. **A bit-reproducible device preconditioner.** The streamed cycle is
+   a sensitive detector of a preconditioner that is not the same map
+   on every apply. Measured on R4: the device GeoMG apply differed by
+   3e-6 relative between two applies of the same vector; every
+   V-cycle product, the coarse solve and the forward macro product
+   were bit-reproducible, and the culprit was the macro block's
+   transposed product -- six rows of millions of nonzeros, which
+   cuSPARSE reduces with atomics even as a CSR. It is now one
+   fixed-order reduction per row (`gpu_amg._rows_dot`) in both device
+   blocks, and the apply reproduces bit for bit. The same
+   non-reproducibility is why R4 lgmres took 178 or 189 matvecs on
+   identical runs (one cycle either side of the tolerance).
+
+Measured on the final code (memory survey, one frequency, the box
+otherwise idle): R4 streamed 220 matvecs, solve 1584 s, host peak 6.9
+GiB (the build; lgmres 178-189 matvecs, 1116 s, 8.9-9.4 GiB); XNOR
+streamed 100 matvecs, 594 s, 10.2 GiB (the build; lgmres 126, 581-691
+s, 11.6 GiB); R3 streamed 132, 159 s, 2.7 GiB (lgmres 167, 168 s,
+3.0). The streamed basis remains the scalability option, not the
+default: flat in the iteration count, the run peak moved into the
+build on both large flagships, and now guaranteed to terminate on the
+true residual -- at the price, on R4, of the guard's restart and the
+reads of a 200-vector basis per step.
