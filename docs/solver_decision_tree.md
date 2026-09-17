@@ -659,3 +659,49 @@ The card is now the XNOR's tight resource: the build peak is the
 row-chunked Gram product beside the resident spectra (the chunk
 default went from 1M to 500k rows, `SPPEEC_GRAM_CHUNK_ROWS`), and the
 solve holds the spectra, the hierarchy and the mode apply's slabs.
+
+## Without a card: host paths of comparable memory (2026-09-16)
+
+Several of this week's memory wins moved work to the device, and a
+user without a GPU (or with a small one) must not pay the old host
+peaks for them. Status of each device path's host twin:
+
+    device path                      host twin                             memory parity
+    streamed Krylov basis            host-only by construction             yes
+    GeoMG hierarchy (Gram on card)   tier 3: stencil, probed coarse levels yes (never forms the Gram)
+    wire-bond particular current     Jacobi-CG with the threaded csrmv     yes (was pyamg: 2.05 GiB on R4)
+    mode apply (XNOR)                lean input slabs at rtol >= 1e-5      partial: -0.8 GiB/matvec of 2.7
+
+`wireassembly._laplacian_current_cpu` is the host twin of the device
+Laplacian solve: B^T B once, grounded through the forest's roots,
+Jacobi-CG with loopmg's threaded csrmv. On R3's captured system 22.5 s
+and +0.06 GiB against pyamg's 7.2 s and +0.44 GiB (28 s and 2.05 GiB
+on R4). It is the CPU default (SPPEEC_IHAT=cg; =amg keeps pyamg; the
+device path falls through to it on any failure).
+
+The mode apply's INPUT spectra slabs (U and F) are now taken in the
+stored spectra's precision (complex64) with the accumulation kept in
+complex128, on both the host and the device path -- but only when the
+solver has declared an engineering tolerance (rtol >= 1e-5, the same
+policy as the Krylov basis; `enrich._slab_dtype`, set from the three
+Krylov call sites). Measured: at oracle tolerance the rounded inputs
+put ~1e-7 into the operator and validate_corner's 1e9 solves stall at
+a 1e-7 residual; at rtol 1e-4 the XNOR keeps its 126 matvecs and its
+answer to 1e-8. SPPEEC_MODE_SLABS=fp64|lean overrides. The rest of
+the host apply's transient (the complex128 accumulators and the FFT
+outputs) needs the tiled convolution to go further.
+
+Measured, one frequency, the same code, SPPEEC_GPU=0 against the card:
+
+    flagship    host peak, card   host peak, no card   solve wall, card / no card   answer
+    DBC R3         3.21 GB            3.15 GB             3:26 /  28:37             identical, 167 mv
+    DBC R4         9.42 GiB          10.34 GiB           1116 s / 7085 s            to 6e-7, 178 mv
+    RSFQ XNOR     11.71 GiB          15.34 GiB            581 s / 2346 s            to 1e-8, 126 mv
+
+(lgmres, the default, on all rows; the streamed basis takes ~2.3 GiB
+off R4 and ~3 GiB off the XNOR on either path.) The no-card excess is
+what the card would otherwise hold -- the XNOR's spectra (1.35 GiB)
+and hierarchy, R4's stencil tables -- plus the host apply's larger
+per-matvec transient on the XNOR, plus 0.40 GiB of plaquette basis the
+factor keeps on the host path for no reason (next batch). The wall
+gap is the host V-cycle preconditioner and is not a memory matter.

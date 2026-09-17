@@ -1550,6 +1550,14 @@ class EquiTerminalSolver:
         current split, the quantity the prescribed model had to guess.
         ``method``: see :func:`port_impedance.krylov_solve`.
         """
+        # declare the tolerance to the mode apply FIRST (2026-09-16):
+        # the rhs below applies the operator before the Krylov, and
+        # a solver that solved before would otherwise form it with the
+        # lean input slabs while a fresh one would not (validate_
+        # input_lppr's TOML == direct check, 2e-8 apart)
+        _rd = getattr(self, 'redist', None)
+        if _rd is not None:
+            _rd.lean_slabs = bool(rtol >= 1e-5)
         self.model.prepare(self.M, freq)
         self.term.set_frequency(freq)   # superconductor z(w); else no-op
         t0 = time.perf_counter()

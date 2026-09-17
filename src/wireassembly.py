@@ -541,6 +541,14 @@ class WireEddySolver:
         group total, from segment totals), matvec count, true residual.
         ``method``: see :func:`port_impedance.krylov_solve`.
         """
+        # declare the tolerance to the mode apply FIRST (2026-09-16):
+        # the rhs below applies the operator before the Krylov, and
+        # a solver that solved before would otherwise form it with the
+        # lean input slabs while a fresh one would not (validate_
+        # input_lppr's TOML == direct check, 2e-8 apart)
+        _rd = getattr(self, 'redist', None)
+        if _rd is not None:
+            _rd.lean_slabs = bool(rtol >= 1e-5)
         self.model.prepare(self.M, freq)
         t0 = time.perf_counter()
         v_f0, v_w0 = self._coupled(np.zeros(self.efg, np.complex128),
@@ -589,6 +597,51 @@ class WireEddySolver:
 
 
 # ------------------------------------------------------------- stage A2
+
+def _laplacian_current_cpu(B, parent, rhs, tol=1e-12, maxiter=50000):
+    """The host twin of :func:`_laplacian_current_gpu`: B^T B formed
+    once (float64 CSR, int32 indices), grounded through the forest's
+    roots, Jacobi-CG with loopmg's threaded csrmv. Memory: the
+    Laplacian and a handful of node vectors -- no AMG setup."""
+    from loopmg import _spmv
+    Bc = B.tocsr().astype(np.float64)
+    L = (Bc.T @ Bc).tocsr()
+    L.sort_indices()
+    nn = L.shape[0]
+    d = (parent >= 0).astype(np.float64)              # 0 at roots
+    Dg = sp.diags(d)
+    L = (Dg @ L @ Dg + sp.diags(1.0 - d)).tocsr()
+    L.sort_indices()
+    if L.indices.dtype != np.int32:
+        L.indices = L.indices.astype(np.int32)
+        L.indptr = L.indptr.astype(np.int32)
+    b0 = np.asarray(rhs, np.float64)
+    b = b0*d
+    dinv = 1.0/L.diagonal()
+    x = np.zeros(nn)
+    r = b.copy()
+    z = dinv*r
+    p = z.copy()
+    rz = r @ z
+    bn = float(np.linalg.norm(b))
+    it = 0
+    while it < maxiter and bn > 0.0:
+        Ap = _spmv(L, np.ascontiguousarray(p))
+        alpha = rz/(p @ Ap)
+        x += alpha*p
+        r -= alpha*Ap
+        it += 1
+        if it % 50 == 0 and float(np.linalg.norm(r)) <= tol*bn:
+            break
+        z = dinv*r
+        rz_new = r @ z
+        p = z + (rz_new/rz)*p
+        rz = rz_new
+    del L, r, z, p, dinv
+    ihat = Bc @ x
+    resid = float(np.abs(Bc.T @ ihat - b0).max())
+    return ihat, resid
+
 
 def _laplacian_current_gpu(B, parent, rhs, tol=1e-12, maxiter=50000):
     """ihat_f = B phi with (B^T B) phi = rhs, everything on the device.
@@ -1331,6 +1384,11 @@ class WireBondSolver:
         # holds the float64 incidence transpose or the Laplacian.
         # SPPEEC_IHAT=amg keeps the pyamg construction (also the
         # fallback on any device failure).
+        # SPPEEC_IHAT: gpu (default; falls through to cg without a
+        # card or on any device failure), cg (host Jacobi-CG with the
+        # threaded csrmv kernel: 22 s and +0.06 GiB on R3 against
+        # pyamg's 7 s and +0.44 GiB -- the no-GPU path of comparable
+        # memory, 2026-09-16), amg (pyamg), tree (reference only).
         mode = os.environ.get('SPPEEC_IHAT', 'gpu')
         if mode == 'gpu' and os.environ.get('SPPEEC_GPU', 'auto') != '0':
             try:
@@ -1338,14 +1396,22 @@ class WireBondSolver:
                     self.B, self.parent, rhs)
             except Exception as exc:
                 warnings.warn("device Laplacian solve failed (%s: %s); "
-                              "pyamg path" % (type(exc).__name__, exc))
-                mode = 'amg'
+                              "host CG" % (type(exc).__name__, exc))
+                mode = 'cg'
             else:
                 if resid > 1e-9:
                     raise RuntimeError("Laplacian CG ihat residual %g"
                                        % resid)
                 self._chords_build(chord_wires, wcomp, adj, _wire_into)
                 return
+        if mode in ('gpu', 'cg'):
+            self.ihat_f, resid = _laplacian_current_cpu(
+                self.B, self.parent, rhs)
+            if resid > 1e-9:
+                raise RuntimeError("Laplacian CG ihat residual %g"
+                                   % resid)
+            self._chords_build(chord_wires, wcomp, adj, _wire_into)
+            return
         BT = self.B.T.tocsc().astype(np.float64)
         if mode == 'tree':
             self.ihat_f = _tree_current(self.parent, self.pedge,
@@ -1557,6 +1623,14 @@ class WireBondSolver:
         Oracle-grade comparisons pass rtol=1e-10 explicitly -- the
         validators do. ``method``: BiCGSTAB default / lgmres
         selectable, see :func:`port_impedance.krylov_solve`."""
+        # declare the tolerance to the mode apply FIRST (2026-09-16):
+        # the rhs below applies the operator before the Krylov, and
+        # a solver that solved before would otherwise form it with the
+        # lean input slabs while a fresh one would not (validate_
+        # input_lppr's TOML == direct check, 2e-8 apart)
+        _rd = getattr(self, 'redist', None)
+        if _rd is not None:
+            _rd.lean_slabs = bool(rtol >= 1e-5)
         self.model.prepare(self.M, freq)
         t0 = time.perf_counter()
         v_f0, v_w0 = self._coupled(self.ihat_f*current,

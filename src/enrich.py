@@ -27,6 +27,7 @@ partial-cell inductance correction (subpixel stage B) for cylinders
 and axis-aligned slabs alike, expressed as the aggregate-aggregate
 block of the fold, ``dL = w'Tw - u'Tu``.
 """
+import os
 import warnings
 
 import numpy as np
@@ -1232,8 +1233,16 @@ class Enrichment:
             uf = np.zeros(self.nmode_full, dtype=np.complex128)
             uf[self.mode_mask] = u
             u = uf
-        U = np.empty((km,) + self.pad, dtype=dt)
-        F = np.empty(self.pad, dtype=dt)
+        # the INPUT spectra U and F in the stored spectra's precision
+        # (complex64 by default), the accumulation in dt (2026-09-16,
+        # the no-GPU path of comparable memory): the products cast
+        # per element into the complex128 accumulator, so only the
+        # inputs are rounded -- as the stored spectra already are.
+        # km+3 complex128 slabs were 2.7 GiB per matvec on the XNOR;
+        # SPPEEC_MODE_SLABS=fp64 keeps them all in dt for A/B.
+        sdt = self._slab_dtype(dt)
+        U = np.empty((km,) + self.pad, dtype=sdt)
+        F = np.empty(self.pad, dtype=sdt)
         acc = np.empty(self.pad, dtype=dt)
         tmp = np.empty(self.pad, dtype=dt)
         for m in range(km):
@@ -1251,18 +1260,42 @@ class Enrichment:
                     np.conjugate(Fmn, out=tmp)
                     tmp *= U[n2]
                 else:
-                    np.multiply(Fmn, U[n2], out=tmp)
+                    # dtype= forces the complex128 loop: numpy picks
+                    # the loop from the INPUT types, and complex64
+                    # inputs would otherwise multiply in complex64
+                    np.multiply(Fmn, U[n2], out=tmp, dtype=tmp.dtype)
                 acc += tmp
             out_u[m::km] = self._gather(sfft.ifftn(acc, overwrite_x=True))
-        np.multiply(self.Fc[0], U[0], out=acc)      # convolution
+        np.multiply(self.Fc[0], U[0], out=acc, dtype=acc.dtype)   # convolution
         for m in range(1, km):
-            np.multiply(self.Fc[m], U[m], out=tmp)
+            np.multiply(self.Fc[m], U[m], out=tmp, dtype=tmp.dtype)
             acc += tmp
         if masked:
             out_u = out_u[self.mode_mask]
         return out_u, self._gather(sfft.ifftn(acc, overwrite_x=True)).astype(np.complex128)
 
     # -- preconditioning -------------------------------------------------
+
+    def _slab_dtype(self, dt):
+        """dtype of the INPUT spectra slabs U and F: the stored
+        spectra's (complex64) when the solver has declared an
+        engineering tolerance (``lean_slabs``, set from rtol >= 1e-5
+        like the Krylov basis policy), else the accumulation dtype.
+        Measured: rounding the inputs puts ~1e-7 into the operator,
+        which stalls oracle-grade solves (validate_corner at 1e9) and
+        costs nothing at rtol 1e-4. SPPEEC_MODE_SLABS=fp64 forces the
+        full-precision slabs, =lean forces the lean ones."""
+        env = os.environ.get('SPPEEC_MODE_SLABS')
+        if env == 'fp64':
+            return dt
+        if env == 'lean' or getattr(self, 'lean_slabs', False):
+            # the host spectra are released after the device upload:
+            # read the recorded dtype, not self.Fu
+            sd = getattr(self, '_spec_dtype', None)
+            if sd is None:
+                sd = self.Fu.dtype if self.Fu is not None else dt
+            return np.dtype(sd)
+        return dt
 
     def _apply_fft_gpu(self, u, i_f, dt):
         """apply_fft on the device: slabs, FFTs and products in cupy,
@@ -1302,7 +1335,8 @@ class Enrichment:
             uf[self.mode_mask] = u
             u = uf
         from gpu_xfer import to_device, to_host
-        U = cp.empty((km,) + self.pad, dtype=dt)
+        sdt = self._slab_dtype(dt)      # input slabs, see _slab_dtype
+        U = cp.empty((km,) + self.pad, dtype=sdt)
         tmp = cp.empty(self.pad, dtype=dt)
         for m in range(km):
             tmp[...] = 0.0
@@ -1310,7 +1344,7 @@ class Enrichment:
             U[m] = cp.fft.fftn(tmp)
         tmp[...] = 0.0
         tmp[g3] = to_device(i_f, cp)
-        F = cp.fft.fftn(tmp)
+        F = cp.fft.fftn(tmp).astype(sdt, copy=False)
         acc = cp.empty(self.pad, dtype=dt)
         out_u = np.empty(u.size, dtype=np.complex128)
         for m in range(km):
@@ -1322,12 +1356,12 @@ class Enrichment:
                     cp.conjugate(Fmn, out=tmp)
                     tmp *= U[n2]
                 else:
-                    cp.multiply(Fmn, U[n2], out=tmp)
+                    cp.multiply(Fmn, U[n2], out=tmp, dtype=tmp.dtype)
                 acc += tmp
             out_u[m::km] = to_host(cp.fft.ifftn(acc)[g3], cp)
-        cp.multiply(Fc[0], U[0], out=acc)
+        cp.multiply(Fc[0], U[0], out=acc, dtype=acc.dtype)
         for m in range(1, km):
-            cp.multiply(Fc[m], U[m], out=tmp)
+            cp.multiply(Fc[m], U[m], out=tmp, dtype=tmp.dtype)
             acc += tmp
         out_f = to_host(cp.fft.ifftn(acc)[g3], cp).astype(np.complex128)
         del U, F, acc, tmp
