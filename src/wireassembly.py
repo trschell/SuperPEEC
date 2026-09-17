@@ -66,6 +66,7 @@ import time
 import os
 import warnings
 import numpy as np
+from spmv import spmv_c
 import scipy.sparse as sp
 from scipy.sparse.linalg import LinearOperator, lgmres
 
@@ -1585,10 +1586,10 @@ class WireBondSolver:
         BT = getattr(self, '_BmatT', None)
         if BT is None:
             BT = self._BmatT = self.Bmat.T.tocsr()
-        i = self.Bmat @ x
+        i = spmv_c(self.Bmat, x)
         self._coupled(i[:self.efg], i[self.efg:], out=buf)
         del i                                # before the transposed product
-        return BT @ buf
+        return spmv_c(BT, buf)
 
     def _precond(self, vec):
         return self.chol(np.real(vec)) + 1j*self.chol(np.imag(vec))
@@ -1635,7 +1636,7 @@ class WireBondSolver:
         t0 = time.perf_counter()
         v_f0, v_w0 = self._coupled(self.ihat_f*current,
                                    self.ihat_w*current)
-        rhs = -(self.Bmat.T @ np.concatenate([v_f0, v_w0]))
+        rhs = -spmv_c(self.Bmat.T, np.concatenate([v_f0, v_w0]))
         Aop = LinearOperator((self.size,)*2, matvec=self._matvec,
                              dtype=np.complex128)
         Pop = LinearOperator((self.size,)*2, matvec=self._precond,
@@ -1647,7 +1648,7 @@ class WireBondSolver:
                                precision=precision)
         nrhs = np.linalg.norm(rhs)
         resid = (np.linalg.norm(rhs - Aop @ x)/nrhs if nrhs > 0 else 0.0)
-        i = self.Bmat @ x
+        i = spmv_c(self.Bmat, x)
         i_f = self.ihat_f*current + i[:self.efg]
         i_w = self.ihat_w*current + i[self.efg:]
         v_f, v_w = self._coupled(i_f, i_w)

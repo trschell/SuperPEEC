@@ -912,6 +912,8 @@ class _GeoMGFactor:
                                   "failed (%s: %s) -- CPU apply"
                                   % (type(exc).__name__, exc))
         self._A0_d = None              # the core holds it now
+        if os.environ.get('SPPEEC_KEEP_HOST_COPIES') != '1':
+            self._basis = None         # only ever needed for a device level 0
         if self._gpu is None and self.mg.levels[0] is None \
                 and self.mg._sten0 is None:
             raise RuntimeError("GeoMG: no level-0 operator on either "

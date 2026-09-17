@@ -705,3 +705,44 @@ and hierarchy, R4's stencil tables -- plus the host apply's larger
 per-matvec transient on the XNOR, plus 0.40 GiB of plaquette basis the
 factor keeps on the host path for no reason (next batch). The wall
 gap is the host V-cycle preconditioner and is not a memory matter.
+
+## The remaining host items on the flagships (2026-09-16, item 3)
+
+Four changes, one of them general:
+
+* **`spmv.spmv_c`: a real sparse matrix times a complex vector as two
+  real products.** scipy's CSR/CSC matvec kernels take one data type,
+  so a float64 basis times a complex128 vector first converts the whole
+  data array to complex128: measured at R4 size (48M nonzeros) a
+  +0.89 GiB transient per product against +0.36 as two real products,
+  0.21 against 0.17 s. Both loop-basis operators (wire-bond `Bmat`,
+  equipotential `Y`/`YT` and the Gram-correction products) now use it.
+  R4 solve survey: the operator's per-matvec transient 0.90 -> 0.42
+  GiB, memory survey peak 9.42 -> 8.94 GiB (lgmres), same 178 matvecs,
+  answer to 4e-7, +1.4% wall.
+* **The equipotential loop block as VIEWS.** `_Yl`/`_YlT` were a
+  row-sliced copy of Y's loop columns and a transposed copy; the loop
+  columns are a prefix of the CSC arrays and carry no mode rows
+  (asserted), so both are now views over Y's storage. They are created
+  lazily in the Gram-corrected readout at the end of a solve, so on
+  the XNOR this takes 0.75 GiB off the resident set AFTER the solve
+  (6.70 -> 5.95 GiB, what a second frequency of a sweep would carry)
+  and not off the single-frequency peak (11.71 -> 11.61).
+* **The preconditioner apply writes its two halves straight into the
+  complex output** (`_precond`, and the Gram-correction `pre`):
+  `float64(re) + 1j*float64(im)` made four full-length temporaries,
+  0.58 GiB per apply on the XNOR whose vector carries tens of millions
+  of mode columns. Not the XNOR's peak-setter -- that is the
+  operator's 1.17 GiB transient (the device mode apply's host side and
+  the tree/coupler temporaries) -- so it lowers the apply, not the
+  peak. Measured apply transient after: see below.
+* **The plaquette basis is dropped on the CPU path** once the
+  hierarchy exists (it was only ever needed to build a device level
+  0): -0.40 GiB resident on R4 without a card.
+
+The XNOR's per-matvec picture after this (solve survey, device paths):
+operator 1.17 GiB (of which the mode apply 0.40), preconditioner
+0.38 GiB (was 0.58; the rest is the mode block's own product output). What is left on the XNOR is the operator's transient and
+the lgmres basis (the streamed basis removes the latter). Peaks now, GiB:
+R3 2.7 (streamed) / R4 8.94 (lgmres) or ~7.1 (streamed) / XNOR 11.61
+(lgmres) or ~8.6 (streamed).

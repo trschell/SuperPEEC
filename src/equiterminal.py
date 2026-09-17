@@ -68,6 +68,7 @@ import os
 import time
 
 import numpy as np
+from spmv import spmv_c
 import scipy.sparse as sp
 from scipy.sparse.linalg import LinearOperator, lsqr, lgmres
 import sksparse.cholmod as cholmod
@@ -1525,7 +1526,7 @@ class EquiTerminalSolver:
 
     def _mesh_matvec(self, w):
         self.matvecs += 1
-        return self.YT.dot(self.apply_Z(self.Y.dot(w)))
+        return spmv_c(self.YT, self.apply_Z(spmv_c(self.Y, w)))
 
     # -- the solve -----------------------------------------------------
 
@@ -1593,7 +1594,7 @@ class EquiTerminalSolver:
         else:
             raise ValueError("readout must be 'tree' or 'lsqr', got %r"
                              % (readout,))
-        rhs = -self.YT.dot(self.apply_Z(ihat))
+        rhs = -spmv_c(self.YT, self.apply_Z(ihat))
         Aop = LinearOperator((self.meshsize,)*2, matvec=self._mesh_matvec,
                              dtype=np.complex128)
         Pop = LinearOperator((self.meshsize,)*2, matvec=self._precond,
@@ -1622,7 +1623,7 @@ class EquiTerminalSolver:
         # reference to an array the caller already holds.
         self._last_w = w
         with _spstatus.task('readout: expand basis'):
-            i = self.Y.dot(w) + ihat
+            i = spmv_c(self.Y, w) + ihat
         # Z i = B phi with phi the PHYSICAL potential (see the module
         # docstring): no sign flip to undo here.
         with _spstatus.task('readout: apply_Z'):
@@ -1770,12 +1771,21 @@ class EquiTerminalSolver:
             # the loop columns and their nonzero rows only (the mode
             # rows of a loop column are zero): a 4.5M-row operator in
             # place of the 28.5M-row padded one on the XNOR
-            self._Yl = sp.csr_matrix(self.Y[:self.efg + self.term.n, :nl])
-            self._YlT = self._Yl.T.tocsr()
+            # VIEWS over Y's CSC data (2026-09-16): the loop columns are
+            # a prefix of the column-compressed arrays and carry no
+            # mode rows, so the loop block and its transpose share
+            # Y's storage -- the two copies were 0.8 GiB on the XNOR
+            Y = self.Y
+            e = int(Y.indptr[nl])
+            rows = self.efg + self.term.n
+            assert Y.indices[:e].max() < rows, "loop columns reach mode rows"
+            self._Yl = sp.csc_matrix((Y.data[:e], Y.indices[:e],
+                                      Y.indptr[:nl + 1]), shape=(rows, nl))
+            self._YlT = self._Yl.T
         Yl, YlT = ((self._Yl, self._YlT) if self.nu else (self.Y, self.YT))
 
         def gram(x):
-            return YlT.dot(Yl.dot(x))
+            return spmv_c(YlT, spmv_c(Yl, x))
 
         def pre(v):
             if not self.nu:
@@ -1785,9 +1795,10 @@ class EquiTerminalSolver:
             # would be zero anyway
             vp = np.zeros(n, dtype=np.complex128)
             vp[:nl] = v
-            re = self.chol(np.float32(np.real(vp)))
-            im = self.chol(np.float32(np.imag(vp)))
-            return (np.float64(re[:nl]) + 1j*np.float64(im[:nl]))
+            out = np.empty(nl, dtype=np.complex128)
+            out.real = self.chol(np.float32(np.real(vp)))[:nl]
+            out.imag = self.chol(np.float32(np.imag(vp)))[:nl]
+            return out
 
         Gop = LinearOperator((nl, nl), matvec=gram, dtype=np.complex128)
         Pop = LinearOperator((nl, nl), matvec=pre, dtype=np.complex128)
@@ -1795,7 +1806,7 @@ class EquiTerminalSolver:
                           inner_m=10, outer_k=3, maxiter=maxiter)
         c = np.concatenate([cl, d[nl:]])
         c0 = np.concatenate([c0[:nl], d[nl:]])
-        full = LinearOperator((n, n), matvec=lambda x: self.YT.dot(self.Y.dot(x)),
+        full = LinearOperator((n, n), matvec=lambda x: spmv_c(self.YT, spmv_c(self.Y, x)),
                               dtype=np.complex128)
         r0 = np.linalg.norm(d - full.matvec(c0))
         r1 = np.linalg.norm(d - full.matvec(c))
@@ -1810,9 +1821,13 @@ class EquiTerminalSolver:
         return c if r1 <= r0 else c0
 
     def _precond(self, vec):
-        re = self.chol(np.float32(np.real(vec)))
-        im = self.chol(np.float32(np.imag(vec)))
-        out = np.float64(re) + 1j*np.float64(im)
+        # the two halves written straight into the complex output
+        # (2026-09-16): float64(re) + 1j*float64(im) made four full-
+        # length temporaries, 0.58 GiB per apply on the XNOR whose
+        # vector carries tens of millions of mode columns
+        out = np.empty(vec.shape, dtype=np.complex128)
+        out.real = self.chol(np.float32(np.real(vec)))
+        out.imag = self.chol(np.float32(np.imag(vec)))
         if getattr(self, '_mode_pc', None) is not None:
             # the mode tail of the cycle basis is an identity block, so
             # the Gram Cholesky leaves it unpreconditioned -- apply the
