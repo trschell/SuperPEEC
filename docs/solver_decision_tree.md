@@ -835,3 +835,50 @@ default: flat in the iteration count, the run peak moved into the
 build on both large flagships, and now guaranteed to terminate on the
 true residual -- at the price, on R4, of the guard's restart and the
 reads of a 200-vector basis per step.
+
+## CPU-only wall time: the profile and the first levers (2026-09-17)
+
+Without a card the R3 solve took 1436 s against 168 s with one, at the
+same 167 matvecs. A CPU-only solve survey attributed it (per matvec):
+
+    phase                       card       CPU before    CPU after
+    preconditioner apply       0.09 s        6.54 s        0.94 s
+    operator (matvec)          0.89          2.12          2.11
+      of which P2P (x3)        0.11          0.33          0.34
+      of which top-level M2L     --          0.25          0.25
+    solve total                168 s        1436 s         510 s
+
+The preconditioner apply was 75% of the CPU solve, at 70x the card's
+cost while the operator was only 2.4x. Inside one apply: two complete
+four-cycle V-cycle solves (the local block and the macro correction),
+each 1.7 s, 98% of it the level-0 stencil kernels running at ~3
+GFLOP/s -- the reduction over the stencil entries was the innermost
+loop, with runtime offsets, which does not vectorise. Measured
+non-levers: 12 OpenMP threads instead of 4 gain 35% on the stencil and
+lose more on the sparse levels; two V-cycles per apply halve the apply
+but cost 167 -> 230 matvecs, a wash once the apply is one solve.
+
+Shipped:
+
+1. **The macro correction from kept columns.** The Schur assembly
+   already solves M B e_j for every macro column; the columns are kept
+   (float32, within SPPEEC_MACRO_COLS_MB = 512 MB, so R3/R4's six but
+   not the XNOR's hundreds) and the apply's correction yp - M(B ym) is
+   a dense (nloc x nmac) product instead of a second V-cycle solve.
+   Host apply 3.48 -> 1.52 s; the device block uses them too.
+2. **Vectorisable stencil kernels** (STENMV/STENJAC, _S and _D): the
+   stencil entry is now the OUTER loop and the contiguous X index the
+   innermost, so each inner loop is a stride-1 saxpy with loop-
+   invariant offsets. Sweep 0.169 -> 0.062 s, one V-cycle solve
+   1.71 -> 0.61 s; host apply 3.48 -> 0.62 s with (1). The summation
+   order changed, so the stencil is now always certified to tolerance
+   against the matrix path, never bitwise.
+3. **The top-level M2L kernel threaded** over its 25 output channels
+   (bit-identical; FMMtop now built with -fopenmp). The kernel itself
+   is 15 ms at R4 size; that phase's 0.25 s is its FFTs and gathers.
+
+R3 CPU-only, whole run: 28:37 -> 17:20 (1) -> 9:34 (1+2+3), against
+3:26 with the card; answer and matvec count unchanged. What is left
+on the host, in order: P2P at 3x the card's per-call cost (170 s of
+510), the top-level M2L's FFTs (125 s), the apply's remaining 0.9 s
+(155 s). R4 and the XNOR are not yet re-measured CPU-only.

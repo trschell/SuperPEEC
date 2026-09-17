@@ -27,7 +27,7 @@ mp_fortran:
 
 fmmtop:
 	cd src && FC=gfortran $(PY) -m numpy.f2py -c -m FMMtop fmmtop.f \
-	  --f77flags="$(F77FLAGS)" --opt="-O3"
+	  --f77flags="$(F77FLAGS) -fopenmp" --opt="-O3" -lgomp
 
 f_setup:
 	cd src && FC=gfortran $(PY) -m numpy.f2py -c -m f_setup f_setup.f \

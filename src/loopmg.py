@@ -222,7 +222,9 @@ class _Stencil0:
                          + inv[1:][same])
         prec = {(int(p)//64, int(p) % 64) for p in pair}
         conf = {(a_, b_) for (a_, b_) in prec if (b_, a_) in prec}
-        mode = 'exact' if not conf and basis is None else 'reordered'
+        # always to tolerance (2026-09-17): the kernels sum the stencil
+        # entries in a vectorisable order that differs from the csr path
+        mode = 'reordered'
         prec -= conf
         del di, dj, dv, dvec, key, inv, same, pair
         if basis is not None:

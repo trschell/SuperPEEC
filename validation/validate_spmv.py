@@ -174,9 +174,14 @@ def main():
         b = rng.standard_normal(A.shape[0]).astype(np.float32)
         import mp_fortran as mpf
         ref = mpf.jacobi8_s(A8.indptr, A8.indices, A8.data, x, b, wdi)
-        check('F: stencil fused sweep bit-identical to jacobi8',
-              np.array_equal(
-                  mg._sten0.jacobi(x, b, mg._wdi0_t, 1), ref))
+        # to float32 rounding since 2026-09-17: the stencil kernels sum
+        # the entries in a vectorisable order (entry outer, X inner);
+        # the matvec stays bit-identical (sums of +-1 are exact in any
+        # order) but the fused update's rounding differs
+        got = mg._sten0.jacobi(x, b, mg._wdi0_t, 1)
+        rel = float(np.linalg.norm(got - ref)/max(np.linalg.norm(ref), 1e-30))
+        check('F: stencil fused sweep matches jacobi8 to fp32 rounding',
+              rel < 1e-6, 'rel %.2e' % rel)
         # threaded == serial for the tiled kernels, fresh processes
         st_probe = (
             "import os, sys, hashlib, numpy as np\n"
@@ -215,8 +220,10 @@ def main():
               '; '.join(errs) or repr(hs))
         check('F: tiled kernels threaded == serial',
               len(hs) == 2 and hs[0] == hs[1], repr(hs))
-        check('F: single-block Gram engages in exact mode',
-              getattr(mg._sten0, 'mode', None) == 'exact')
+        # 'reordered' since 2026-09-17: certification is to tolerance,
+        # never bitwise (the kernels' summation order is the fast one)
+        check('F: single-block Gram engages (certified to tolerance)',
+              getattr(mg._sten0, 'mode', None) == 'reordered')
 
     # G. multi-block geometry: no global slot order exists (measured
     # 30 precedence conflicts on the halfbridge), so the stencil

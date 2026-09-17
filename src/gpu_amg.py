@@ -473,6 +473,7 @@ class GPUGeoBlock:
                 else None
         self._lu_solve = factor._lu_solve
         self.S = factor.S
+        self.MB = getattr(factor, '_MB', None)   # kept macro columns
 
     def solve_local(self, rp):
         """The local (plaquette) block solve for a host vector."""
@@ -496,9 +497,14 @@ class GPUGeoBlock:
                 rm = bg[self.mac]
                 ym_cpu = self._lu_solve(self.S, np.float64(
                     cp.asnumpy(rm - _rows_dot(self.BT, yp, cp))))
-                ym = cp.asarray(ym_cpu.astype(dt))
-                out[self.loc] = yp - self.core.solve(self.B @ ym)
-                out[self.mac] = ym
+                if self.MB is not None:
+                    out[self.loc] = yp - to_device(
+                        (self.MB @ ym_cpu.astype(np.float32)).astype(dt), cp)
+                    out[self.mac] = cp.asarray(ym_cpu.astype(dt))
+                else:
+                    ym = cp.asarray(ym_cpu.astype(dt))
+                    out[self.loc] = yp - self.core.solve(self.B @ ym)
+                    out[self.mac] = ym
             else:
                 out[self.loc] = yp
             if self.rest is not None:

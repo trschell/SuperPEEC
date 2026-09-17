@@ -16,6 +16,13 @@ CF2PY INTEGER, INTENT(HIDE), DEPEND(FTRANS) :: NNMAX2=SHAPE(FTRANS,3)
 C
       INTEGER N,M,J,K,IDXNM,NNMAXIDXNM,IDXJK,IDXNMJK
 C
+C     Threaded over the (N,M) OUTPUT channels (2026-09-17): each
+C     channel's accumulation keeps its serial order, so threaded ==
+C     serial bit for bit; the kernel was the second-largest phase of a
+C     CPU-only solve once the preconditioner was fixed (0.77 s per
+C     matvec on R3, serial). Needs -fopenmp in Makefile_multipole.
+!$OMP PARALLEL DO DEFAULT(SHARED) SCHEDULE(DYNAMIC)
+!$OMP& PRIVATE(N, M, J, K, IDXNM, NNMAXIDXNM, IDXJK, IDXNMJK, X, Y, Z)
       DO N = 0, NMAX
           DO M = -N, N
               IDXNM = N**2 + N + M
@@ -38,4 +45,5 @@ C
               ENDDO
           ENDDO
       ENDDO
+!$OMP END PARALLEL DO
       END

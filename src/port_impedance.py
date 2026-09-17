@@ -945,16 +945,34 @@ class _GeoMGFactor:
             Bc = self.B.tocsc()
             solve = (self._gpu.solve_local if self._gpu is not None
                      else self._A)
+            # KEEP the solved macro columns M B e_j when they fit
+            # (2026-09-17): the apply's macro correction, yp - M(B ym),
+            # is then a (nloc x nmac) dense product instead of a
+            # second full V-cycle solve -- half of every host apply on
+            # R3/R4 (nmac 6), where one four-cycle solve is 1.7 s.
+            # Beyond the byte budget (the XNOR's hundreds of macros)
+            # the two-solve apply stands. SPPEEC_MACRO_COLS_MB sets
+            # the budget; 0 disables.
+            budget = float(os.environ.get('SPPEEC_MACRO_COLS_MB', '512'))*2**20
+            keep = 0 < self.loc.size*self.nmac*4 <= budget
+            self._MB = (np.empty((self.loc.size, self.nmac), dtype=np.float32)
+                        if keep else None)
             BtAiB = None
             for j in range(self.nmac):
-                col = BT @ solve(Bc[:, j].toarray().ravel())
+                mb = solve(Bc[:, j].toarray().ravel())
+                if keep:
+                    self._MB[:, j] = mb
+                col = BT @ mb
                 if BtAiB is None:
                     BtAiB = np.empty((self.nmac, self.nmac), dtype=col.dtype)
                 BtAiB[:, j] = col
             del Bc
             self.S = lu_factor(np.float64(C - BtAiB))
+        else:
+            self._MB = None
         if self._gpu is not None:
             self._gpu.S = self.S
+            self._gpu.MB = self._MB
 
     def _A(self, r):
         return self.mg(r, cycles=self.cycles)
@@ -968,7 +986,10 @@ class _GeoMGFactor:
         out = np.empty(self.n, dtype=self._dt)
         if self.nmac:
             ym = self._lu_solve(self.S, np.float64(rm - self.B.T @ yp))
-            out[self.loc] = yp - self._A(self.B @ ym.astype(self._dt))
+            if self._MB is not None:
+                out[self.loc] = yp - self._MB @ ym.astype(np.float32)
+            else:
+                out[self.loc] = yp - self._A(self.B @ ym.astype(self._dt))
             out[self.mac] = ym
         else:
             out[self.loc] = yp

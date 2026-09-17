@@ -1720,6 +1720,9 @@ CF2PY INTEGER, INTENT(HIDE), DEPEND(NSRC) :: NSL=SIZE(NSRC)
       INTEGER XL, XH, YL, YH, ZL, ZH
       REAL PAD(0:TL+1, 0:TL+1, 0:TL+1, 3)
       REAL ACC, TMP
+      INTEGER DX, DY, DZ, NS
+      REAL CS
+      REAL ACCT(TL, TL, TL)
 C     VOLATILE: no FMA contraction of the
 C     multiply-add tail (bit-identity with the
 C     separately-rounded csr/numpy path)
@@ -1727,6 +1730,7 @@ C     separately-rounded csr/numpy path)
 !$OMP PARALLEL DO DEFAULT(SHARED)
 !$OMP& PRIVATE(T, ON, S, X, Y, Z, HX, HY, HZ, NB)
 !$OMP& PRIVATE(XL, XH, YL, YH, ZL, ZH, PAD, ACC, TMP)
+!$OMP& PRIVATE(DX, DY, DZ, NS, CS, ACCT)
       DO T = 1, NT
           DO ON = 1, 3
           DO Z = 0, TL + 1
@@ -1765,17 +1769,37 @@ C         1 (HX=+1), landing at PAD coord X + HX*TL.
           ENDDO
           ENDDO
           ENDDO
+C         stencil entry OUTER, contiguous X innermost (2026-09-17), the
+C         product accumulated in a tile-sized temp; see STENMV.
           DO ON = 1, 3
           DO Z = 1, TL
           DO Y = 1, TL
           DO X = 1, TL
-              ACC = 0.0
-              DO S = SPTR(ON) + 1, SPTR(ON + 1)
-                  ACC = ACC + CF(S)*PAD(X + OF(1, S), Y + OF(2, S),
-     +                                  Z + OF(3, S), NSRC(S))
+              ACCT(X, Y, Z) = 0.0
+          ENDDO
+          ENDDO
+          ENDDO
+          DO S = SPTR(ON) + 1, SPTR(ON + 1)
+              DX = OF(1, S)
+              DY = OF(2, S)
+              DZ = OF(3, S)
+              NS = NSRC(S)
+              CS = CF(S)
+              DO Z = 1, TL
+              DO Y = 1, TL
+              DO X = 1, TL
+                  ACCT(X, Y, Z) = ACCT(X, Y, Z)
+     +                + CS*PAD(X + DX, Y + DY, Z + DZ, NS)
               ENDDO
-              TMP = WT(X, Y, Z, ON, T)*(BT(X, Y, Z, ON, T) - ACC)
-              YT(X, Y, Z, ON, T) = PAD(X, Y, Z, ON) + TMP
+              ENDDO
+              ENDDO
+          ENDDO
+          DO Z = 1, TL
+          DO Y = 1, TL
+          DO X = 1, TL
+              YT(X, Y, Z, ON, T) = PAD(X, Y, Z, ON)
+     +            + WT(X, Y, Z, ON, T)
+     +              *(BT(X, Y, Z, ON, T) - ACCT(X, Y, Z))
           ENDDO
           ENDDO
           ENDDO
@@ -1818,9 +1842,12 @@ CF2PY INTEGER, INTENT(HIDE), DEPEND(NSRC) :: NSL=SIZE(NSRC)
       INTEGER XL, XH, YL, YH, ZL, ZH
       REAL PAD(0:TL+1, 0:TL+1, 0:TL+1, 3)
       REAL ACC
+      INTEGER DX, DY, DZ, NS
+      REAL CS
 !$OMP PARALLEL DO DEFAULT(SHARED)
 !$OMP& PRIVATE(T, ON, S, X, Y, Z, HX, HY, HZ, NB)
 !$OMP& PRIVATE(XL, XH, YL, YH, ZL, ZH, PAD, ACC)
+!$OMP& PRIVATE(DX, DY, DZ, NS, CS)
       DO T = 1, NT
           DO ON = 1, 3
           DO Z = 0, TL + 1
@@ -1859,18 +1886,33 @@ C         1 (HX=+1), landing at PAD coord X + HX*TL.
           ENDDO
           ENDDO
           ENDDO
+C         stencil entry OUTER, contiguous X innermost (2026-09-17): the
+C         offsets are then loop-invariant and the X loop is a stride-1
+C         saxpy the compiler vectorises; the reduction-over-S form ran
+C         at ~3 GFLOP/s on four cores. Summation order changes, so the
+C         stencil is certified to tolerance, never bitwise.
           DO ON = 1, 3
           DO Z = 1, TL
           DO Y = 1, TL
           DO X = 1, TL
-              ACC = 0.0
-              DO S = SPTR(ON) + 1, SPTR(ON + 1)
-                  ACC = ACC + CF(S)*PAD(X + OF(1, S), Y + OF(2, S),
-     +                                  Z + OF(3, S), NSRC(S))
+              YT(X, Y, Z, ON, T) = 0.0
+          ENDDO
+          ENDDO
+          ENDDO
+          DO S = SPTR(ON) + 1, SPTR(ON + 1)
+              DX = OF(1, S)
+              DY = OF(2, S)
+              DZ = OF(3, S)
+              NS = NSRC(S)
+              CS = CF(S)
+              DO Z = 1, TL
+              DO Y = 1, TL
+              DO X = 1, TL
+                  YT(X, Y, Z, ON, T) = YT(X, Y, Z, ON, T)
+     +                + CS*PAD(X + DX, Y + DY, Z + DZ, NS)
               ENDDO
-              YT(X, Y, Z, ON, T) = ACC
-          ENDDO
-          ENDDO
+              ENDDO
+              ENDDO
           ENDDO
           ENDDO
       ENDDO
@@ -1913,6 +1955,9 @@ CF2PY INTEGER, INTENT(HIDE), DEPEND(NSRC) :: NSL=SIZE(NSRC)
       INTEGER XL, XH, YL, YH, ZL, ZH
       REAL*8 PAD(0:TL+1, 0:TL+1, 0:TL+1, 3)
       REAL*8 ACC, TMP
+      INTEGER DX, DY, DZ, NS
+      DOUBLE PRECISION CS
+      DOUBLE PRECISION ACCT(TL, TL, TL)
 C     VOLATILE: no FMA contraction of the
 C     multiply-add tail (bit-identity with the
 C     separately-rounded csr/numpy path)
@@ -1920,6 +1965,7 @@ C     separately-rounded csr/numpy path)
 !$OMP PARALLEL DO DEFAULT(SHARED)
 !$OMP& PRIVATE(T, ON, S, X, Y, Z, HX, HY, HZ, NB)
 !$OMP& PRIVATE(XL, XH, YL, YH, ZL, ZH, PAD, ACC, TMP)
+!$OMP& PRIVATE(DX, DY, DZ, NS, CS, ACCT)
       DO T = 1, NT
           DO ON = 1, 3
           DO Z = 0, TL + 1
@@ -1958,17 +2004,37 @@ C         1 (HX=+1), landing at PAD coord X + HX*TL.
           ENDDO
           ENDDO
           ENDDO
+C         stencil entry OUTER, contiguous X innermost (2026-09-17), the
+C         product accumulated in a tile-sized temp; see STENMV.
           DO ON = 1, 3
           DO Z = 1, TL
           DO Y = 1, TL
           DO X = 1, TL
-              ACC = 0.0
-              DO S = SPTR(ON) + 1, SPTR(ON + 1)
-                  ACC = ACC + CF(S)*PAD(X + OF(1, S), Y + OF(2, S),
-     +                                  Z + OF(3, S), NSRC(S))
+              ACCT(X, Y, Z) = 0.0
+          ENDDO
+          ENDDO
+          ENDDO
+          DO S = SPTR(ON) + 1, SPTR(ON + 1)
+              DX = OF(1, S)
+              DY = OF(2, S)
+              DZ = OF(3, S)
+              NS = NSRC(S)
+              CS = CF(S)
+              DO Z = 1, TL
+              DO Y = 1, TL
+              DO X = 1, TL
+                  ACCT(X, Y, Z) = ACCT(X, Y, Z)
+     +                + CS*PAD(X + DX, Y + DY, Z + DZ, NS)
               ENDDO
-              TMP = WT(X, Y, Z, ON, T)*(BT(X, Y, Z, ON, T) - ACC)
-              YT(X, Y, Z, ON, T) = PAD(X, Y, Z, ON) + TMP
+              ENDDO
+              ENDDO
+          ENDDO
+          DO Z = 1, TL
+          DO Y = 1, TL
+          DO X = 1, TL
+              YT(X, Y, Z, ON, T) = PAD(X, Y, Z, ON)
+     +            + WT(X, Y, Z, ON, T)
+     +              *(BT(X, Y, Z, ON, T) - ACCT(X, Y, Z))
           ENDDO
           ENDDO
           ENDDO
@@ -2011,9 +2077,12 @@ CF2PY INTEGER, INTENT(HIDE), DEPEND(NSRC) :: NSL=SIZE(NSRC)
       INTEGER XL, XH, YL, YH, ZL, ZH
       REAL*8 PAD(0:TL+1, 0:TL+1, 0:TL+1, 3)
       REAL*8 ACC
+      INTEGER DX, DY, DZ, NS
+      DOUBLE PRECISION CS
 !$OMP PARALLEL DO DEFAULT(SHARED)
 !$OMP& PRIVATE(T, ON, S, X, Y, Z, HX, HY, HZ, NB)
 !$OMP& PRIVATE(XL, XH, YL, YH, ZL, ZH, PAD, ACC)
+!$OMP& PRIVATE(DX, DY, DZ, NS, CS)
       DO T = 1, NT
           DO ON = 1, 3
           DO Z = 0, TL + 1
@@ -2052,18 +2121,33 @@ C         1 (HX=+1), landing at PAD coord X + HX*TL.
           ENDDO
           ENDDO
           ENDDO
+C         stencil entry OUTER, contiguous X innermost (2026-09-17): the
+C         offsets are then loop-invariant and the X loop is a stride-1
+C         saxpy the compiler vectorises; the reduction-over-S form ran
+C         at ~3 GFLOP/s on four cores. Summation order changes, so the
+C         stencil is certified to tolerance, never bitwise.
           DO ON = 1, 3
           DO Z = 1, TL
           DO Y = 1, TL
           DO X = 1, TL
-              ACC = 0.0
-              DO S = SPTR(ON) + 1, SPTR(ON + 1)
-                  ACC = ACC + CF(S)*PAD(X + OF(1, S), Y + OF(2, S),
-     +                                  Z + OF(3, S), NSRC(S))
+              YT(X, Y, Z, ON, T) = 0.0
+          ENDDO
+          ENDDO
+          ENDDO
+          DO S = SPTR(ON) + 1, SPTR(ON + 1)
+              DX = OF(1, S)
+              DY = OF(2, S)
+              DZ = OF(3, S)
+              NS = NSRC(S)
+              CS = CF(S)
+              DO Z = 1, TL
+              DO Y = 1, TL
+              DO X = 1, TL
+                  YT(X, Y, Z, ON, T) = YT(X, Y, Z, ON, T)
+     +                + CS*PAD(X + DX, Y + DY, Z + DZ, NS)
               ENDDO
-              YT(X, Y, Z, ON, T) = ACC
-          ENDDO
-          ENDDO
+              ENDDO
+              ENDDO
           ENDDO
           ENDDO
       ENDDO
