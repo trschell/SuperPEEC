@@ -746,3 +746,42 @@ operator 1.17 GiB (of which the mode apply 0.40), preconditioner
 the lgmres basis (the streamed basis removes the latter). Peaks now, GiB:
 R3 2.7 (streamed) / R4 8.94 (lgmres) or ~7.1 (streamed) / XNOR 11.61
 (lgmres) or ~8.6 (streamed).
+
+## The last two R4 build transients (2026-09-17, item 4)
+
+After the hierarchy moved to the card, the R4 build peak (7.06 GiB)
+sat in two places: the hierarchy constructor's aggregation
+bookkeeping and the plaquette geometry, ~1.2 GiB of temporaries each.
+Both were int64-and-copies problems:
+
+* `loopmg.plaquette_geometry` gathered the four edge cells of every
+  plaquette into an (nplaq, 4, 3) int64 array (1.15 GiB at 12M
+  plaquettes) to take a min over the edges; it now runs the min/max
+  one edge at a time and returns int8 normals and int32 cells: the
+  step's transient 1.2 -> 0.3 GiB, its resident result 0.36 -> 0.16.
+  Verified identical to the old output on R3's basis.
+* `GeoMG._aggregate` built the prolongator as COO triplets (three
+  8-byte arrays of n0) and converted; it now writes the CSC directly
+  (one entry per row, so the column pointers are the aggregate sizes
+  and the row indices the rows sorted by aggregate) with float32
+  ones. The constructor also stops copying the normal and base arrays
+  before aggregating. Hierarchy verified identical (every P and every
+  level) to the old code.
+* Both callers passed `Bmat[:efg, :nplaq].tocsc()`, a 0.4 GB copy; a
+  column prefix of a CSC matrix is contiguous, so `spmv.csc_prefix`
+  hands the geometry a view (equal to the copy, asserted to carry no
+  row beyond the filaments).
+
+R4 build survey (in / peak / out, GiB):
+
+    step                     before                after
+    plaquette geometry    5.26  6.44  5.62      4.87  5.19  5.03
+    GeoMG.__init__        5.84  7.01  6.25      5.52  6.36  5.95
+    run peak                    7.06                  6.36
+
+What sets the R4 build peak now: the constructor's remaining 0.84 GiB
+(np.unique on the 12M keys, the level-1 download and casts), then the
+KCL check (5.30) and the spanning forest (5.03). The R3 answer is
+5.04932 against 5.04931 mOhm, 2e-6 within the 1e-4 tolerance, with
+the geometry and hierarchy bit-identical: rounding in the solve, not
+in what is built.

@@ -364,13 +364,13 @@ def plaquette_geometry(Y, fil_axis, fil_cell, nplaq):
     A lattice face has 4 edges spanning exactly two axes; the third is
     its normal. Position is the componentwise min of the 4 edge cells.
     Vectorised over all columns at once -- every column has exactly 4
-    nonzeros, so the index array reshapes to (nplaq, 4).
+    nonzeros, so the index array reshapes to (nplaq, 4). The min/max
+    over the 4 edges run one edge at a time (2026-09-17): the
+    (nplaq, 4, 3) int64 gather was a 1.5 GiB transient on R4 (12M
+    plaquettes) for a 0.29 GiB result. Compact dtypes on the way out:
+    normal fits int8, base int32 (a lattice index).
     """
     Yc = Y.tocsc()
-    # Slice by INDPTR, not by assuming 4*nplaq contiguous entries: in
-    # equiterminal the same Y carries hole cycles, port cycles and
-    # redistribution modes after the plaquettes, and extra ROWS below
-    # them, so only the first nplaq columns are lattice faces.
     ptr = Yc.indptr[:nplaq + 1]
     if not np.all(np.diff(ptr) == 4):
         bad = int(np.count_nonzero(np.diff(ptr) != 4))
@@ -378,20 +378,23 @@ def plaquette_geometry(Y, fil_axis, fil_cell, nplaq):
                            "plaquettes -- geometry cannot be recovered"
                            % (bad, nplaq))
     rows = Yc.indices[ptr[0]:ptr[-1]].reshape(nplaq, 4)
-    ax = np.asarray(fil_axis)[rows]                 # (nplaq, 4)
-    cells = np.asarray(fil_cell)[rows]              # (nplaq, 4, 3)
-    # normal = the axis not present among the 4 edges: 0+1+2 minus the
-    # two distinct axes present
-    amin = ax.min(axis=1)
-    amax = ax.max(axis=1)
-    normal = 3 - amin - amax
-    base = cells.min(axis=1)
+    fa = np.asarray(fil_axis)
+    fc = np.asarray(fil_cell)
+    ctype = fc.dtype if fc.dtype.itemsize <= 4 else np.int32
+    amin = fa[rows[:, 0]].astype(np.int8)
+    amax = amin.copy()
+    base = fc[rows[:, 0]].astype(ctype)
+    for k in range(1, 4):
+        a = fa[rows[:, k]]
+        np.minimum(amin, a, out=amin, casting='unsafe')
+        np.maximum(amax, a, out=amax, casting='unsafe')
+        np.minimum(base, fc[rows[:, k]], out=base, casting='unsafe')
     ok = amin != amax
     if not np.all(ok):
         raise RuntimeError("%d plaquette(s) span a single axis -- not a "
                            "lattice face" % int((~ok).sum()))
-    return normal.astype(np.int64), base.astype(np.int64)
-
+    normal = (3 - amin - amax).astype(np.int8)
+    return normal, base
 
 class GeoMG:
     """Matrix-free-hierarchy geometric multigrid on plaquette DOFs.
@@ -460,8 +463,7 @@ class GeoMG:
                     got = None
             if got is not None or mv0 is not None \
                     or coarse0 is not None:
-                P0, nrm1, bs1 = self._aggregate(normal.copy(),
-                                                base.copy())
+                P0, nrm1, bs1 = self._aggregate(normal, base)
                 if P0.shape[1] < basis.shape[0]:
                     use_basis = True
             if not use_basis:
@@ -667,17 +669,6 @@ class GeoMG:
         span = base.max(axis=0) - base.min(axis=0) + 1
         div = np.where(span > 2, 2, 1)            # semi-coarsening
         cb = base//div[None, :]
-        # ENCODED scalar key instead of np.unique(..., axis=0): the
-        # axis-0 unique views rows as void records and copies its way
-        # through the sort (~1.5 GB at R4, and it runs on EVERY
-        # hierarchy build -- the transient every Gram-formation route
-        # kept hitting). The mixed-radix encode is order-preserving
-        # (components are bounded non-negatives), so unique/first/inv
-        # are BIT-IDENTICAL to the axis-0 version.
-        # np.unique returns (unique, index, inverse) IN THAT ORDER when
-        # both flags are set -- binding them the other way round gives a
-        # P with the coarse count as its ROW dimension and a dimension
-        # mismatch two levels later.
         r0 = np.int64(cb[:, 0].max()) + 1
         r1 = np.int64(cb[:, 1].max()) + 1
         r2 = np.int64(cb[:, 2].max()) + 1
@@ -688,9 +679,16 @@ class GeoMG:
         del key
         inv = np.asarray(inv).ravel()
         nc = int(inv.max()) + 1
-        P = sp.coo_matrix((np.ones(inv.size), (np.arange(inv.size), inv)),
-                          shape=(inv.size, nc))
-        return P.tocsc(), normal[first], cb[first]
+        # P as CSC directly (2026-09-17): one 1 per row, so the column
+        # pointers are the aggregate sizes and the row indices are the
+        # rows sorted by aggregate -- no COO triplets (three 8-byte
+        # arrays of n0) and no tocsc copy: ~0.5 GiB less on R4
+        order = np.argsort(inv, kind='stable').astype(np.int32)
+        indptr = np.zeros(nc + 1, dtype=np.int64)
+        np.cumsum(np.bincount(inv, minlength=nc), out=indptr[1:])
+        P = sp.csc_matrix((np.ones(inv.size, dtype=np.float32), order,
+                           indptr), shape=(inv.size, nc))
+        return P, normal[first], cb[first]
 
     def _smooth(self, lv, x, b):
         if lv == 0 and self._sten0 is not None:

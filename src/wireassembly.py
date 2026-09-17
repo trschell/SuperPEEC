@@ -66,7 +66,7 @@ import time
 import os
 import warnings
 import numpy as np
-from spmv import spmv_c
+from spmv import spmv_c, csc_prefix
 import scipy.sparse as sp
 from scipy.sparse.linalg import LinearOperator, lgmres
 
@@ -1026,7 +1026,7 @@ class WireBondSolver:
                            self.nplaq + self.nd:self.size]
             Byt = self.Bmat[:, idx_yt].T.tocsr().astype(np.float32)
             nrm, bse = loopmg.plaquette_geometry(
-                self.Bmat[:self.efg, :self.nplaq].tocsc(),
+                csc_prefix(self.Bmat, self.efg, self.nplaq),
                 self.fil_axis, self.fil_cell, self.nplaq)
             geo = _GeoMGFactor(Byt, nrm, bse, self.nplaq,
                                cycles=self.amg_cycles)

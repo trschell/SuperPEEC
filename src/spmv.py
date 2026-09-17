@@ -21,3 +21,18 @@ def spmv_c(A, v):
         out += 1j*(A @ np.ascontiguousarray(v.imag))
         return out
     return A @ v
+
+
+import scipy.sparse as sp
+
+
+def csc_prefix(M, nrows, ncols):
+    """The leading ``ncols`` columns of a CSC matrix as a VIEW over its
+    arrays (a column prefix is contiguous in CSC), with ``nrows``
+    rows: the ``M[:nrows, :ncols].tocsc()`` it replaces copied 0.4 GB
+    on R4 (2026-09-17). Requires the prefix to carry no row >= nrows."""
+    M = M.tocsc()
+    e = int(M.indptr[ncols])
+    assert e == 0 or M.indices[:e].max() < nrows
+    return sp.csc_matrix((M.data[:e], M.indices[:e], M.indptr[:ncols + 1]),
+                         shape=(nrows, ncols))

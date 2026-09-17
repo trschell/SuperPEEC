@@ -68,7 +68,7 @@ import os
 import time
 
 import numpy as np
-from spmv import spmv_c
+from spmv import spmv_c, csc_prefix
 import scipy.sparse as sp
 from scipy.sparse.linalg import LinearOperator, lsqr, lgmres
 import sksparse.cholmod as cholmod
@@ -1011,7 +1011,7 @@ class EquiTerminalSolver:
                 import loopmg
                 from port_impedance import _GeoMGFactor
                 nrm, bse = loopmg.plaquette_geometry(
-                    self.Y[:efg, :self.nplaq].tocsc(), self.fil_axis,
+                    csc_prefix(self.Y, efg, self.nplaq), self.fil_axis,
                     self.fil_cell, self.nplaq)
                 # The basis runs [plaquettes | holes + port cycles |
                 # redistribution modes]. Only the middle group belongs
