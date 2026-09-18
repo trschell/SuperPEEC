@@ -202,6 +202,80 @@ def mode_cases():
               for a, b in zip((gu, gf), op.apply(u, i_f))))
 
 
+def precond_cases():
+    """The multigrid preconditioner apply, against the host apply.
+
+    Both are the same V-cycle on the same hierarchy in float32, so they
+    agree to rounding; the device one must also repeat exactly, which
+    is the property a long GMRES cycle depends on and the reason the
+    products are hand-written.
+
+    ``SPPEEC_KEEP_HOST_COPIES`` keeps the host stencil path alive next
+    to the device one so both can be applied, the same arrangement the
+    CUDA GeoMG validator uses.
+    """
+    import numpy as _np
+    model = _op.path.join(_op.path.dirname(_op.path.abspath(__file__)),
+                          '..', 'examples', 'dbc_halfbridge.toml')
+    if not _op.path.exists(model):
+        return
+    keep = os.environ.get('SPPEEC_KEEP_HOST_COPIES')
+    os.environ['SPPEEC_KEEP_HOST_COPIES'] = '1'
+    seen = []
+
+    class _Stop(Exception):
+        pass
+    try:
+        import sppeec_input
+        import port_impedance as pi
+        orig = pi._GeoMGFactor.__init__
+
+        def spy(self, *a, **k):
+            orig(self, *a, **k)
+            seen.append(self)
+            raise _Stop()                 # the factor is all we need
+        pi._GeoMGFactor.__init__ = spy
+        try:
+            pr = sppeec_input.load(model)
+            m = pr.model()
+            M = pr.tree(m)
+            pr.sweeper(m, M).solve(float(pr.freqs[0]))
+        except _Stop:
+            pass
+        finally:
+            pi._GeoMGFactor.__init__ = orig
+    except Exception as exc:
+        check("preconditioner: factor builds", False,
+              "%s: %s" % (type(exc).__name__, exc))
+        return
+    finally:
+        if keep is None:
+            os.environ.pop('SPPEEC_KEEP_HOST_COPIES', None)
+        else:
+            os.environ['SPPEEC_KEEP_HOST_COPIES'] = keep
+    if not seen:
+        return
+    f = seen[0]
+    blk = f._gpu
+    check("preconditioner: the OpenCL block is the one built",
+          blk is not None and type(blk).__module__ == 'ocl_geomg',
+          "gpu_state=%r" % getattr(f, 'gpu_state', None))
+    if blk is None:
+        return
+    rng = _np.random.default_rng(17)
+    b = rng.standard_normal(f.n).astype(_np.float32)
+    f._gpu = None                          # the host apply, for reference
+    ref = f(b)
+    f._gpu = blk
+    got = blk(b)
+    rel = float(_np.abs(got - ref).max())/max(1e-30,
+                                              float(_np.abs(ref).max()))
+    check("preconditioner: OpenCL apply agrees with the host apply",
+          rel < 1e-5, "rel diff=%.3e" % rel)
+    check("preconditioner: repeated apply is bit-identical",
+          _np.array_equal(got, blk(b)))
+
+
 def operator_cases():
     import backend
     if backend.name() != 'opencl':
@@ -236,6 +310,7 @@ def operator_cases():
               np.array_equal(got, again))
 
     mode_cases()
+    precond_cases()
 
     top = M.lv[int(M.numlevels) - 1]
     data = (rng.standard_normal(top.data.shape)

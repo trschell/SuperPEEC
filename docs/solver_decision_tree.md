@@ -1051,3 +1051,65 @@ fresh kernel object on every call, which costs real time at one enqueue
 per slab per matvec, so handles are taken once. And `.data` on a sliced
 device array is the whole buffer, not the slice, so stack offsets are
 passed to the kernels explicitly.
+
+## The OpenCL preconditioner (2026-09-18)
+
+The survey that shaped this phase found something that made it much
+smaller than expected: the device multigrid apply takes a real float32
+vector and returns one. The complex system is preconditioned through a
+real map, and the macro Schur solve is small, dense and host-side. So
+the preconditioner needs no complex sparse support at all, and its only
+per-apply sparse operation is a matrix-vector product. The sparse
+matrix-matrix products are build-phase and stay on the host.
+
+`ocl_sparse` supplies the products as hand-written kernels: CSR
+matrix-vector, a fused damped-Jacobi sweep, the residual, an
+accumulating product for prolongation, a dense product for the coarse
+level, and gathers and scatters. One work group per row, a fixed number
+of work items striding its nonzeros, then a fixed binary tree in local
+memory.
+
+Writing them by hand is the point rather than the price. Reproducibility
+stops being a workaround and becomes a property of the code. The CUDA
+path materialises the macro transpose as its own matrix and walks its
+rows through a Python loop, both purely because cuSPARSE reduces long
+rows with atomics and a preconditioner that is not the same map every
+call breaks the Arnoldi relation of a long GMRES cycle. Neither
+workaround is needed here, and the macro transpose runs at full width.
+
+The fixed tree is also more accurate than the serial reference. Against
+fp64 truth on the case that caused the trouble, six rows of 250 000
+nonzeros:
+
+| | relative error |
+|---|---:|
+| scipy, serial fp32 | 6.9e-6 |
+| this kernel, fp32 | 5.1e-7 |
+
+`ocl_geomg` mirrors the CUDA core and block onto those kernels: the same
+V-cycle in the same order, the macro Schur factor and the kept macro
+columns still on the host. The apply agrees with the host apply to
+3.3e-7 relative and is bit-identical on a repeated call.
+
+One wrinkle. The stencil path never forms level 0 as a matrix, which is
+the memory win the compression campaign bought; the CUDA path forms the
+Gram on the card instead, which needs a device sparse-sparse product
+this backend does not have. So level 0 is formed on the host here and
+uploaded, which is a build transient, and it is bounded:
+`SPPEEC_OCL_GRAM_GB` (default 2) refuses above its budget and the caller
+falls back to the host apply rather than trading one regression for
+another. Porting the level-0 stencil apply removes the branch.
+
+Single device only; the CUDA path's two-card split relies on implicit
+peer-to-peer copies between CuPy device contexts and has no analogue.
+
+R3 end to end, one run at a time:
+
+| | wall | peak RSS |
+|---|---:|---:|
+| host | 7:35 | 3.5 GB |
+| CUDA | 3:19 | 3.1 GB |
+| OpenCL | 2:58 | 3.8 GB |
+
+OpenCL is now ahead of CUDA on the whole run. The extra resident memory
+is the host-side level-0 Gram described above.

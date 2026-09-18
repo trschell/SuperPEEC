@@ -895,9 +895,18 @@ class _GeoMGFactor:
         self.gpu_state = 'cpu (SPPEEC_GPU=0)'
         if _gpu_amg_wanted():
             try:
-                from gpu_amg import GPUGeoBlock
-                self._gpu = GPUGeoBlock(self)
-                self.gpu_state = 'gpu ' + self._gpu.core.placement
+                import backend
+                if backend.name() == 'opencl':
+                    # the OpenCL apply needs the host level hierarchy,
+                    # which it has: the device Gram build above is CUDA
+                    # only and falls back to the host stencil here
+                    from ocl_geomg import GeoBlock
+                    self._gpu = GeoBlock(self)
+                    self.gpu_state = 'opencl (single device)'
+                else:
+                    from gpu_amg import GPUGeoBlock
+                    self._gpu = GPUGeoBlock(self)
+                    self.gpu_state = 'gpu ' + self._gpu.core.placement
                 # the device core holds its own copy of every level;
                 # __call__ never reaches the host V-cycle once it is
                 # up, so the host level-0 csr (if any), the certified
