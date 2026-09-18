@@ -36,17 +36,6 @@ import ocl_core
 import ocl_sparse
 
 
-class _Levels(object):
-    """``mg`` with a level list substituted, leaving the original alone."""
-
-    def __init__(self, mg, levels):
-        self._mg = mg
-        self.levels = levels
-
-    def __getattr__(self, k):
-        return getattr(self._mg, k)
-
-
 def _copy(dst, src, nbytes=None):
     """Device-to-device copy of a whole array."""
     import pyopencl as cl
@@ -71,34 +60,43 @@ class GeoCore(object):
             raise RuntimeError("the OpenCL GeoMG needs the coarse level "
                                "hierarchy on the host")
         self.dtype = np.dtype(mg.dtype)
+        dt = self.dtype
         levels = list(mg.levels)
-        if levels[0] is None:
+        A0 = None
+        sten = getattr(mg, '_sten0', None)
+        wdi = getattr(mg, '_wdi0_t', None)
+        if levels[0] is None and sten is not None and wdi is not None:
             # The stencil path never forms level 0 as a matrix; that is
-            # the memory win. The CUDA path builds the Gram on the card
-            # instead, which needs a device sparse-sparse product this
-            # backend does not have yet, so it is formed on the host
-            # here and uploaded. That is a build transient, so it is
-            # bounded: porting the level-0 stencil apply is the proper
-            # fix and removes this branch.
+            # the memory win the compression campaign bought. Apply it
+            # as a stencil here too, which is both cheaper and exact:
+            # the slot order matches the Fortran kernel's, so the two
+            # agree bit for bit.
+            import ocl_stencil
+            A0 = ocl_stencil.Stencil0(sten, wdi, dt)
+        elif levels[0] is None:
+            # No certified stencil: form the Gram on the host and
+            # upload it. That is the build transient the campaign
+            # removed, so it is bounded rather than silently paid.
             if basis is None:
                 raise RuntimeError(
-                    "the OpenCL GeoMG needs either a host level 0 or the "
-                    "basis it is formed from")
-            itm = np.dtype(self.dtype).itemsize
+                    "the OpenCL GeoMG needs a host level 0, a certified "
+                    "stencil, or the basis level 0 is formed from")
+            itm = np.dtype(dt).itemsize
             est = float(getattr(mg, '_nnz0_est', 0) or 0)*(itm + 4)
             if est > self.GRAM_BUDGET:
                 raise MemoryError(
                     "the level-0 Gram would take about %.1f GB on the host "
-                    "(budget %.1f GB, SPPEEC_OCL_GRAM_GB); the device "
-                    "sparse product is not ported yet"
+                    "(budget %.1f GB, SPPEEC_OCL_GRAM_GB) and no certified "
+                    "stencil is available"
                     % (est/2**30, self.GRAM_BUDGET/2**30))
-            levels[0] = (basis @ basis.T).tocsr().astype(self.dtype)
-        mg = _Levels(mg, levels)
+            levels[0] = (basis @ basis.T).tocsr().astype(dt)
+        self.level0 = 'stencil' if A0 is not None else 'matrix'
         self.cycles = int(cycles)
         self.nu = int(mg.nu)
         self.omega = float(mg.omega)
-        dt = self.dtype
-        self.A = [ocl_sparse.CSR(L, dt) for L in mg.levels]
+        self.A = [A0 if (i == 0 and A0 is not None)
+                  else ocl_sparse.CSR(L, dt)
+                  for i, L in enumerate(levels)]
         self.P = [ocl_sparse.CSR(P, dt) for P in mg.Ps]
         self.R = [ocl_sparse.CSR(P.T.tocsr(), dt) for P in mg.Ps]
         self.dinv = [ocl_core.to_device(np.asarray(d, dt)) for d in mg.dinv]
@@ -115,6 +113,12 @@ class GeoCore(object):
 
     def _smooth(self, lv, x, b):
         """``nu`` damped-Jacobi sweeps, leaving the result in ``x``."""
+        A = self.A[lv]
+        if hasattr(A, 'sweeps'):
+            # the stencil packs once and sweeps on tiles, so it runs
+            # the whole set of sweeps in a single call
+            A.sweeps(x, b, self.nu)
+            return
         cur, alt = x, self._t[lv]
         for _ in range(self.nu):
             self.A[lv].jacobi(cur, b, self.dinv[lv], alt, self.omega)

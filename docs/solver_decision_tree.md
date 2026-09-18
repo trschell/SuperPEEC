@@ -1091,14 +1091,28 @@ V-cycle in the same order, the macro Schur factor and the kept macro
 columns still on the host. The apply agrees with the host apply to
 3.3e-7 relative and is bit-identical on a repeated call.
 
-One wrinkle. The stencil path never forms level 0 as a matrix, which is
-the memory win the compression campaign bought; the CUDA path forms the
-Gram on the card instead, which needs a device sparse-sparse product
-this backend does not have. So level 0 is formed on the host here and
-uploaded, which is a build transient, and it is bounded:
-`SPPEEC_OCL_GRAM_GB` (default 2) refuses above its budget and the caller
-falls back to the host apply rather than trading one regression for
-another. Porting the level-0 stencil apply removes the branch.
+Level 0 is applied as a stencil, not as a matrix (`ocl_stencil`). The
+plaquette Gram is translation invariant, so the host never forms it:
+it packs the vector into per-normal dense 16-cubed tiles and applies 36
+constant-coefficient slots with a one-cell halo from the 27 neighbouring
+tiles. That is the memory win the compression campaign bought, and the
+OpenCL path keeps it rather than forming the Gram on the host and
+uploading it.
+
+The halo is read through the neighbour table rather than staged in
+local memory: a padded tile carries three normals over (TL+2) cubed
+cells, 70 kB at TL 16, and a work group gets 48 kB. Each work item owns
+one output cell and resolves each slot itself, wrapping an out-of-range
+coordinate into whichever of the 27 neighbours it names. Absent
+neighbours and absent plaquettes are zero, so nothing needs masking.
+
+Because the slots run in the same build-time verified order as the
+Fortran kernel, the two agree **bit for bit**, and the stencil is 6.9x
+the host matvec and 3.7x its sweeps.
+
+Forming the Gram on the host remains as a fallback for a geometry with
+no certified stencil, bounded by `SPPEEC_OCL_GRAM_GB` (default 2) above
+which the apply refuses and the caller falls back to the host.
 
 Single device only; the CUDA path's two-card split relies on implicit
 peer-to-peer copies between CuPy device contexts and has no analogue.
@@ -1109,7 +1123,6 @@ R3 end to end, one run at a time:
 |---|---:|---:|
 | host | 7:35 | 3.5 GB |
 | CUDA | 3:19 | 3.1 GB |
-| OpenCL | 2:58 | 3.8 GB |
+| OpenCL | 2:49 | 3.7 GB |
 
-OpenCL is now ahead of CUDA on the whole run. The extra resident memory
-is the host-side level-0 Gram described above.
+OpenCL is ahead of CUDA on the whole run.

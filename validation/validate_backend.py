@@ -262,6 +262,25 @@ def precond_cases():
           "gpu_state=%r" % getattr(f, 'gpu_state', None))
     if blk is None:
         return
+    # this model takes the stencil path, so level 0 must be applied as
+    # a stencil and not fall back to forming the Gram on the host
+    check("preconditioner: level 0 is applied as a stencil",
+          getattr(blk.core, 'level0', None) == 'stencil',
+          "level0=%r" % getattr(blk.core, 'level0', None))
+    sten = getattr(f.mg, '_sten0', None)
+    if sten is not None:
+        import ocl_core as _oc
+        import ocl_stencil as _os
+        op = _os.Stencil0(sten, f.mg._wdi0_t, blk.core.dtype)
+        rng0 = _np.random.default_rng(29)
+        xv = rng0.standard_normal(sten.n).astype(sten.dtype)
+        ref = sten.matvec(xv)
+        xd = _oc.to_device(xv)
+        yd = _oc.zeros((sten.n,), sten.dtype)
+        got = op.spmv(xd, yd).get()
+        check("level-0 stencil: OpenCL matches the host kernel exactly",
+              _np.array_equal(got, ref),
+              "max diff=%.3e" % float(_np.abs(got - ref).max()))
     rng = _np.random.default_rng(17)
     b = rng.standard_normal(f.n).astype(_np.float32)
     f._gpu = None                          # the host apply, for reference

@@ -902,7 +902,8 @@ class _GeoMGFactor:
                     # only and falls back to the host stencil here
                     from ocl_geomg import GeoBlock
                     self._gpu = GeoBlock(self)
-                    self.gpu_state = 'opencl (single device)'
+                    self.gpu_state = ('opencl (single device, level 0 as a %s)'
+                                      % self._gpu.core.level0)
                 else:
                     from gpu_amg import GPUGeoBlock
                     self._gpu = GPUGeoBlock(self)
