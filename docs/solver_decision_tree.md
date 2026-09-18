@@ -904,10 +904,15 @@ bandwidth-bound), so the no-GPU thread policy stands.
    stride-1 complex axpy over one padded plane. P2PINTO writes into
    the caller's buffer (no per-slab output allocation); the capacitive
    near field uses it too. Kernel 0.23 -> 0.11 s per call.
-2. **One cached workspace per slab** (`toeplitz.ToeplitzSlab`): the
-   padded transform staged in place on views of a single buffer, no
-   inter-stage copies, cached per (role, slab size, rotation slot) in
-   `leaf_induct.p2pcpu`; 4/7 of the three-buffer workspace memory.
+2. **Four single-buffer workspaces per call** (`toeplitz.ToeplitzSlab`):
+   the padded transform staged in place on views of one buffer, no
+   inter-stage copies, 4/7 of the three-buffer memory; three source
+   slots and one target, sized to the largest slab, allocated once per
+   call and released at its end, used through leading-axis views. A
+   first version cached them across calls keyed by slab size, which
+   held 38 workspaces per orientation on R4 and raised that run's peak
+   from 10.1 to 12.3 GiB: caches keyed by a varying size are measured
+   for retention on the flagship before they stay.
 3. **Plane-tiled top-level M2L** (`FMMtop.M2L`): each thread takes one
    X plane and a run of Y columns short enough that the 131 table and
    spectrum segments it needs stay in L2, and applies all (n,m,j,k)
@@ -922,7 +927,7 @@ per-call numbers on R3: near field 0.346 -> 0.208 s, top M2L
 | model, CPU-only whole run | before this campaign | batch 1 | batch 2 |
 |---|---|---|---|
 | R3 (167 mv, same answer) | 28:37 | 9:34 | 7:35 |
-| R4 (peak 10.1 GiB) | 1:58:28 | 51:51 | not yet measured |
+| R4 (peak 10.1 GiB) | 1:58:28 | 51:51 | 42:47 |
 
 R3 solve after batch 2 (survey): matvec 1.45 s (P2P 0.22 and top M2L
 0.14 per orientation), apply 0.92 s -- the preconditioner is again the
