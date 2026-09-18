@@ -1015,13 +1015,22 @@ over neighbour directions, so each work item accumulates its own box in
 a register and nothing is scattered. That removes the pair array CuPy
 materialises and, with it, `scatter_add` and its atomics.
 
-Agreement with the host Fortran kernels is 6e-16 relative for both.
-Neither is bitwise equal to the host and neither can be: different
-transform library, different summation order.
+**Mode blocks** (`ocl_modes`). The same treatment for the km-by-km
+convolution: one pass per grid point, all km+1 outputs accumulated in
+registers, instead of writing a padded grid per (m, n) pair. The
+spectra are read in their stored complex64 and every product is summed
+in complex128, as the host path does. The device state is keyed to the
+spectra generation, because the spectra are rebuilt per frequency and a
+cached upload would otherwise be applied to the next one.
 
-The mode-block apply is the third phase of the operator and lands
-separately. Until it does, an OpenCL run takes the host path for it
-through the established fall-back.
+Agreement with the host is 6e-16 relative for the two FMM phases and
+1e-8 for the mode apply, the latter being the floor set by the
+complex64 spectra it reads. None is bitwise equal to the host and none
+can be: different transform library, different summation order.
+
+The enriched bar example, five frequencies, agrees across all three
+backends to six digits, which also exercises the per-frequency spectra
+rebuild.
 
 The kernels are, however, **bit-identical on a repeated call**, which
 the CuPy near field is not, because it reduces with atomics in whatever

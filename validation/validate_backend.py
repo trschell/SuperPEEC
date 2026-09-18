@@ -135,6 +135,73 @@ def operator_cases_in_child():
                     % (out.returncode, out.stderr.strip()[-300:]))
 
 
+def mode_cases():
+    """The mode-block apply, against the host path on a small model.
+
+    Needs a model that actually builds mode spectra, so it solves the
+    enriched bar example at its lowest frequency with the device apply
+    switched off, keeps the enrichment, and then applies both ways.
+    The bar is tolerant: the spectra are stored complex64, so the two
+    paths agree to about 1e-8, not to fp64 rounding.
+    """
+    import numpy as _np
+    model = _op.path.join(_op.path.dirname(_op.path.abspath(__file__)),
+                          '..', 'examples', 'equibar.toml')
+    if not _op.path.exists(model):
+        return
+    keep = os.environ.get('SPPEEC_MODE_APPLY_GPU')
+    os.environ['SPPEEC_MODE_APPLY_GPU'] = '0'       # host reference path
+    found = []
+    try:
+        import sppeec_input
+        import enrich
+        orig = enrich.Enrichment.apply_fft
+
+        def spy(self, u, i_f):
+            if not found and getattr(self, 'Fu', None) is not None:
+                found.append(self)
+            return orig(self, u, i_f)
+        enrich.Enrichment.apply_fft = spy
+        try:
+            pr = sppeec_input.load(model)
+            m = pr.model()
+            M = pr.tree(m)
+            pr.sweeper(m, M).solve(float(pr.freqs[0]))
+        finally:
+            enrich.Enrichment.apply_fft = orig
+    except Exception as exc:
+        check("mode apply: enriched model builds", False,
+              "%s: %s" % (type(exc).__name__, exc))
+        return
+    finally:
+        if keep is None:
+            os.environ.pop('SPPEEC_MODE_APPLY_GPU', None)
+        else:
+            os.environ['SPPEEC_MODE_APPLY_GPU'] = keep
+    if not found:
+        check("mode apply: enriched model builds spectra", False,
+              "no Enrichment with spectra was applied")
+        return
+    enr = found[0]
+    ncell = int(enr._g3[0].size)
+    rng = _np.random.default_rng(11)
+    u = (rng.standard_normal(enr.nmode)
+         + 1j*rng.standard_normal(enr.nmode)).astype(_np.complex128)
+    i_f = (rng.standard_normal(ncell)
+           + 1j*rng.standard_normal(ncell)).astype(_np.complex128)
+    ru, rf = enr.apply_fft(u, i_f)
+    import ocl_modes
+    op = ocl_modes.ModeApply(enr)
+    gu, gf = op.apply(u, i_f)
+    eu = float(_np.abs(gu - ru).max())/max(1e-300, float(_np.abs(ru).max()))
+    ef = float(_np.abs(gf - rf).max())/max(1e-300, float(_np.abs(rf).max()))
+    check("mode apply: OpenCL agrees with the host path", eu < 1e-6
+          and ef < 1e-6, "rel err modes=%.3e filaments=%.3e" % (eu, ef))
+    check("mode apply: repeated call is bit-identical",
+          all(_np.array_equal(a, b)
+              for a, b in zip((gu, gf), op.apply(u, i_f))))
+
+
 def operator_cases():
     import backend
     if backend.name() != 'opencl':
@@ -167,6 +234,8 @@ def operator_cases():
         again = op.apply(data)
         check("near field %s: repeated call is bit-identical" % nm,
               np.array_equal(got, again))
+
+    mode_cases()
 
     top = M.lv[int(M.numlevels) - 1]
     data = (rng.standard_normal(top.data.shape)

@@ -1217,7 +1217,7 @@ class Enrichment:
                                and os.environ.get('SPPEEC_GPU', 'auto') != '0')
         if self._gpu_apply:
             try:
-                return self._apply_fft_gpu(u, i_f, dt)
+                return self._apply_fft_device(u, i_f, dt)
             except Exception as exc:
                 import warnings
                 warnings.warn("mode apply on the device failed (%s: %s) -- "
@@ -1296,6 +1296,36 @@ class Enrichment:
                 sd = self.Fu.dtype if self.Fu is not None else dt
             return np.dtype(sd)
         return dt
+
+    def _apply_fft_device(self, u, i_f, dt):
+        """The mode apply on whichever device backend is selected.
+
+        CUDA keeps the CuPy path. OpenCL takes the fused contraction in
+        :mod:`ocl_modes`, which reads each grid point's moments and
+        cross spectra once and accumulates all km + 1 outputs in
+        registers, instead of writing a padded grid per (m, n) pair.
+
+        The device state is keyed to the spectra generation, because
+        the spectra are rebuilt per frequency and a cached upload would
+        otherwise be applied to the next one.
+        """
+        import backend
+        if backend.name() != 'opencl':
+            return self._apply_fft_gpu(u, i_f, dt)
+        import os
+        key = getattr(self, '_fft_gen', 0)
+        if getattr(self, '_ocl_modes', None) is None or \
+                getattr(self, '_ocl_key', None) != key:
+            if self.Fu is None:
+                self.build_fft()
+                key = self._fft_gen
+            import ocl_modes
+            self._ocl_modes = ocl_modes.ModeApply(self)
+            self._ocl_key = key
+            self._spec_dtype = self.Fu.dtype
+            if os.environ.get('SPPEEC_KEEP_HOST_COPIES') != '1':
+                self.Fu = self.Fc = None      # resident on the device now
+        return self._ocl_modes.apply(u, i_f)
 
     def _apply_fft_gpu(self, u, i_f, dt):
         """apply_fft on the device: slabs, FFTs and products in cupy,
