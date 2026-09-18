@@ -35,9 +35,10 @@ import sys
 import numpy as np
 import scipy.sparse as sp
 
-try:
-    import cupy as _cp
-except Exception:                                    # GPU-less boxes
+try:                                                 # GPU-less boxes
+    import backend as _backend
+    _cp = _backend.array_module() if _backend.available() else None
+except Exception:
     _cp = None
 
 # Types never worth entering: they own no solver arrays, and some

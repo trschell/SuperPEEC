@@ -647,8 +647,9 @@ def _laplacian_current_cpu(B, parent, rhs, tol=1e-12, maxiter=50000):
 def _laplacian_current_gpu(B, parent, rhs, tol=1e-12, maxiter=50000):
     """ihat_f = B phi with (B^T B) phi = rhs, everything on the device.
     Returns (ihat_f on the host, max |B^T ihat_f - rhs|)."""
-    import cupy as cp
-    import cupyx.scipy.sparse as csp
+    import backend
+    cp = backend.array_module()
+    csp = backend.sparse_module()
     from gpu_xfer import csr_to_device, to_device, to_host
     pool = cp.get_default_memory_pool()
     Bd = csr_to_device(B.tocsr(), cp, csp, np.float64)

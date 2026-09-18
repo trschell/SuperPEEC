@@ -848,8 +848,9 @@ class _GeoMGFactor:
         if (A is None and basis is not None and _gpu_amg_wanted()
                 and os.environ.get('SPPEEC_KEEP_HOST_COPIES') != '1'):
             try:
-                import cupy as cp
-                import cupyx.scipy.sparse as csp
+                import backend
+                cp = backend.array_module()
+                csp = backend.sparse_module()
                 from gpu_amg import gram_on_device, device_galerkin
                 self._A0_d = gram_on_device(basis, cp, csp, self._dt)
                 mv0 = device_galerkin(self._A0_d, cp, csp, self._dt)
@@ -910,8 +911,8 @@ class _GeoMGFactor:
                     mg._mv0 = None
                     self._basis = None
                     try:
-                        import cupy
-                        cupy.get_default_pinned_memory_pool().free_all_blocks()
+                        import backend
+                        backend.free_pools(device=False, pinned=True)
                     except Exception:
                         pass
             except Exception as exc:

@@ -36,8 +36,9 @@ class GPUAMG:
     """
 
     def __init__(self, ml, cycles, sweeps=None):
-        import cupy as cp
-        import cupyx.scipy.sparse as csp
+        import backend
+        cp = backend.array_module()
+        csp = backend.sparse_module()
         self.cp = cp
         self.cycles = int(cycles)
         # Jacobi sweeps per pre/post smooth. One sweep converges ~2x
@@ -105,7 +106,8 @@ class GPUPlainAMG:
     """GPU apply for ``_AMGFactor`` (whole-system hierarchy, no blocks)."""
 
     def __init__(self, factor):
-        import cupy as cp
+        import backend
+        cp = backend.array_module()
         self.cp = cp
         self.core = GPUAMG(factor.ml, factor.cycles)
 
@@ -125,8 +127,9 @@ class GPUBlockAMG:
     """
 
     def __init__(self, factor):
-        import cupy as cp
-        import cupyx.scipy.sparse as csp
+        import backend
+        cp = backend.array_module()
+        csp = backend.sparse_module()
         self.cp = cp
         self.core = GPUAMG(factor.ml, factor.cycles)
         self.n = factor.n
@@ -187,8 +190,9 @@ class GPUGeoCore:
 
     def __init__(self, mg, cycles, devices=None, basis=None, A0=None):
         import os
-        import cupy as cp
-        import cupyx.scipy.sparse as csp
+        import backend
+        cp = backend.array_module()
+        csp = backend.sparse_module()
         if mg.coarse_pinv is None:
             raise RuntimeError("GeoMG coarse level too big for the "
                                "dense pinv -- CPU apply only")
@@ -437,8 +441,9 @@ class GPUGeoBlock:
     exact macro Schur) -- the mirror of :class:`GPUBlockAMG`."""
 
     def __init__(self, factor, devices=None):
-        import cupy as cp
-        import cupyx.scipy.sparse as csp
+        import backend
+        cp = backend.array_module()
+        csp = backend.sparse_module()
         self.cp = cp
         self.core = GPUGeoCore(factor.mg, factor.cycles,
                                devices=devices,

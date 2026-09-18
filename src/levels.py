@@ -105,13 +105,8 @@ def _gather_single(src, idx, axis, chunk_elems=1 << 22):
 # probes the hardware, '1' forces (loud on failure). Answer agreement
 # measured to 8 digits at convergence -- swamped by engineering rtol.
 def _gpu_probe():
-    if _os.environ.get('SPPEEC_GPU', 'auto') == '0':
-        return False
-    try:
-        import cupy
-        return cupy.cuda.runtime.getDeviceCount() > 0
-    except Exception:
-        return _os.environ.get('SPPEEC_GPU') == '1'
+    import backend
+    return backend.probe()
 
 
 _GPU = _gpu_probe()
@@ -433,7 +428,8 @@ class LeafLevel(Level):
             self.data[a:b] += out[self._leaf_rows(g0, g1), idx[a:b]]
 
     def _p2m_gemm_gpu(self, msize):
-        import cupy as cp
+        import backend
+        cp = backend.array_module()
         npos = int(np.prod(self.n))
         T = getattr(self, '_ynmr_cT_d', None)
         if T is None:
@@ -447,7 +443,8 @@ class LeafLevel(Level):
             del img
 
     def _l2p_gemm_gpu(self):
-        import cupy as cp
+        import backend
+        cp = backend.array_module()
         YT = getattr(self, '_ynmr_T_d', None)
         if YT is None:
             YT = self._ynmr_T_d = cp.asarray(np.ascontiguousarray(self.ynmr.T))
@@ -524,7 +521,8 @@ class LeafLevel(Level):
         if getattr(self, '_ynmr_gd', None) is not None:
             return True
         try:
-            import cupy as cp
+            import backend
+            cp = backend.array_module()
             if getattr(self, '_ynmr_g', None) is None:
                 self._ynmr_g, self._ynmr_s = _gather_single(
                     self.ynmr, self.idx, 0)
@@ -553,7 +551,8 @@ class LeafLevel(Level):
     def _p2m_gpu(self, msize):
         """above[g] += sc * conj(sum_{i in g} ynmr_g[i] * conj(data[i]))
         as a bincount-segmented sum over all boxes at once, in chunks."""
-        import cupy as cp
+        import backend
+        cp = backend.array_module()
         yg, gid = self._ynmr_gd, self._gid_d
         n, nh = yg.shape
         sc = self._ynmr_s/self._m0
@@ -574,7 +573,8 @@ class LeafLevel(Level):
     def _l2p_gpu(self):
         """data[i] += sc * sum_n ynmr_g[i, n] * above[g(i), n], gathered
         per filament, in chunks."""
-        import cupy as cp
+        import backend
+        cp = backend.array_module()
         yg, gid = self._ynmr_gd, self._gid_d
         n = yg.shape[0]
         sc = self._ynmr_s
@@ -1272,7 +1272,8 @@ class TopLevel:
         working set is a few (nnmax, G) buffers regardless of
         operator size, so a modest GPU scales to 1e9-cell top grids).
         """
-        import cupy as cp
+        import backend
+        cp = backend.array_module()
         nn = self.nnmax
         nn2 = (2*self.nmax + 1)**2
         T = np.zeros((nn, nn), dtype=np.int64)
@@ -1354,7 +1355,8 @@ class TopLevel:
         Not bitwise identical to the CPU path (cuFFT rounding, channel
         summation order); agreement is at the 1e-13 class and swamped
         by rtol, per the GPU defaults policy."""
-        import cupy as cp
+        import backend
+        cp = backend.array_module()
         if not getattr(self, '_gpu_ready', False):
             self._m2l_gpu_init()
         n0, n1, n2 = (int(v) for v in self.n)

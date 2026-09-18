@@ -173,12 +173,9 @@ def evaluate(model, nleaf, numlevels, occ=None, nfils=None, gpu=True,
 
 def _local_vram_gb():
     """Total VRAM of the local device in GB, or None without one."""
-    try:
-        import cupy as cp
-        _free, total = cp.cuda.runtime.memGetInfo()
-        return total/1e9
-    except Exception:
-        return None
+    import backend
+    total = backend.device_memory_total()
+    return None if total is None else total/1e9
 
 
 def recommend(model, gpu=True, box_sizes_m=None, verbose=False,

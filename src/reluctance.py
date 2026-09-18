@@ -129,7 +129,8 @@ def _center_rows_batched(blocks, ilocs, use_gpu=None, chunk=4096):
     xp = np
     if use_gpu:
         try:
-            import cupy as _cp
+            import backend
+            _cp = backend.array_module()
             _cp.zeros(1)          # fail early if no device
             xp = _cp
         except Exception:

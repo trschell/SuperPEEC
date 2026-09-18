@@ -933,3 +933,56 @@ R3 solve after batch 2 (survey): matvec 1.45 s (P2P 0.22 and top M2L
 0.14 per orientation), apply 0.92 s -- the preconditioner is again the
 largest single phase (152 of ~400 s), followed by the rest of the
 matvec (P2M/L2P/M2M/L2L and the mode stacks).
+
+## A second device backend: the seam (2026-09-17)
+
+The device paths were written directly against CuPy, so they run on
+NVIDIA and nowhere else. Porting them to OpenCL brings in AMD and Intel
+Arc parts, and the survey that preceded the work found the decisive
+fact: there are no custom CUDA C kernels anywhere in the tree. No
+`RawKernel`, no `ElementwiseKernel`, no `RawModule`. Every device
+operation is composed from CuPy and cuPyx library calls, so there is no
+CUDA source to translate, only library surface to re-supply.
+
+`src/backend.py` is the seam, and after this change it is the only
+module in `src/` that imports CuPy. It resolves which library drives
+the device and hands out what the call sites need: the array and sparse
+namespaces, the device count, a placement context, free-memory queries,
+pool release and scatter-add. `gpu_xfer` takes its array module from
+here when the caller does not name one.
+
+`SPPEEC_BACKEND` selects: `auto` (the default) means CUDA when CuPy
+reports a device and host paths otherwise, which is exactly what this
+code did before the seam existed; `cuda` and `none` say so explicitly;
+`opencl` is opt-in and never chosen implicitly, so no existing install
+can change what it runs by accident. `SPPEEC_GPU` keeps its meaning as
+the master gate and is re-read on every query rather than cached, so a
+process that flips it mid-run still sees the change.
+
+Two places needed more than a namespace swap. The tree cost model asks
+for total VRAM as a hardware fact, so it uses a query that deliberately
+ignores the master gate and still answers when `SPPEEC_GPU=0`. And
+`cupyx.scatter_add` became `backend.scatter_add`, which is the one
+place to record that CUDA runs it with atomics: the order is not fixed,
+repeated calls are not bit-reproducible, and it must never appear
+inside the preconditioner apply, whose map has to be identical every
+call or a long GMRES cycle stalls.
+
+What OpenCL cannot supply directly, in descending order of difficulty:
+there is no maintained sparse library, so the per-matvec need (a CSR
+product) becomes one hand-written kernel and the build-phase products
+stay on the host at first; there is no portable free-memory query, so
+the two placement heuristics that branch on it move to a declared
+budget; and the multi-device split relies on implicit peer-to-peer
+copies between CuPy device contexts, which has no analogue. The
+determinism constraint argues *for* the port: a hand-written product
+with one work group per row is reproducible by construction, which is
+what the cuSPARSE atomics workarounds in `gpu_amg` exist to recover.
+
+Measured before starting, on an RTX 4070 SUPER, to check that OpenCL
+gives up nothing: a fused complex128 multiply-accumulate reaches 436.8
+GB/s against CuPy's 290.2 for the same expression, because CuPy
+materialises the temporary and makes two passes; a batched 3-D
+transform at the top-level M2L's own shape takes 3.10 ms under VkFFT
+against cuFFT's 4.2. The port is not a concession, and fusing is where
+its upside lies.

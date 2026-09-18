@@ -20,7 +20,6 @@ a GPU is present and SPPEEC_GPU permits). Split out of multipole.py.
 from multipole_common import *  # noqa: F401,F403  shared imports/guards
 from special import *  # noqa: F401,F403
 from greens import *  # noqa: F401,F403
-import os as _os
 
 from levels import Level, LeafLevel, MidLevel, TopLevel
 
@@ -70,14 +69,9 @@ class LeafInduct(LeafLevel):
         # even oracle runs keep their precision). SPPEEC_GPU_P2P or
         # SPPEEC_GPU set to '0' opts out; anchor-based suites pin
         # '0' explicitly, per the defaults-serve-users policy.
-        if (_os.environ.get('SPPEEC_GPU_P2P', 'auto') != '0'
-                and _os.environ.get('SPPEEC_GPU', 'auto') != '0'):
-            try:
-                import cupy
-                if cupy.cuda.runtime.getDeviceCount() > 0:
-                    self.p2p = self.p2pgpu2
-            except Exception:
-                pass                 # auto: CPU fallback is normal
+        import backend
+        if backend.probe('SPPEEC_GPU_P2P', force_on_error=False):
+            self.p2p = self.p2pgpu2  # auto: CPU fallback is normal
         self.iternumber = 0
 
     def __del__(self):
@@ -285,8 +279,8 @@ class LeafInduct(LeafLevel):
         rounding differs at ~1e-15; not bit-identical to the CPU
         path). Opt-in via SPPEEC_GPU_P2P=1.
         """
-        import cupy as cp
-        import cupyx
+        import backend
+        cp = backend.array_module()
         self.iternumber += 1
         if getattr(self, '_gpu_pack', None) is None:
             nflat = int(np.prod(self.n))
@@ -377,8 +371,8 @@ class LeafInduct(LeafLevel):
                 if t.size == 0 or slabs[dx] is None                         or slabs[dx].shape[0] == 0:
                     continue
                 contrib = gp['transfer'][tr]*slabs[dx][p]
-                cupyx.scatter_add(tgt.real, t, contrib.real)
-                cupyx.scatter_add(tgt.imag, t, contrib.imag)
+                backend.scatter_add(tgt.real, t, contrib.real)
+                backend.scatter_add(tgt.imag, t, contrib.imag)
             res = cp_.fft.ifftn(tgt, axes=(1, 2, 3))[:, :n0, :n1, :n2]
             out[pk['srcidx']] = res.reshape(
                 pk['size'], gp['nflat']).ravel()[pk['flatpos']]

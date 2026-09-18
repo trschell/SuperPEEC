@@ -13,11 +13,20 @@ transfer therefore goes through these helpers, which copy in
 """
 import numpy as np
 
+import backend
+
 CHUNK = 64 << 20          # bytes per slice
 
 
-def to_device(a, cp, dtype=None):
+def _mod(cp):
+    """The array namespace to transfer with: the caller's, or the
+    selected backend's when the caller does not name one."""
+    return backend.array_module() if cp is None else cp
+
+
+def to_device(a, cp=None, dtype=None):
     """Device copy of host array ``a`` (any dtype/shape), in slices."""
+    cp = _mod(cp)
     a = np.ascontiguousarray(a)
     if dtype is not None and a.dtype != dtype:
         a = a.astype(dtype)
@@ -31,8 +40,9 @@ def to_device(a, cp, dtype=None):
     return d
 
 
-def to_host(d, cp, out=None):
+def to_host(d, cp=None, out=None):
     """Host copy of device array ``d``, in slices (into ``out`` if given)."""
+    cp = _mod(cp)
     if d.nbytes <= CHUNK and out is None:
         return cp.asnumpy(d)
     if out is None:
@@ -44,8 +54,10 @@ def to_host(d, cp, out=None):
     return out
 
 
-def csr_to_device(M, cp, csp, dtype=None):
-    """cupyx csr_matrix from a scipy csr/csc, uploaded in slices."""
+def csr_to_device(M, cp=None, csp=None, dtype=None):
+    """Device csr_matrix from a scipy csr/csc, uploaded in slices."""
+    cp = _mod(cp)
+    csp = backend.sparse_module() if csp is None else csp
     M = M.tocsr()
     data = to_device(M.data, cp, dtype)
     indices = to_device(M.indices, cp)
@@ -53,8 +65,9 @@ def csr_to_device(M, cp, csp, dtype=None):
     return csp.csr_matrix((data, indices, indptr), shape=M.shape)
 
 
-def csr_to_host(D, cp):
-    """scipy csr_matrix from a cupyx csr, downloaded in slices."""
+def csr_to_host(D, cp=None):
+    """scipy csr_matrix from a device csr, downloaded in slices."""
+    cp = _mod(cp)
     import scipy.sparse as sp
     D = D.tocsr()
     return sp.csr_matrix((to_host(D.data, cp), to_host(D.indices, cp),

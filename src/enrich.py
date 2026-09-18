@@ -1301,7 +1301,8 @@ class Enrichment:
         """apply_fft on the device: slabs, FFTs and products in cupy,
         the spectra resident on the card after the first call."""
         import os
-        import cupy as cp
+        import backend
+        cp = backend.array_module()
         km = self.km
         # the spectra are rebuilt per frequency (set_frequency ->
         # build_fft); the device copies are keyed to the arrays they

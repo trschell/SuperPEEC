@@ -50,7 +50,8 @@ def check(name, ok, note=''):
 
 def main():
     try:
-        import cupy as cp
+        import backend
+        cp = backend.array_module()
         ndev = cp.cuda.runtime.getDeviceCount()
         cp.zeros(4).sum()          # force a real context, not just import
     except Exception as exc:
