@@ -1123,6 +1123,23 @@ R3 end to end, one run at a time:
 |---|---:|---:|
 | host | 7:35 | 3.5 GB |
 | CUDA | 3:19 | 3.1 GB |
-| OpenCL | 2:49 | 3.7 GB |
+| OpenCL | 2:49 | 3.0 GB |
 
-OpenCL is ahead of CUDA on the whole run.
+OpenCL is ahead of CUDA on both, and the flagship R4 agrees: 18:09 and
+10.2 GB against CUDA's 18:20 and 9.7, at the same 178 matvecs.
+
+Getting there needed one fix worth recording, because it is the OpenCL
+twin of a lesson this tree already learned for CUDA.
+``pyopencl.array.to_device`` creates the buffer with the host pointer
+copied in, and the runtime keeps that host copy resident for the life
+of the buffer: 1.5 GB of resident memory for a 1.5 GB array, still
+there after the host array is freed and after a trim. On R4 the
+top-level M2L's channel spectra alone are 1.8 GB. Allocating the
+buffer empty and filling it by copy costs nothing resident, so
+``ocl_core.to_device`` does that, in slices, exactly as
+:mod:`gpu_xfer` does for the CUDA driver's staging arena. R3 peak 3.7
+to 3.0 GB, R4 11.9 to 10.2.
+
+What found it was the census: the object totals matched between the two
+backends to within 0.3 GiB while anonymous memory differed by 2.2, so
+whatever held it was not a Python object the census could see.

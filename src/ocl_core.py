@@ -112,11 +112,39 @@ def zeros(shape, dtype=np.complex128, index=0):
     return cla.zeros(queue(index), shape, dtype=dtype)
 
 
+CHUNK = 64 << 20          # bytes per upload slice
+
+
 def to_device(a, dtype=None, index=0):
-    """Device copy of host array ``a``."""
+    """Device copy of host array ``a``, allocated empty and filled.
+
+    NOT ``pyopencl.array.to_device``. That creates the buffer with the
+    host pointer copied in, and the runtime then keeps that host copy
+    resident for the life of the buffer: measured 1.5 GB of resident
+    memory for a 1.5 GB array, still there after the host array is
+    freed. On R4 the top-level M2L's channel spectra alone are 1.8 GB,
+    which is most of the 2.1 GB by which this backend's peak sat above
+    the CUDA one.
+
+    So the buffer is allocated empty and filled by copy, in slices, the
+    same discipline :mod:`gpu_xfer` applies to the CUDA driver's
+    staging arena for the same reason. Allocate-then-copy costs nothing
+    resident.
+    """
+    import pyopencl as cl
     import pyopencl.array as cla
-    a = np.ascontiguousarray(a if dtype is None else a.astype(dtype, copy=False))
-    return cla.to_device(queue(index), a)
+    a = np.ascontiguousarray(a if dtype is None
+                             else a.astype(dtype, copy=False))
+    q = queue(index)
+    d = cla.empty(q, a.shape, dtype=a.dtype)
+    if a.nbytes:
+        flat = a.reshape(-1)
+        step = max(1, CHUNK//a.dtype.itemsize)
+        for i in range(0, flat.size, step):
+            cl.enqueue_copy(q, d.data, flat[i:i + step],
+                            device_offset=i*a.dtype.itemsize)
+        q.finish()
+    return d
 
 
 def to_host(d, out=None):
