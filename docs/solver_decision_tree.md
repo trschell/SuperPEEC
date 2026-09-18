@@ -986,3 +986,59 @@ materialises the temporary and makes two passes; a batched 3-D
 transform at the top-level M2L's own shape takes 3.10 ms under VkFFT
 against cuFFT's 4.2. The port is not a concession, and fusing is where
 its upside lies.
+
+## The OpenCL operator: fused kernels, and what that is worth (2026-09-18)
+
+With the seam in place the operator phases were rewritten for OpenCL
+rather than transliterated. The distinction is the whole point. A CuPy
+expression materialises every temporary and reads it back, and that is
+why the card returned only about twice the host's speed while holding
+ten times its memory bandwidth: the top-level M2L moved roughly 14.7 GB
+per call on R3 for arithmetic that needs 0.6.
+
+Measured per call on R3, one run at a time:
+
+| | host | CuPy/CUDA | OpenCL |
+|---|---:|---:|---:|
+| near field, leaf e | 219.1 ms | 112.7 ms | 30.3 ms |
+| top-level M2L | 133.5 ms | 54.4 ms | 19.3 ms |
+
+**Top-level M2L** (`ocl_m2l`). Each work group takes a tile of grid
+points, stages their translation-channel spectra and their moments in
+local memory, and computes one output harmonic per work item. A grid
+point then reads its `nt` channels and `nn` moments once instead of
+being walked through `(nn, G)` temporaries `nn` times. 27 kB of local
+memory at nmax 4 with a tile of 16.
+
+**Near field** (`ocl_p2p`). The loop runs over target boxes rather than
+over neighbour directions, so each work item accumulates its own box in
+a register and nothing is scattered. That removes the pair array CuPy
+materialises and, with it, `scatter_add` and its atomics.
+
+Agreement with the host Fortran kernels is 6e-16 relative for both.
+Neither is bitwise equal to the host and neither can be: different
+transform library, different summation order.
+
+The mode-block apply is the third phase of the operator and lands
+separately. Until it does, an OpenCL run takes the host path for it
+through the established fall-back.
+
+The kernels are, however, **bit-identical on a repeated call**, which
+the CuPy near field is not, because it reduces with atomics in whatever
+order the hardware delivers. `validation/validate_backend.py` checks
+this explicitly. It matters for phase 2: a preconditioner whose map
+drifts between applies breaks the Arnoldi relation of a long GMRES
+cycle, and writing the products output-centric gives reproducibility by
+construction rather than by workaround.
+
+R3 end to end on OpenCL returns 0.00504932 at 167 matvecs, the host
+answer exactly, in 5:07 against CUDA's 3:19 and the host's 7:35. OpenCL
+is ahead on every phase it owns and behind on the whole run because the
+preconditioner is still on the host; that is phase 2, and it accounts
+for about 2:20 of the 5:07.
+
+Two PyOpenCL details worth knowing. `prg.kernel_name(...)` builds a
+fresh kernel object on every call, which costs real time at one enqueue
+per slab per matvec, so handles are taken once. And `.data` on a sliced
+device array is the whole buffer, not the slice, so stack offsets are
+passed to the kernels explicitly.

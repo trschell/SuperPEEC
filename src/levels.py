@@ -1349,6 +1349,23 @@ class TopLevel:
         self._gpu_idx = cp.asarray(self.idx)
         self._gpu_ready = True
 
+    def _m2l_device(self):
+        """Top-level M2L on whichever device backend is selected.
+
+        CUDA keeps the CuPy path; OpenCL takes the fused contraction in
+        :mod:`ocl_m2l`, which holds each grid point's channel spectra
+        and moments in local memory instead of walking the output
+        harmonics through (nn, G) temporaries.
+        """
+        import backend
+        if backend.name() != 'opencl':
+            return self._m2l_gpu()
+        op = getattr(self, '_ocl_m2l', None)
+        if op is None:
+            import ocl_m2l
+            op = self._ocl_m2l = ocl_m2l.TopM2L(self)
+        self.data = op.apply(self.data)
+
     def _m2l_gpu(self):
         """Top-level M2L on the GPU, channel-tiled (see _m2l_gpu_init).
 
@@ -1424,7 +1441,7 @@ class TopLevel:
         global _GPU
         if _GPU:
             try:
-                self._m2l_gpu()
+                self._m2l_device()
                 return
             except Exception as exc:
                 import warnings

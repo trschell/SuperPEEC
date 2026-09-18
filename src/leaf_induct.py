@@ -71,7 +71,8 @@ class LeafInduct(LeafLevel):
         # '0' explicitly, per the defaults-serve-users policy.
         import backend
         if backend.probe('SPPEEC_GPU_P2P', force_on_error=False):
-            self.p2p = self.p2pgpu2  # auto: CPU fallback is normal
+            self.p2p = (self.p2pocl if backend.name() == 'opencl'
+                        else self.p2pgpu2)   # auto: CPU fallback is normal
         self.iternumber = 0
 
     def __del__(self):
@@ -262,6 +263,30 @@ class LeafInduct(LeafLevel):
                     tgt.c[:sizeslab, :n0, :n1, :n2])
                 self.data[srcidx] = buf.reshape(
                     (sizeslab, self._nflat)).ravel()[flatpos]
+
+    def p2pocl(self):
+        """Near field on OpenCL: the same sweep, one fused kernel.
+
+        See :mod:`ocl_p2p`. Unlike the CuPy path this accumulates each
+        target box in a register instead of scattering with atomics, so
+        it is reproducible call to call as well as cheaper. Any device
+        failure drops this leaf to the host path for the rest of the
+        process, with one warning.
+        """
+        op = getattr(self, '_ocl_nf', None)
+        if op is None:
+            try:
+                import ocl_p2p
+                op = self._ocl_nf = ocl_p2p.NearField(self)
+            except Exception as exc:
+                import warnings
+                warnings.warn("OpenCL near field unavailable (%s: %s) -- "
+                              "host path for the rest of the process"
+                              % (type(exc).__name__, exc))
+                self.p2p = self.p2pcpu
+                return self.p2pcpu()
+        self.iternumber += 1
+        op.apply(self.data, out_=self.data)
 
     def p2pgpu2(self):
         """CuPy near-field driver: the p2pcpu pipeline on the device.
