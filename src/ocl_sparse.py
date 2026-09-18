@@ -191,6 +191,330 @@ __kernel void scatter_sub(__global const real_t *src,
 """
 
 
+# ---------------------------------------------------------------------
+# Sparse times sparse, and transpose.
+#
+# Needed for the two build-phase products the CUDA backend does on the
+# card: the Gram Y Y^T when no certified stencil is available, and the
+# Galerkin P^T A P for each coarse level. Both are formed once per
+# solve, not per apply.
+#
+# The matrices here have short rows. A plaquette touches four
+# filaments, so a Gram row is the 36-slot stencil, and the aggregation
+# is 0/1 with a handful of entries per column. That makes a per-row
+# sorted insert the right shape: one work item owns one output row,
+# keeps its column set in a small private array, and writes it out in
+# ascending column order. Deterministic by construction, and no hash
+# table, no segmented sort, no scratch proportional to the expansion.
+#
+# A row that exceeds the private bound raises the overflow flag and the
+# caller retries wider or falls back to the host, rather than writing
+# something wrong.
+
+SPGEMM_SOURCE = """
+/* insert (c, v) into the ascending private set; 0 on overflow */
+inline int ins(int *cols, real_t *vals, int *n, int c, real_t v)
+{
+    int lo = 0, hi = *n;
+    while (lo < hi) {
+        const int mid = (lo + hi) >> 1;
+        if (cols[mid] < c) lo = mid + 1; else hi = mid;
+    }
+    if (lo < *n && cols[lo] == c) { vals[lo] += v; return 1; }
+    if (*n >= MAXC) return 0;
+    for (int k = *n; k > lo; --k) { cols[k] = cols[k-1]; vals[k] = vals[k-1]; }
+    cols[lo] = c; vals[lo] = v; *n = *n + 1;
+    return 1;
+}
+
+__kernel void spgemm_count(__global const int *aptr,
+                           __global const int *aind,
+                           __global const int *bptr,
+                           __global const int *bind,
+                           __global int *cnnz,
+                           __global int *over,
+                           const unsigned int nrow)
+{
+    const unsigned int i = get_global_id(0);
+    if (i >= nrow) return;
+    int cols[MAXC];
+    real_t vals[MAXC];
+    int n = 0;
+    for (int p = aptr[i]; p < aptr[i+1]; ++p) {
+        const int k = aind[p];
+        for (int q = bptr[k]; q < bptr[k+1]; ++q)
+            if (!ins(cols, vals, &n, bind[q], (real_t)0)) { over[0] = 1; return; }
+    }
+    cnnz[i] = n;
+}
+
+__kernel void spgemm_fill(__global const int *aptr,
+                          __global const int *aind,
+                          __global const real_t *adat,
+                          __global const int *bptr,
+                          __global const int *bind,
+                          __global const real_t *bdat,
+                          __global const int *cptr,
+                          __global int *cind,
+                          __global real_t *cdat,
+                          __global int *over,
+                          const unsigned int nrow)
+{
+    const unsigned int i = get_global_id(0);
+    if (i >= nrow) return;
+    int cols[MAXC];
+    real_t vals[MAXC];
+    int n = 0;
+    for (int p = aptr[i]; p < aptr[i+1]; ++p) {
+        const int k = aind[p];
+        const real_t av = adat[p];
+        for (int q = bptr[k]; q < bptr[k+1]; ++q)
+            if (!ins(cols, vals, &n, bind[q], av*bdat[q])) { over[0] = 1; return; }
+    }
+    const int base = cptr[i];
+    for (int j = 0; j < n; ++j) { cind[base+j] = cols[j]; cdat[base+j] = vals[j]; }
+}
+
+/* transpose: count, then scatter with an atomic cursor, then sort each
+   output row so the result does not depend on the scatter order */
+__kernel void trans_count(__global const int *aind,
+                          __global int *cnt,
+                          const unsigned int nnz)
+{
+    const unsigned int p = get_global_id(0);
+    if (p < nnz) atomic_inc(&cnt[aind[p]]);
+}
+
+__kernel void trans_scatter(__global const int *aptr,
+                            __global const int *aind,
+                            __global const real_t *adat,
+                            __global int *cursor,
+                            __global int *tind,
+                            __global real_t *tdat,
+                            const unsigned int nrow)
+{
+    const unsigned int i = get_global_id(0);
+    if (i >= nrow) return;
+    for (int p = aptr[i]; p < aptr[i+1]; ++p) {
+        const int slot = atomic_inc(&cursor[aind[p]]);
+        tind[slot] = (int)i;
+        tdat[slot] = adat[p];
+    }
+}
+
+__kernel void trans_sort(__global const int *tptr,
+                         __global int *tind,
+                         __global real_t *tdat,
+                         const unsigned int nrow)
+{
+    const unsigned int i = get_global_id(0);
+    if (i >= nrow) return;
+    const int a = tptr[i], b = tptr[i+1];
+    for (int j = a + 1; j < b; ++j) {           /* insertion sort */
+        const int c = tind[j];
+        const real_t v = tdat[j];
+        int k = j - 1;
+        while (k >= a && tind[k] > c) { tind[k+1] = tind[k]; tdat[k+1] = tdat[k]; --k; }
+        tind[k+1] = c; tdat[k+1] = v;
+    }
+}
+"""
+
+
+class SpGEMMOverflow(RuntimeError):
+    """A row needed more distinct columns than the build allows."""
+
+
+def _sp_program(dtype, maxc):
+    return ocl_core.program(SPGEMM_SOURCE, _DT[np.dtype(dtype)],
+                            {'MAXC': int(maxc)},
+                            key='ocl_spgemm/%d' % int(maxc))
+
+
+class DeviceCSR(object):
+    """A CSR that stays on the device: the three arrays and a shape."""
+
+    def __init__(self, indptr, indices, data, shape, nnz):
+        self.indptr, self.indices, self.data = indptr, indices, data
+        self.shape = tuple(int(v) for v in shape)
+        self.nnz = int(nnz)
+
+    def to_host(self):
+        import scipy.sparse as sp
+        q = ocl_core.queue()
+        M = sp.csr_matrix((self.data.get(queue=q)[:self.nnz],
+                           self.indices.get(queue=q)[:self.nnz],
+                           self.indptr.get(queue=q)), shape=self.shape)
+        M.eliminate_zeros()
+        return M
+
+
+def transpose_device(A, dtype=np.float32):
+    """``A.T`` as a :class:`DeviceCSR`, formed on the device."""
+    dt = np.dtype(dtype)
+    q = ocl_core.queue()
+    prg = _sp_program(dt, 64)
+    nrow, ncol = (int(v) for v in A.shape)
+    aptr = ocl_core.to_device(A.indptr.astype(np.int32))
+    aind = ocl_core.to_device(A.indices.astype(np.int32))
+    adat = ocl_core.to_device(A.data.astype(dt))
+    cnt = ocl_core.zeros((ncol,), np.int32)
+    ocl_core.kernel(prg, 'trans_count')(
+        q, (max(1, int(A.nnz)),), None, aind.data, cnt.data,
+        np.uint32(A.nnz))
+    tptr = np.zeros(ncol + 1, np.int32)
+    np.cumsum(cnt.get(queue=q), out=tptr[1:])
+    tptr_d = ocl_core.to_device(tptr)
+    cursor = ocl_core.to_device(tptr[:-1].copy())
+    tind = ocl_core.zeros((max(1, int(A.nnz)),), np.int32)
+    tdat = ocl_core.zeros((max(1, int(A.nnz)),), dt)
+    ocl_core.kernel(prg, 'trans_scatter')(
+        q, (max(1, nrow),), None, aptr.data, aind.data, adat.data,
+        cursor.data, tind.data, tdat.data, np.uint32(nrow))
+    ocl_core.kernel(prg, 'trans_sort')(
+        q, (max(1, ncol),), None, tptr_d.data, tind.data, tdat.data,
+        np.uint32(ncol))
+    return DeviceCSR(tptr_d, tind, tdat, (ncol, nrow), int(A.nnz))
+
+
+def spgemm_device(A, B, dtype=np.float32, maxc=64):
+    """``A @ B`` as a :class:`DeviceCSR`.
+
+    ``A`` and ``B`` may be scipy matrices or :class:`DeviceCSR`, so a
+    chain such as the Gram stays on the card from end to end.
+    """
+    dt = np.dtype(dtype)
+    q = ocl_core.queue()
+    prg = _sp_program(dt, maxc)
+
+    def parts(M):
+        if isinstance(M, DeviceCSR):
+            return M.indptr, M.indices, M.data, M.shape
+        return (ocl_core.to_device(M.indptr.astype(np.int32)),
+                ocl_core.to_device(M.indices.astype(np.int32)),
+                ocl_core.to_device(M.data.astype(dt)),
+                tuple(int(v) for v in M.shape))
+
+    aptr, aind, adat, ashape = parts(A)
+    bptr, bind, bdat, bshape = parts(B)
+    nrow = int(ashape[0])
+    over = ocl_core.zeros((1,), np.int32)
+    cnnz = ocl_core.zeros((nrow,), np.int32)
+    ocl_core.kernel(prg, 'spgemm_count')(
+        q, (max(1, nrow),), None, aptr.data, aind.data, bptr.data,
+        bind.data, cnnz.data, over.data, np.uint32(nrow))
+    if int(over.get(queue=q)[0]):
+        raise SpGEMMOverflow(
+            "an output row needs more than %d distinct columns" % maxc)
+    cptr = np.zeros(nrow + 1, np.int32)
+    np.cumsum(cnnz.get(queue=q), out=cptr[1:])
+    nnz = int(cptr[-1])
+    cptr_d = ocl_core.to_device(cptr)
+    cind = ocl_core.zeros((max(1, nnz),), np.int32)
+    cdat = ocl_core.zeros((max(1, nnz),), dt)
+    ocl_core.kernel(prg, 'spgemm_fill')(
+        q, (max(1, nrow),), None, aptr.data, aind.data, adat.data,
+        bptr.data, bind.data, bdat.data, cptr_d.data, cind.data,
+        cdat.data, over.data, np.uint32(nrow))
+    if int(over.get(queue=q)[0]):
+        raise SpGEMMOverflow(
+            "an output row needs more than %d distinct columns" % maxc)
+    return DeviceCSR(cptr_d, cind, cdat, (nrow, int(bshape[1])), nnz)
+
+
+def gram_device(basis, dtype=np.float32, maxc=64):
+    """``Y @ Y.T`` formed and kept on the device.
+
+    This is the level-0 operator when no certified stencil is
+    available. Forming it on the card rather than with scipy keeps a
+    Gram-sized matrix off the host entirely, which is the whole point:
+    on R4 it would be gigabytes.
+    """
+    return spgemm_device(basis, transpose_device(basis, dtype), dtype,
+                         maxc)
+
+
+def transpose(A, dtype=np.float32):
+    """``A.T`` as a scipy CSR, formed on the device."""
+    import scipy.sparse as sp
+    dt = np.dtype(dtype)
+    q = ocl_core.queue()
+    prg = _sp_program(dt, 64)
+    nrow, ncol = (int(v) for v in A.shape)
+    aptr = ocl_core.to_device(A.indptr.astype(np.int32))
+    aind = ocl_core.to_device(A.indices.astype(np.int32))
+    adat = ocl_core.to_device(A.data.astype(dt))
+    cnt = ocl_core.zeros((ncol,), np.int32)
+    ocl_core.kernel(prg, 'trans_count')(
+        q, (max(1, int(A.nnz)),), None, aind.data, cnt.data,
+        np.uint32(A.nnz))
+    counts = cnt.get(queue=q)
+    tptr = np.zeros(ncol + 1, np.int32)
+    np.cumsum(counts, out=tptr[1:])
+    tptr_d = ocl_core.to_device(tptr)
+    cursor = ocl_core.to_device(tptr[:-1].copy())
+    tind = ocl_core.zeros((max(1, int(A.nnz)),), np.int32)
+    tdat = ocl_core.zeros((max(1, int(A.nnz)),), dt)
+    ocl_core.kernel(prg, 'trans_scatter')(
+        q, (max(1, nrow),), None, aptr.data, aind.data, adat.data,
+        cursor.data, tind.data, tdat.data, np.uint32(nrow))
+    ocl_core.kernel(prg, 'trans_sort')(
+        q, (max(1, ncol),), None, tptr_d.data, tind.data, tdat.data,
+        np.uint32(ncol))
+    return sp.csr_matrix((tdat.get(queue=q), tind.get(queue=q), tptr),
+                         shape=(ncol, nrow))
+
+
+def spgemm(A, B, dtype=np.float32, maxc=64):
+    """``A @ B`` as a scipy CSR, formed on the device.
+
+    ``maxc`` bounds the distinct columns in any output row. A row that
+    exceeds it raises :class:`SpGEMMOverflow`; the caller widens or
+    falls back rather than getting a wrong answer.
+    """
+    import scipy.sparse as sp
+    dt = np.dtype(dtype)
+    q = ocl_core.queue()
+    prg = _sp_program(dt, maxc)
+    nrow = int(A.shape[0])
+    aptr = ocl_core.to_device(A.indptr.astype(np.int32))
+    aind = ocl_core.to_device(A.indices.astype(np.int32))
+    adat = ocl_core.to_device(A.data.astype(dt))
+    bptr = ocl_core.to_device(B.indptr.astype(np.int32))
+    bind = ocl_core.to_device(B.indices.astype(np.int32))
+    bdat = ocl_core.to_device(B.data.astype(dt))
+    over = ocl_core.zeros((1,), np.int32)
+    cnnz = ocl_core.zeros((nrow,), np.int32)
+    ocl_core.kernel(prg, 'spgemm_count')(
+        q, (max(1, nrow),), None, aptr.data, aind.data, bptr.data,
+        bind.data, cnnz.data, over.data, np.uint32(nrow))
+    if int(over.get(queue=q)[0]):
+        raise SpGEMMOverflow(
+            "an output row needs more than %d distinct columns" % maxc)
+    counts = cnnz.get(queue=q)
+    cptr = np.zeros(nrow + 1, np.int32)
+    np.cumsum(counts, out=cptr[1:])
+    nnz = int(cptr[-1])
+    cptr_d = ocl_core.to_device(cptr)
+    cind = ocl_core.zeros((max(1, nnz),), np.int32)
+    cdat = ocl_core.zeros((max(1, nnz),), dt)
+    ocl_core.kernel(prg, 'spgemm_fill')(
+        q, (max(1, nrow),), None, aptr.data, aind.data, adat.data,
+        bptr.data, bind.data, bdat.data, cptr_d.data, cind.data,
+        cdat.data, over.data, np.uint32(nrow))
+    if int(over.get(queue=q)[0]):
+        raise SpGEMMOverflow(
+            "an output row needs more than %d distinct columns" % maxc)
+    C = sp.csr_matrix((cdat.get(queue=q)[:nnz],
+                       cind.get(queue=q)[:nnz], cptr),
+                      shape=(nrow, int(B.shape[1])))
+    # scipy's product drops entries that cancel to exactly zero, and
+    # the hierarchy should not depend on which backend assembled it,
+    # so the structure is canonicalised the same way
+    C.eliminate_zeros()
+    return C
+
+
 class CSR(object):
     """A CSR matrix resident on the device, with deterministic products."""
 
@@ -199,6 +523,16 @@ class CSR(object):
     def __init__(self, M, dtype=np.float32):
         import scipy.sparse as sp
         self.dtype = np.dtype(dtype)
+        if isinstance(M, DeviceCSR):
+            # already on the card (a Gram formed there); adopt it
+            self.shape, self.nnz = M.shape, M.nnz
+            self.data, self.indices, self.indptr = (M.data, M.indices,
+                                                    M.indptr)
+            self.prg = program(self.dtype, self.WG)
+            self._k = {n: ocl_core.kernel(self.prg, n)
+                       for n in ('csr_spmv', 'csr_jacobi', 'csr_residual',
+                                 'csr_spmv_add')}
+            return
         M = sp.csr_matrix(M)
         self.shape = tuple(int(v) for v in M.shape)
         self.nnz = int(M.nnz)

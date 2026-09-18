@@ -202,6 +202,68 @@ def mode_cases():
               for a, b in zip((gu, gf), op.apply(u, i_f))))
 
 
+def sparse_product_cases():
+    """The device sparse-sparse product and transpose, against scipy.
+
+    Both are build-phase products: the Gram when no certified stencil
+    is available, and a Galerkin coarse operator. They must agree with
+    scipy exactly, structure included, so a hierarchy does not depend
+    on which backend assembled it.
+    """
+    import numpy as _np
+    import scipy.sparse as _sp
+    import ocl_sparse
+    rng = _np.random.default_rng(31)
+    A = _sp.random(4000, 3000, 0.002, format='csr', random_state=1)
+    B = _sp.random(3000, 2500, 0.002, format='csr', random_state=2)
+    try:
+        C = ocl_sparse.spgemm(A, B, _np.float32, maxc=128)
+    except ocl_sparse.SpGEMMOverflow as exc:
+        check("sparse product: random case", False, str(exc))
+        return
+    ref = (A.astype(_np.float32) @ B.astype(_np.float32)).tocsr()
+    ref.sort_indices()
+    C.sort_indices()
+    check("sparse product: structure and values match scipy",
+          C.shape == ref.shape and C.nnz == ref.nnz
+          and _np.array_equal(C.indices, ref.indices)
+          and _np.array_equal(C.indptr, ref.indptr)
+          and float(abs(C - ref).max()) == 0.0,
+          "nnz %d vs %d" % (C.nnz, ref.nnz))
+
+    # a plaquette-like basis: four entries of plus or minus one per row
+    nr, nc = 20000, 9000
+    rows = _np.repeat(_np.arange(nr), 4)
+    cols = rng.integers(0, nc, nr*4)
+    vals = rng.choice([-1.0, 1.0], nr*4)
+    Y = _sp.csr_matrix((vals, (rows, cols)), shape=(nr, nc))
+    Y.sum_duplicates()
+    YT = ocl_sparse.transpose(Y, _np.float32)
+    refT = _sp.csr_matrix(Y.T.astype(_np.float32))
+    refT.sort_indices()
+    YT.sort_indices()
+    check("sparse transpose: matches scipy exactly",
+          YT.shape == refT.shape and YT.nnz == refT.nnz
+          and _np.array_equal(YT.indices, refT.indices)
+          and float(abs(YT - refT).max()) == 0.0)
+    try:
+        G = ocl_sparse.spgemm(Y, YT, _np.float32, maxc=128)
+    except ocl_sparse.SpGEMMOverflow as exc:
+        check("sparse product: Gram case", False, str(exc))
+        return
+    refG = (Y.astype(_np.float32) @ refT).tocsr()
+    refG.sort_indices()
+    G.sort_indices()
+    check("sparse product: a Gram matches scipy exactly",
+          G.nnz == refG.nnz and _np.array_equal(G.indices, refG.indices)
+          and float(abs(G - refG).max()) == 0.0,
+          "nnz %d vs %d" % (G.nnz, refG.nnz))
+    G2 = ocl_sparse.spgemm(Y, YT, _np.float32, maxc=128)
+    check("sparse product: repeated build is bit-identical",
+          _np.array_equal(G.data, G2.data)
+          and _np.array_equal(G.indices, G2.indices))
+
+
 def precond_cases():
     """The multigrid preconditioner apply, against the host apply.
 
@@ -329,6 +391,7 @@ def operator_cases():
               np.array_equal(got, again))
 
     mode_cases()
+    sparse_product_cases()
     precond_cases()
 
     top = M.lv[int(M.numlevels) - 1]

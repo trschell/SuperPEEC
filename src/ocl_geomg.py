@@ -51,6 +51,9 @@ class GeoCore(object):
     # very transient the memory campaign removed, so refuse and let
     # the caller fall back rather than trade one regression for another
     GRAM_BUDGET = float(os.environ.get('SPPEEC_OCL_GRAM_GB', '2'))*2**30
+    # distinct columns a Gram row may have; the plaquette Gram is a
+    # 36-slot stencil, so this is loose
+    GRAM_MAXC = int(os.environ.get('SPPEEC_OCL_GRAM_MAXC', '128'))
 
     def __init__(self, mg, cycles, basis=None):
         if mg.coarse_pinv is None:
@@ -81,16 +84,25 @@ class GeoCore(object):
                 raise RuntimeError(
                     "the OpenCL GeoMG needs a host level 0, a certified "
                     "stencil, or the basis level 0 is formed from")
-            itm = np.dtype(dt).itemsize
-            est = float(getattr(mg, '_nnz0_est', 0) or 0)*(itm + 4)
-            if est > self.GRAM_BUDGET:
-                raise MemoryError(
-                    "the level-0 Gram would take about %.1f GB on the host "
-                    "(budget %.1f GB, SPPEEC_OCL_GRAM_GB) and no certified "
-                    "stencil is available"
-                    % (est/2**30, self.GRAM_BUDGET/2**30))
-            levels[0] = (basis @ basis.T).tocsr().astype(dt)
-        self.level0 = 'stencil' if A0 is not None else 'matrix'
+            # formed on the card and kept there: a Gram is gigabytes
+            # at flagship scale and has no business on the host
+            try:
+                A0 = ocl_sparse.CSR(
+                    ocl_sparse.gram_device(basis, dt, self.GRAM_MAXC), dt)
+            except ocl_sparse.SpGEMMOverflow as exc:
+                itm = np.dtype(dt).itemsize
+                est = float(getattr(mg, '_nnz0_est', 0) or 0)*(itm + 4)
+                if est > self.GRAM_BUDGET:
+                    raise MemoryError(
+                        "the level-0 Gram needs more than %d columns in a "
+                        "row (%s) and would take about %.1f GB on the host "
+                        "(budget %.1f GB, SPPEEC_OCL_GRAM_GB)"
+                        % (self.GRAM_MAXC, exc, est/2**30,
+                           self.GRAM_BUDGET/2**30))
+                levels[0] = (basis @ basis.T).tocsr().astype(dt)
+        self.level0 = ('stencil' if isinstance(A0, object)
+                       and type(A0).__module__ == 'ocl_stencil'
+                       else ('device Gram' if A0 is not None else 'matrix'))
         self.cycles = int(cycles)
         self.nu = int(mg.nu)
         self.omega = float(mg.omega)

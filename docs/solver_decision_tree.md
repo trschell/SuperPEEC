@@ -1143,3 +1143,44 @@ to 3.0 GB, R4 11.9 to 10.2.
 What found it was the census: the object totals matched between the two
 backends to within 0.3 GiB while anonymous memory differed by 2.2, so
 whatever held it was not a Python object the census could see.
+
+## The device sparse-sparse product (2026-09-18)
+
+`ocl_sparse.spgemm` and `ocl_sparse.transpose` are the OpenCL
+equivalents of the two build-phase products the CUDA backend runs on
+the card: the Gram when no certified stencil is available, and a
+Galerkin coarse operator. Both are formed once per solve, never per
+apply.
+
+The design follows the matrices rather than the textbook. A plaquette
+touches four filaments, so a Gram row is the 36-slot stencil, and the
+aggregation is 0/1 with a handful of entries per column: the rows are
+short. So one work item owns one output row and keeps its column set in
+a small sorted private array, inserting with a binary search. No hash
+table, no segmented sort, and no scratch proportional to the expansion.
+It is deterministic by construction, and a row that exceeds the private
+bound raises rather than writing something wrong, so the caller widens
+the bound or falls back to the host.
+
+Entries that cancel to exactly zero are pruned, because scipy prunes
+them and a hierarchy should not depend on which backend assembled it.
+With that, the results match scipy exactly, structure and values, and
+repeated builds are bit-identical. Device-resident forms
+(`spgemm_device`, `transpose_device`, `gram_device`) let a Gram chain
+stay on the card from end to end, which matters because a Gram is
+gigabytes at flagship scale.
+
+**What this does not fix.** It was reached for on the theory that it
+would close the roughly 0.6 GB by which R4 on OpenCL still sits above
+CUDA. Inspection did not support that: the host multigrid's coarse
+build already avoids a Gram-sized product, colour-probing through the
+stencil at a transient near 100 MB rather than 1.8 GB. The gap remains
+unattributed.
+
+Its wiring today is correspondingly narrow. The multigrid core uses it
+for the level-0 Gram when no stencil certifies, which keeps that matrix
+off the host entirely; but when a stencil fails to certify the host
+multigrid has usually formed a Gram itself already, so removing that
+needs a change there rather than in the backend. The product's present
+value is as a building block and as the parity item for retiring the
+CUDA path.
