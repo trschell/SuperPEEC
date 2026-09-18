@@ -216,6 +216,57 @@ class ToeplitzCoeffPoten():
                                   direction='FFTW_BACKWARD')
 
 
+class ToeplitzSlab():
+    """One padded slab workspace with in-place staged transforms.
+
+    The same padded 3-D transform as :class:`ToeplitzM2L` -- axis by
+    axis, each stage on the part of the grid the earlier stages have
+    filled -- but on ONE buffer ``c`` of shape (ngroups, 2nx, 2ny, 2nz)
+    with the plans built on views of it, instead of three buffers
+    (a: (2nx, ny, nz), b: (2nx, 2ny, nz), c) copied into one another
+    between stages. Those copies were ~1.2 GB per host near-field call
+    on the R3 flagship (2026-09-17). Memory 4/7 of the three-buffer
+    form. FFTW on a strided view may pick a different algorithm than
+    on the contiguous buffer, so results agree with ToeplitzM2L to
+    rounding, not bit for bit.
+
+    Forward: the caller zeroes ``c`` and writes the source block
+    ``c[:, :nx, :ny, :nz]``, then :meth:`fft`. Inverse: ``c`` holds
+    the padded spectrum, :meth:`ifft`, the result is
+    ``c[:, :nx, :ny, :nz]``.
+    """
+    def __init__(self, n_size, ngroups, threads=None):
+        self.n_x, self.n_y, self.n_z = (int(v) for v in n_size)
+        self.nnmax = int(ngroups)
+        _threads = _FFTW_THREADS if threads is None else int(threads)
+        self.c = pyfftw.empty_aligned(
+            (self.nnmax, 2*self.n_x, 2*self.n_y, 2*self.n_z),
+            dtype='complex128', n=16)
+        va = self.c[:, :, :self.n_y, :self.n_z]
+        vb = self.c[:, :, :, :self.n_z]
+        vc = self.c
+        kw = dict(flags=('FFTW_MEASURE', ), threads=_threads)
+        self._f1 = pyfftw.FFTW(va, va, axes=(1,), **kw)
+        self._f2 = pyfftw.FFTW(vb, vb, axes=(2,), **kw)
+        self._f3 = pyfftw.FFTW(vc, vc, axes=(3,), **kw)
+        self._b3 = pyfftw.FFTW(vc, vc, axes=(3,), direction='FFTW_BACKWARD',
+                               **kw)
+        self._b2 = pyfftw.FFTW(vb, vb, axes=(2,), direction='FFTW_BACKWARD',
+                               **kw)
+        self._b1 = pyfftw.FFTW(va, va, axes=(1,), direction='FFTW_BACKWARD',
+                               **kw)
+        # planning executes trial transforms on the buffer: leave it clean
+        self.c[...] = 0
+
+    def fft(self):
+        self._f1(); self._f2(); self._f3()
+        return self.c
+
+    def ifft(self):
+        self._b3(); self._b2(); self._b1()
+        return self.c
+
+
 class ToeplitzM2L():
     def __init__(self, n_size, nnmax, threads=None):
         # threads: per-instance FFTW thread count. Default is the

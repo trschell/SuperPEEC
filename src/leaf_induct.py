@@ -212,85 +212,60 @@ class LeafInduct(LeafLevel):
                 packs.append((flatpos, srcidx))
             self._slab_pack = packs
             self._nflat = nflat
-        aheadslab = tp.ToeplitzM2L(self.m, 1)
+        # Workspace cache (2026-09-17): the three rolling source slabs
+        # and the target slab were allocated afresh per slab per matvec
+        # (three FFTW-planned buffers each), 1.3 GB of page-faulted and
+        # zeroed memory per R3 call -- 38% of the host near field. Now
+        # one single-buffer workspace (tp.ToeplitzSlab: the staged
+        # transforms in place on views, no inter-stage copies) per
+        # (role, slab size, rotation slot), and the kernel writing
+        # straight into the target workspace (P2PINTO).
+        ws = self.__dict__.setdefault('_p2pws', {})
+
+        def wsp(role, size, slot):
+            key = (role, int(size), slot)
+            w = ws.get(key)
+            if w is None:
+                w = tp.ToeplitzSlab(self.m, int(size))
+                ws[key] = w
+            return w
+        n0, n1, n2 = (int(v) for v in self.n)
+        aheadslab = wsp('s', 1, 2)
         aheadslab.c[...] = 0
-        #                        dtype=np.complex128)
         currentslab = None
         for countx in range(-1, int(self.ng[0])):
             behindslab = currentslab
             currentslab = aheadslab
+            slot = (countx + 1) % 3
             if countx < self.ng[0]-1:
                 sizeslab = self.slabidx0[countx+2] - self.slabidx0[countx+1]
-                aheadslab = tp.ToeplitzM2L(self.m, sizeslab)
-                aheadslab.a[:] = 0
-                aheadslab.b[:] = 0
-                aheadslab.c[:] = 0
+                aheadslab = wsp('s', sizeslab, slot)
                 # one scatter for the whole slab (see _slab_pack above)
                 flatpos, srcidx = self._slab_pack[countx+1]
                 buf = np.zeros((sizeslab, self._nflat),
                                dtype=np.complex128)
                 buf.ravel()[flatpos] = self.data[srcidx]
-                aheadslab.a[:, :self.n[0], :self.n[1], :self.n[2]] = \
-                    buf.reshape((sizeslab, self.n[0], self.n[1],
-                                 self.n[2]))
-                aheadslab.a = aheadslab.fftab()
-                aheadslab.b[:, :, :self.m[1], :] = aheadslab.a
-                aheadslab.b = aheadslab.fftbc()
-                aheadslab.c[:, :, :, :self.m[2]] = aheadslab.b
-                aheadslab.c = aheadslab.fftcc()
-                # aheadslab[:, :, :self.m[1], :self.m[2]] = \
-                #     np.fft.fft(aheadslab[:, :, :self.m[1], :self.m[2]],
-                #                2*self.m[0], 1)
-                # aheadslab[:, :, :, :self.m[2]] = \
-                #     np.fft.fft(aheadslab[:, :, :, :self.m[2]],
-                #                2*self.m[1], 2)
+                aheadslab.c[...] = 0
+                aheadslab.c[:, :n0, :n1, :n2] = \
+                    buf.reshape((sizeslab, n0, n1, n2))
+                aheadslab.fft()
+            else:
+                aheadslab = wsp('s', 1, slot)    # never read
             if countx >= 0 and np.shape(currentslab.c)[0] > 0:
                 sizeslab = self.slabidx0[countx+1] - self.slabidx0[countx]
                 selfslabidx = self.slabidx[self.slabidx0[countx]:
                                            self.slabidx0[countx+1]]
-                targetslab = tp.ToeplitzM2L(self.m, sizeslab)
-                targetslab.c[...] = \
-                    mp_fortran.p2p(behindslab.c.T, currentslab.c.T,
-                                   aheadslab.c.T, selfslabidx, selfslabidx,
+                targetslab = wsp('t', sizeslab, 0)
+                mp_fortran.p2pinto(behindslab.c.T, currentslab.c.T,
+                                   aheadslab.c.T, selfslabidx,
                                    countx, self.neighbors.T, self.xidx,
                                    self.p2p_transfer.T, self.revslabidx,
-                                   self.revslabidx).T
-                # targetslab.c[...] = self.p2pinner(behindslab.c, currentslab.c,
-                #                                   aheadslab.c, selfslabidx,
-                #                                   countx)
-                targetslab.c = targetslab.ifftcc()
-                targetslab.b[...] = targetslab.c[..., :self.m[2]]
-                targetslab.b = targetslab.ifftcb()
-                targetslab.a[...] = targetslab.b[..., :self.m[1], :]
-                targetslab.a = targetslab.ifftba()
-                #     group = self.slabidx[countg + self.slabidx0[countx]]
-                #     for countn in range(27):
-                #         neighgroup = self.neighbors[countn, group]
-                #         if neighgroup >= 0:
-                #             x = self.xidx[neighgroup] - countx
-                #             trans = self.p2p_transfer[countn, :, :, :]
-                #             yzidx = self.revslabidx[neighgroup]
-                #             if x == -1:
-                #                 targetslab[countg, ...] += \
-                #                     trans*behindslab[yzidx, :, :, :]
-                #             elif x == 0:
-                #                 targetslab[countg, ...] += \
-                #                     trans*currentslab[yzidx, :, :, :]
-                #             elif x == 1:
-                #                 targetslab[countg, ...] += \
-                #                     trans*aheadslab[yzidx, :, :, :]
-                #             else:
-                #                 print("invalid slab!")
-                ####################
-                # targetslab[..., :self.m[2]] = \
-                #     np.fft.ifft(targetslab[..., :self.m[2]], 2*self.m[1], 2)
-                # targetslab[..., :self.m[1], :self.m[2]] = \
-                #     np.fft.ifft(targetslab[..., :self.m[1], :self.m[2]],
-                #                 2*self.m[0], 1)
+                                   self.revslabidx, targetslab.c.T)
+                targetslab.ifft()
                 # one gather for the whole slab (see _slab_pack above)
                 flatpos, srcidx = self._slab_pack[countx]
                 buf = np.ascontiguousarray(
-                    targetslab.a[:, :self.n[0], :self.n[1], :self.n[2]])
+                    targetslab.c[:, :n0, :n1, :n2])
                 self.data[srcidx] = buf.reshape(
                     (sizeslab, self._nflat)).ravel()[flatpos]
 

@@ -874,11 +874,57 @@ Shipped:
    order changed, so the stencil is now always certified to tolerance
    against the matrix path, never bitwise.
 3. **The top-level M2L kernel threaded** over its 25 output channels
-   (bit-identical; FMMtop now built with -fopenmp). The kernel itself
-   is 15 ms at R4 size; that phase's 0.25 s is its FFTs and gathers.
+   (bit-identical; FMMtop now built with -fopenmp). (The split below
+   later showed the kernel, not the FFTs, was still most of that
+   phase: 0.25 of 0.39 s per call on R3, memory-bound.)
 
 R3 CPU-only, whole run: 28:37 -> 17:20 (1) -> 9:34 (1+2+3), against
 3:26 with the card; answer and matvec count unchanged. What is left
 on the host, in order: P2P at 3x the card's per-call cost (170 s of
 510), the top-level M2L's FFTs (125 s), the apply's remaining 0.9 s
 (155 s). R4 and the XNOR are not yet re-measured CPU-only.
+
+## CPU-only wall time, second batch: the near field and the top-level M2L (2026-09-17)
+
+With the apply fixed, the host operator was the CPU-only solve: on R3,
+P2P 170 s and the top-level M2L 125 s of 510. A per-call split of one
+near-field call (leaf e, R3, 0.68 s on a loaded box) put a third in the
+Fortran kernel, a quarter in the six staged FFT passes, and 38% in
+nothing at all: every slab of every matvec allocated three fresh
+FFTW-planned buffers for the source and three for the target, zeroed
+them and copied a -> b -> c between the stages -- 1.3 GB of page-faulted
+memory per call. The top-level M2L's kernel streamed its whole transfer
+table once per (n,m,j,k) pair: 5.9 GB per call on R3, memory-bound at
+23 GB/s. Threads: 4 beat 8 and 12 for both phases (the kernels are
+bandwidth-bound), so the no-GPU thread policy stands.
+
+1. **Near-field kernel on contiguous planes** (`mp_fortran` P2PCORE /
+   P2PAXPY): the slab choice (behind / current / ahead) is made once
+   per neighbour instead of per grid point, and the inner loop is a
+   stride-1 complex axpy over one padded plane. P2PINTO writes into
+   the caller's buffer (no per-slab output allocation); the capacitive
+   near field uses it too. Kernel 0.23 -> 0.11 s per call.
+2. **One cached workspace per slab** (`toeplitz.ToeplitzSlab`): the
+   padded transform staged in place on views of a single buffer, no
+   inter-stage copies, cached per (role, slab size, rotation slot) in
+   `leaf_induct.p2pcpu`; 4/7 of the three-buffer workspace memory.
+3. **Plane-tiled top-level M2L** (`FMMtop.M2L`): each thread takes one
+   X plane and a run of Y columns short enough that the 131 table and
+   spectrum segments it needs stay in L2, and applies all (n,m,j,k)
+   pairs to that segment. Kernel 0.29 -> 0.07 s per call.
+
+All three agree with the old kernels to fp64 rounding (4e-16 relative
+on R3; the compiler's FMA contraction and FFTW's plan choice on views
+differ), not bit for bit; the near/far-field validators pass. Clean
+per-call numbers on R3: near field 0.346 -> 0.208 s, top M2L
+0.242 -> 0.136 s.
+
+| model, CPU-only whole run | before this campaign | batch 1 | batch 2 |
+|---|---|---|---|
+| R3 (167 mv, same answer) | 28:37 | 9:34 | 7:35 |
+| R4 (peak 10.1 GiB) | 1:58:28 | 51:51 | not yet measured |
+
+R3 solve after batch 2 (survey): matvec 1.45 s (P2P 0.22 and top M2L
+0.14 per orientation), apply 0.92 s -- the preconditioner is again the
+largest single phase (152 of ~400 s), followed by the rest of the
+matvec (P2M/L2P/M2M/L2L and the mode stacks).

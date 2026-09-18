@@ -676,11 +676,13 @@ class LeafPoten(LeafLevel):
                 # OUTMAT's group axis, which the kernel indexes as
                 # OREVSLABIDX(group)+1, so it must be the TARGET slab's
                 # group list (passing a scalar count corrupted the heap).
-                tw.c[...] = mp_fortran.p2p(
+                # in place into the cached target workspace (P2PINTO,
+                # 2026-09-17): no per-slab output allocation
+                mp_fortran.p2pinto(
                     behind[t].c.T, current[t].c.T, ahead[t].c.T,
-                    selfslabidx, tslabidx, countx, self.neighbors.T,
+                    selfslabidx, countx, self.neighbors.T,
                     self.xidx, trans[t].T, self.revslabidx,
-                    p.revslabidx).T
+                    p.revslabidx, tw.c.T)
                 tw.ifftcc()
                 tw.b[...] = tw.c[..., :nin_t[t][2]]
                 tw.ifftcb()
