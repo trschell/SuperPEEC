@@ -202,6 +202,50 @@ def mode_cases():
               for a, b in zip((gu, gf), op.apply(u, i_f))))
 
 
+def wire_cases():
+    """The wire-bond particular current, device against host.
+
+    A synthetic wire graph: a spanning tree plus chords, which is the
+    shape the bond-wire assembly produces. Both solves run the same
+    preconditioned conjugate gradient on the same graph Laplacian, so
+    they agree to solver tolerance, and the device one must also report
+    a clean KCL residual.
+    """
+    import numpy as _np
+    import scipy.sparse as _sp
+    import ocl_wire
+    from wireassembly import _laplacian_current_cpu
+    rng = _np.random.default_rng(41)
+    nn = 4000
+    parent = _np.full(nn, -1, _np.int64)
+    parent[1:] = rng.integers(0, _np.arange(1, nn))      # a random tree
+    edges = [(int(parent[i]), i) for i in range(1, nn)]
+    for _ in range(600):                                  # chords
+        a, b = int(rng.integers(0, nn)), int(rng.integers(0, nn))
+        if a != b:
+            edges.append((a, b))
+    ne = len(edges)
+    rows = _np.repeat(_np.arange(ne), 2)
+    cols = _np.array([c for e in edges for c in e], _np.int64)
+    vals = _np.tile(_np.array([-1.0, 1.0]), ne)
+    B = _sp.csr_matrix((vals, (rows, cols)), shape=(ne, nn))
+    rhs = rng.standard_normal(nn)
+    rhs[parent < 0] = 0.0
+    rhs -= rhs.mean()
+
+    got, resid = ocl_wire.laplacian_current(B, parent, rhs)
+    ref, resid_h = _laplacian_current_cpu(B, parent, rhs)
+    check("wire Laplacian: device residual is clean", resid < 1e-9,
+          "max |B^T ihat - rhs| = %.2e (host %.2e)" % (resid, resid_h))
+    scale = max(1e-30, float(_np.abs(ref).max()))
+    rel = float(_np.abs(got - ref).max())/scale
+    check("wire Laplacian: device agrees with the host solve",
+          rel < 1e-6, "rel diff=%.3e" % rel)
+    again, _ = ocl_wire.laplacian_current(B, parent, rhs)
+    check("wire Laplacian: repeated solve is bit-identical",
+          _np.array_equal(got, again))
+
+
 def sparse_product_cases():
     """The device sparse-sparse product and transpose, against scipy.
 
@@ -391,6 +435,7 @@ def operator_cases():
               np.array_equal(got, again))
 
     mode_cases()
+    wire_cases()
     sparse_product_cases()
     precond_cases()
 

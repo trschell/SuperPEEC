@@ -845,7 +845,13 @@ class _GeoMGFactor:
         # GPU validator compares host and device applies).
         self._A0_d = None
         mv0 = None
+        import backend as _backend
+        # CUDA only: it builds the Gram on the card and probes the
+        # coarse levels through it. The OpenCL path applies level 0 as
+        # a stencil instead, which never forms the Gram at all, so it
+        # skips this rather than failing into a warning.
         if (A is None and basis is not None and _gpu_amg_wanted()
+                and _backend.name() == 'cuda'
                 and os.environ.get('SPPEEC_KEEP_HOST_COPIES') != '1'):
             try:
                 import backend

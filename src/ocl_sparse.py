@@ -160,6 +160,45 @@ void dense_gemv(__global const real_t *A,
     if (lid == 0) y[row] = tot;
 }
 
+/* Vector reductions. PyOpenCL's own need the Mako templating engine,
+   which is a dependency this tree does not carry, and these are fixed
+   in shape anyway: a fixed number of work groups, each reducing
+   through the same tree, then a fixed-order sum of the partials on the
+   host. Same answer every call. */
+__kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
+void red_dot(__global const real_t *a, __global const real_t *b,
+             __global real_t *part, const unsigned int n)
+{
+    __local real_t s[WG];
+    const unsigned int lid = get_local_id(0);
+    const unsigned int nb = get_num_groups(0);
+    real_t acc = (real_t)0;
+    for (unsigned int i = get_group_id(0)*WG + lid; i < n; i += WG*nb)
+        acc += a[i]*b[i];
+    s[lid] = acc;
+    const real_t tot = row_reduce(s, lid);
+    if (lid == 0) part[get_group_id(0)] = tot;
+}
+
+__kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
+void red_maxabs(__global const real_t *a, __global real_t *part,
+                const unsigned int n)
+{
+    __local real_t s[WG];
+    const unsigned int lid = get_local_id(0);
+    const unsigned int nb = get_num_groups(0);
+    real_t acc = (real_t)0;
+    for (unsigned int i = get_group_id(0)*WG + lid; i < n; i += WG*nb)
+        acc = fmax(acc, fabs(a[i]));
+    s[lid] = acc;
+    for (unsigned int span = WG >> 1; span > 0; span >>= 1) {
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (lid < span) s[lid] = fmax(s[lid], s[lid + span]);
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (lid == 0) part[get_group_id(0)] = s[0];
+}
+
 __kernel void gather_idx(__global const real_t *src,
                          __global const int *idx,
                          __global real_t *dst,
@@ -604,6 +643,30 @@ def scatter(src, idx, dst, dtype=np.float32, wg=64):
     k(ocl_core.queue(), (n,), None, src.data, idx.data, dst.data,
       np.uint32(n))
     return dst
+
+
+NBLOCK = 256              # work groups per reduction; fixed, so the
+                          # partial-sum order is fixed too
+
+
+def dot(a, b, dtype=np.float32, wg=64):
+    """``a . b`` as a Python float, by a fixed-shape reduction."""
+    n = int(a.size)
+    part = ocl_core.zeros((NBLOCK,), dtype)
+    ocl_core.kernel(program(dtype, wg), 'red_dot')(
+        ocl_core.queue(), (NBLOCK*wg,), (wg,), a.data, b.data, part.data,
+        np.uint32(n))
+    return float(np.sum(part.get(queue=ocl_core.queue()), dtype=np.float64))
+
+
+def maxabs(a, dtype=np.float32, wg=64):
+    """``max |a|`` as a Python float."""
+    n = int(a.size)
+    part = ocl_core.zeros((NBLOCK,), dtype)
+    ocl_core.kernel(program(dtype, wg), 'red_maxabs')(
+        ocl_core.queue(), (NBLOCK*wg,), (wg,), a.data, part.data,
+        np.uint32(n))
+    return float(np.max(part.get(queue=ocl_core.queue())))
 
 
 def dense_gemv(A, x, y, m, n, dtype=np.float32, wg=64):

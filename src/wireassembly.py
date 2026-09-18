@@ -644,6 +644,15 @@ def _laplacian_current_cpu(B, parent, rhs, tol=1e-12, maxiter=50000):
     return ihat, resid
 
 
+def _laplacian_current_device(B, parent, rhs, tol=1e-12, maxiter=50000):
+    """The device Laplacian solve, on whichever backend is selected."""
+    import backend
+    if backend.name() == 'opencl':
+        import ocl_wire
+        return ocl_wire.laplacian_current(B, parent, rhs, tol, maxiter)
+    return _laplacian_current_gpu(B, parent, rhs, tol, maxiter)
+
+
 def _laplacian_current_gpu(B, parent, rhs, tol=1e-12, maxiter=50000):
     """ihat_f = B phi with (B^T B) phi = rhs, everything on the device.
     Returns (ihat_f on the host, max |B^T ihat_f - rhs|)."""
@@ -1394,7 +1403,7 @@ class WireBondSolver:
         mode = os.environ.get('SPPEEC_IHAT', 'gpu')
         if mode == 'gpu' and os.environ.get('SPPEEC_GPU', 'auto') != '0':
             try:
-                self.ihat_f, resid = _laplacian_current_gpu(
+                self.ihat_f, resid = _laplacian_current_device(
                     self.B, self.parent, rhs)
             except Exception as exc:
                 warnings.warn("device Laplacian solve failed (%s: %s); "

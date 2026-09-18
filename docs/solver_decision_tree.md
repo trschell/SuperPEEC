@@ -1184,3 +1184,40 @@ multigrid has usually formed a Gram itself already, so removing that
 needs a change there rather than in the backend. The product's present
 value is as a building block and as the parity item for retiring the
 CUDA path.
+
+## The wire-bond particular current on OpenCL (2026-09-18)
+
+`ocl_wire` solves `(B^T B) phi = rhs` for the node potentials on the
+wire graph and returns `ihat = B phi`, with the tree roots held at
+zero. The incidence transpose and the graph Laplacian are formed on the
+card through the device sparse product, so the host holds neither.
+
+The Dirichlet condition is applied in place rather than as two more
+matrix products. Zeroing a root's row and column and putting one on its
+diagonal is a scaling of each entry by the two endpoint flags plus a
+correction on the diagonal, which is one pass over the entries instead
+of assembling `D L D`.
+
+The solve is the same Jacobi-preconditioned conjugate gradient with the
+same convergence test as the CUDA path. Against the host solve on a
+synthetic wire graph it agrees to 2e-15, the KCL residual is 1e-13, and
+repeated solves are bit-identical.
+
+Two notes. PyOpenCL's own reductions need the Mako templating engine,
+which this tree does not carry, so the dot product and the maximum
+magnitude are local kernels: a fixed number of work groups, each
+reducing through the same tree, then a fixed-order sum of the partials.
+Same answer every call. And the Gram-on-the-card branch in the
+preconditioner factory is now gated to CUDA, because the OpenCL path
+applies level 0 as a stencil and never forms the Gram; it was
+previously attempted and warned on every OpenCL run.
+
+R3 end to end, one run at a time:
+
+| | wall | peak RSS |
+|---|---:|---:|
+| host | 7:35 | 3.5 GB |
+| CUDA | 3:19 | 3.1 GB |
+| OpenCL | 2:34 | 3.1 GB |
+
+This is the first OpenCL run with no fallback warnings at all.
