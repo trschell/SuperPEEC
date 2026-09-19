@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # SPDX-License-Identifier: MIT
-"""Mode-block apply on OpenCL: the km-by-km convolution, fused.
+"""Mode-block apply on OpenCL: the km-by-km convolution, one grid at a time.
 
 The enrichment blocks are translation invariant, so applying them is a
 convolution on a padded grid. With ``km`` modes per cell the apply is
@@ -15,19 +15,30 @@ block spectra (reciprocity makes block (n, m) the conjugate of (m, n),
 so ``iu`` maps each pair into ``km(km+1)/2`` stored grids and the sign
 of ``n - m`` says which way to read it).
 
-Why fused: the CuPy path walks the (m, n) pairs and writes a full
-padded grid for each one before adding it in, so a km of 4 moves 16
-grid-sized temporaries through memory per apply for arithmetic that
-needs one pass. Here each work item owns one grid point, reads its km
-moments and km cross spectra once, and accumulates all km + 1 outputs
-in registers.
+Sized for the card, not for convenience
+---------------------------------------
+These padded grids are the largest device allocation in the corpus: the
+memory survey measured the km input slabs plus three more at 3.1 GiB
+per matvec on the RSFQ XNOR, the model closest to the card's limit. The
+first cut of this module ignored that, kept every grid in double
+precision and held a second stack for the outputs, and cost 0.5 GiB of
+card on exactly that model. It now follows the host's two economies.
 
-Precision follows the CuPy path where it matters: the spectra are read
-in whatever dtype they were built in (complex64 by default, which is
-the whole point of the triangular storage) and every product and sum is
-accumulated in complex128. The transforms run in complex128 here rather
-than in the lean slab dtype, which costs device memory and gives up
-nothing in accuracy.
+*The input slabs carry the stored spectra's precision*, single by
+default at engineering tolerances, while every product and sum
+accumulates in double. The transforms run in double and the result is
+rounded on the way into the slab, as the host does, so only the inputs
+are rounded and they were already stored that way.
+
+*There is one output grid, not km of them.* Each output harmonic is
+contracted into a single accumulator, transformed back and gathered
+before the next begins. Transforming the whole stack at once would be
+faster and would cost another km padded grids; with the card at 80% on
+the XNOR and the host at 20%, that is the wrong way to spend it.
+
+The device state is keyed to the spectra generation, because the
+spectra are rebuilt per frequency and a cached upload would otherwise
+be applied to the next one.
 """
 import numpy as np
 
@@ -38,65 +49,69 @@ typedef STO sto_t;
 
 inline cplx_t s2a(sto_t v) { return (cplx_t)((real_t)v.x, (real_t)v.y); }
 
-__kernel void mode_contract(__global const sto_t *Fu,   /* (NU, GP) */
-                            __global const sto_t *Fc,   /* (KM, GP) */
-                            __global const cplx_t *U,   /* (KM, GP) */
-                            __global const cplx_t *Fv,  /* (GP,)    */
-                            __global const int *iu,     /* (KM, KM) */
-                            __global cplx_t *accu,      /* (KM, GP) */
-                            __global cplx_t *accf,      /* (GP,)    */
-                            const unsigned long GP)
+/* one output harmonic, into a single accumulator */
+__kernel void mode_one(__global const sto_t *Fu,    /* (NU, GP) */
+                       __global const sto_t *Fc,    /* (KM, GP) */
+                       __global const sto_t *U,     /* (KM, GP) */
+                       __global const sto_t *Fv,    /* (GP,)    */
+                       __global const int *iu,      /* (KM, KM) */
+                       __global cplx_t *acc,        /* (GP,)    */
+                       const unsigned long GP,
+                       const unsigned int m)
 {
     const unsigned long g = get_global_id(0);
     if (g >= GP) return;
-
-    cplx_t u[KM], fc[KM];
-    for (unsigned int m = 0; m < KM; ++m) {
-        u[m] = U[(unsigned long)m*GP + g];
-        fc[m] = s2a(Fc[(unsigned long)m*GP + g]);
+    cplx_t a = cmul(cconj(s2a(Fc[(unsigned long)m*GP + g])), s2a(Fv[g]));
+    for (unsigned int n = 0; n < KM; ++n) {
+        const cplx_t fmn = s2a(Fu[(unsigned long)iu[m*KM + n]*GP + g]);
+        a += cmul((n >= m) ? cconj(fmn) : fmn,
+                  s2a(U[(unsigned long)n*GP + g]));
     }
-    const cplx_t fv = Fv[g];
-
-    for (unsigned int m = 0; m < KM; ++m) {
-        cplx_t acc = cmul(cconj(fc[m]), fv);
-        for (unsigned int n = 0; n < KM; ++n) {
-            const cplx_t fmn =
-                s2a(Fu[(unsigned long)iu[m*KM + n]*GP + g]);
-            acc += cmul((n >= m) ? cconj(fmn) : fmn, u[n]);
-        }
-        accu[(unsigned long)m*GP + g] = acc;
-    }
-
-    cplx_t af = cmul(fc[0], u[0]);
-    for (unsigned int m = 1; m < KM; ++m)
-        af += cmul(fc[m], u[m]);
-    accf[g] = af;
+    acc[g] = a;
 }
 
-/* coefficients (ncell,) -> one grid of a padded stack, at element
-   offset `off`. The offset is explicit rather than taken from a
-   sliced device array, whose .data is the whole buffer. */
+/* the filament output: sum_m Fc[m] * U[m] */
+__kernel void mode_fil(__global const sto_t *Fc,
+                       __global const sto_t *U,
+                       __global cplx_t *acc,
+                       const unsigned long GP)
+{
+    const unsigned long g = get_global_id(0);
+    if (g >= GP) return;
+    cplx_t a = cmul(s2a(Fc[g]), s2a(U[g]));
+    for (unsigned int m = 1; m < KM; ++m)
+        a += cmul(s2a(Fc[(unsigned long)m*GP + g]),
+                  s2a(U[(unsigned long)m*GP + g]));
+    acc[g] = a;
+}
+
+/* round a transformed grid down into one slab of the input stack */
+__kernel void to_slab(__global const cplx_t *src, __global sto_t *dst,
+                      const unsigned long GP, const unsigned long off)
+{
+    const unsigned long g = get_global_id(0);
+    if (g < GP) dst[off + g] = (sto_t)((real_t)src[g].x,
+                                       (real_t)src[g].y);
+}
+
 __kernel void scatter_cells(__global const cplx_t *src,
                             __global const long *gflat,
                             __global cplx_t *pad,
-                            const unsigned int ncell,
-                            const unsigned long off)
+                            const unsigned int ncell)
 {
     const unsigned int c = get_global_id(0);
     if (c >= ncell) return;
-    pad[off + (unsigned long)gflat[c]] = src[c];
+    pad[gflat[c]] = src[c];
 }
 
-/* one grid of a padded stack -> coefficients */
 __kernel void gather_cells(__global const cplx_t *pad,
                            __global const long *gflat,
                            __global cplx_t *dst,
-                           const unsigned int ncell,
-                           const unsigned long off)
+                           const unsigned int ncell)
 {
     const unsigned int c = get_global_id(0);
     if (c >= ncell) return;
-    dst[c] = pad[off + (unsigned long)gflat[c]];
+    dst[c] = pad[gflat[c]];
 }
 """
 
@@ -108,8 +123,11 @@ class ModeApply(object):
         self.km = int(enr.km)
         self.pad = tuple(int(v) for v in enr.pad)
         self.GP = int(np.prod(self.pad))
-        self.sdt = np.dtype(enr.Fu.dtype)
         self.acc = np.dtype(np.complex128)
+        # the slabs take the stored spectra's precision: the kernel
+        # reads the spectra and the slabs through one type, and the
+        # enrichment's own lean rule is what chose that storage
+        self.sdt = np.dtype(enr.Fu.dtype)
         self.nu = int(enr.Fu.shape[0])
         g3 = enr._g3
         gflat = ((g3[0].astype(np.int64)*self.pad[1] + g3[1])*self.pad[2]
@@ -133,26 +151,46 @@ class ModeApply(object):
         self.prg = ocl_core.program(SOURCE, self.acc,
                                     {'KM': self.km, 'NU': self.nu,
                                      'STO': sto}, key='ocl_modes/' + sto)
-        self.k_contract = ocl_core.kernel(self.prg, 'mode_contract')
-        self.k_scatter = ocl_core.kernel(self.prg, 'scatter_cells')
-        self.k_gather = ocl_core.kernel(self.prg, 'gather_cells')
-        self._U = ocl_core.zeros((self.km,) + self.pad, self.acc)
-        self._F = ocl_core.zeros(self.pad, self.acc)
-        self._au = ocl_core.zeros((self.km,) + self.pad, self.acc)
-        self._af = ocl_core.zeros(self.pad, self.acc)
+        self._k = {n: ocl_core.kernel(self.prg, n)
+                   for n in ('mode_one', 'mode_fil', 'to_slab',
+                             'scatter_cells', 'gather_cells')}
+        # one stack of input slabs, one double-precision work grid and
+        # one accumulator; no second stack
+        self._U = ocl_core.zeros((self.km, self.GP), self.sdt)
+        self._F = ocl_core.zeros((self.GP,), self.sdt)
+        self._tmp = ocl_core.zeros((self.GP,), self.acc)
+        self._acc = ocl_core.zeros((self.GP,), self.acc)
         self._cell = ocl_core.empty((self.ncell,), self.acc)
-        self.fft_k = ocl_core.fft_app((self.km,) + self.pad, self.acc,
-                                      ndim=3)
-        self.fft_1 = ocl_core.fft_app(self.pad, self.acc, ndim=3)
+        self.fft1 = ocl_core.fft_app(self.pad, self.acc, ndim=3)
 
-    def _cells_to_grid(self, host_vals, grid, row=0):
-        """Scatter ``host_vals`` onto grid ``row`` of a padded stack."""
+    def device_bytes(self):
+        """Resident device bytes, for sizing checks and the survey."""
+        return int(self._Fu.nbytes + self._Fc.nbytes + self._U.nbytes
+                   + self._F.nbytes + self._tmp.nbytes + self._acc.nbytes)
+
+    # ------------------------------------------------------------ steps
+
+    def _forward(self, host_vals, dst, off):
+        """Scatter, transform in double, round into the slab stack."""
         q = ocl_core.queue()
         self._cell.set(np.ascontiguousarray(host_vals, dtype=self.acc),
                        queue=q)
-        self.k_scatter(q, (self.ncell,), None, self._cell.data,
-                       self._gflat.data, grid.data, np.uint32(self.ncell),
-                       np.uint64(row*self.GP))
+        self._tmp.fill(self.acc.type(0), queue=q)
+        self._k['scatter_cells'](q, (self.ncell,), None, self._cell.data,
+                                 self._gflat.data, self._tmp.data,
+                                 np.uint32(self.ncell))
+        self.fft1.fft(self._tmp)
+        self._k['to_slab'](q, (self.GP,), None, self._tmp.data, dst.data,
+                           np.uint64(self.GP), np.uint64(off))
+
+    def _back(self, out, sl):
+        """Inverse-transform the accumulator and gather into ``out``."""
+        q = ocl_core.queue()
+        self.fft1.ifft(self._acc)
+        self._k['gather_cells'](q, (self.ncell,), None, self._acc.data,
+                                self._gflat.data, self._cell.data,
+                                np.uint32(self.ncell))
+        out[sl] = self._cell.get(queue=q)
 
     def apply(self, u, i_f):
         """Return ``(out_u, out_f)`` for mode coefficients ``u``.
@@ -167,30 +205,22 @@ class ModeApply(object):
             uf = np.zeros(self.nmode_full, dtype=self.acc)
             uf[self.mask] = u
             u = uf
-        self._U.fill(self.acc.type(0), queue=q)
         for m in range(km):
-            self._cells_to_grid(u[m::km], self._U, row=m)
-        self.fft_k.fft(self._U)
-        self._F.fill(self.acc.type(0), queue=q)
-        self._cells_to_grid(i_f, self._F)
-        self.fft_1.fft(self._F)
+            self._forward(u[m::km], self._U, m*self.GP)
+        self._forward(i_f, self._F, 0)
 
-        self.k_contract(q, (self.GP,), None, self._Fu.data, self._Fc.data,
-                        self._U.data, self._F.data, self._iu.data,
-                        self._au.data, self._af.data, np.uint64(self.GP))
-
-        self.fft_k.ifft(self._au)
-        self.fft_1.ifft(self._af)
         out_u = np.empty(km*self.ncell, dtype=self.acc)
         for m in range(km):
-            self.k_gather(q, (self.ncell,), None, self._au.data,
-                          self._gflat.data, self._cell.data,
-                          np.uint32(self.ncell), np.uint64(m*self.GP))
-            out_u[m::km] = self._cell.get(queue=q)
-        self.k_gather(q, (self.ncell,), None, self._af.data,
-                      self._gflat.data, self._cell.data,
-                      np.uint32(self.ncell), np.uint64(0))
-        out_f = self._cell.get(queue=q)
+            self._k['mode_one'](q, (self.GP,), None, self._Fu.data,
+                                self._Fc.data, self._U.data, self._F.data,
+                                self._iu.data, self._acc.data,
+                                np.uint64(self.GP), np.uint32(m))
+            self._back(out_u, slice(m, None, km))
+        self._k['mode_fil'](q, (self.GP,), None, self._Fc.data,
+                            self._U.data, self._acc.data,
+                            np.uint64(self.GP))
+        out_f = np.empty(self.ncell, dtype=self.acc)
+        self._back(out_f, slice(None))
         if self.mask is not None:
             out_u = out_u[self.mask]
         return out_u, out_f

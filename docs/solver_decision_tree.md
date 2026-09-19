@@ -1015,13 +1015,27 @@ over neighbour directions, so each work item accumulates its own box in
 a register and nothing is scattered. That removes the pair array CuPy
 materialises and, with it, `scatter_add` and its atomics.
 
-**Mode blocks** (`ocl_modes`). The same treatment for the km-by-km
-convolution: one pass per grid point, all km+1 outputs accumulated in
-registers, instead of writing a padded grid per (m, n) pair. The
-spectra are read in their stored complex64 and every product is summed
-in complex128, as the host path does. The device state is keyed to the
-spectra generation, because the spectra are rebuilt per frequency and a
-cached upload would otherwise be applied to the next one.
+**Mode blocks** (`ocl_modes`). The km-by-km convolution, contracted one
+output harmonic at a time into a single accumulator. The device state
+is keyed to the spectra generation, because the spectra are rebuilt per
+frequency and a cached upload would otherwise be applied to the next
+one.
+
+These padded grids are the largest device allocation in the corpus, 3.1
+GiB per matvec on the XNOR by the memory survey, so this module is
+sized for the card. The first cut was not: it forced every grid to
+double precision and held a second stack of km grids for the outputs,
+which cost 1.35 GiB of card on the one model already at 78% of it. Both
+are fixed. The input slabs now carry the stored spectra's precision,
+single at engineering tolerances, with the transforms still running in
+double and rounded on the way into the slab exactly as the host does;
+and the single accumulator replaces the second stack, at the price of
+km separate inverse transforms rather than one batched pass.
+
+Worth recording that the double-precision version was not more faithful
+for being wider. The host reads those slabs in single precision by
+design, so forcing double made the result *differ* from it by 1e-8;
+matching its economy brought agreement to 4e-16.
 
 Agreement with the host is 6e-16 relative for the two FMM phases and
 1e-8 for the mode apply, the latter being the floor set by the
@@ -1221,3 +1235,34 @@ R3 end to end, one run at a time:
 | OpenCL | 2:34 | 3.1 GB |
 
 This is the first OpenCL run with no fallback warnings at all.
+
+
+## The frontier is the card, not the host (2026-09-19)
+
+Measured across the corpus, with the card at 12 GB and the box at 62:
+
+| model | card used | of card | host peak | of host |
+|---|---:|---:|---:|---:|
+| R3, OpenCL | 2.77 | 23% | 2.89 | 5% |
+| R4, CUDA | 5.33 | 44% | 8.87 | 14% |
+| R4, OpenCL | 4.39 | 37% | 10.14 | 16% |
+| XNOR, CUDA | 9.30 | 78% | 11.28 | 18% |
+| XNOR, OpenCL | 8.42 | 70% | 12.63 | 20% |
+
+The card runs three to four times hotter than host memory, and the XNOR
+has about 3.5 GiB of headroom. Another refinement step of the size that
+took R3 to R4 multiplies cells by five, which needs roughly 22 GiB of
+card and roughly 51 of host: the host fits on this box and the card
+misses by a factor of two.
+
+So the compression work that matters now is device-side. In order: port
+the streamed form of the top-level M2L operator, which CUDA has and
+this backend does not, and whose channel spectra are 1.8 GB at R4 and
+grow with the top grid; look for other operators held as data that
+could be applied instead, as level 0 now is; and take the single
+precision device path, which halves the streaming phases and was until
+now filed only as a portability item for Intel parts.
+
+One caveat on the level-0 stencil: it does not certify on the XNOR's
+geometry, so that model holds a materialised Gram on both backends and
+the saving the stencil gives on R4 does not transfer there.
