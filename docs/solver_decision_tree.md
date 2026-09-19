@@ -1010,6 +1010,20 @@ point then reads its `nt` channels and `nn` moments once instead of
 being walked through `(nn, G)` temporaries `nn` times. 27 kB of local
 memory at nmax 4 with a tile of 16.
 
+The channel spectra are the largest device allocation in the corpus, so
+the operator is **resident when it fits and streamed when it does
+not**, chosen against a card budget (`SPPEEC_OCL_M2L` forces either
+form). Streaming keeps the operator on the host and uploads one channel
+per matvec, holding three work grids instead of the whole table: 42%
+less card at both R3 and R4, which at R4 is 2.93 GB down to 1.70. The
+streamed kernel walks only the pairs that map to the channel in hand,
+about eight of the 625, so it does the same arithmetic as the resident
+contraction rather than the redundant dense per-channel product the
+CuPy streamed path uses; each work item owns one grid point and walks
+its pair list in a fixed order, so it stays reproducible. It costs
+about three times the wall on that phase, 21 to 66 ms on R3, and is
+paid only when the resident form will not fit.
+
 **Near field** (`ocl_p2p`). The loop runs over target boxes rather than
 over neighbour directions, so each work item accumulates its own box in
 a register and nothing is scattered. That removes the pair array CuPy
