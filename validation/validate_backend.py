@@ -401,6 +401,49 @@ def precond_cases():
           _np.array_equal(got, blk(b)))
 
 
+def m2l_cases(M, rng):
+    """The top-level M2L in both of its forms.
+
+    The channel spectra are the largest device allocation in the
+    corpus, so the operator is held resident when it fits and streamed
+    per channel when it does not. Both must reproduce the host kernel,
+    and each must be reproducible on a repeated call; they differ from
+    each other only in summation order.
+    """
+    import numpy as _np
+    import ocl_m2l
+    top = M.lv[int(M.numlevels) - 1]
+    data = (rng.standard_normal(top.data.shape)
+            + 1j*rng.standard_normal(top.data.shape)).astype(_np.complex128)
+    top.data = data.copy()
+    top.m2lfortran()
+    ref = top.data.copy()
+    scale = max(1e-300, float(_np.abs(ref).max()))
+    got = {}
+    keep = os.environ.get('SPPEEC_OCL_M2L')
+    try:
+        for mode in ('resident', 'stream'):
+            os.environ['SPPEEC_OCL_M2L'] = mode
+            op = ocl_m2l.TopM2L(top)
+            check("top-level M2L: %s mode selected" % mode,
+                  op.streamed == (mode == 'stream'))
+            g = op.apply(data)
+            got[mode] = g
+            err = float(_np.abs(g - ref).max())/scale
+            check("top-level M2L (%s): agrees with the host kernel" % mode,
+                  err < 1e-12, "rel err=%.3e" % err)
+            check("top-level M2L (%s): repeated call is bit-identical"
+                  % mode, _np.array_equal(g, op.apply(data)))
+    finally:
+        if keep is None:
+            os.environ.pop('SPPEEC_OCL_M2L', None)
+        else:
+            os.environ['SPPEEC_OCL_M2L'] = keep
+    d = float(_np.abs(got['stream'] - got['resident']).max())/scale
+    check("top-level M2L: the two forms agree with each other",
+          d < 1e-12, "rel diff=%.3e" % d)
+
+
 def operator_cases():
     import backend
     if backend.name() != 'opencl':
@@ -438,6 +481,8 @@ def operator_cases():
     wire_cases()
     sparse_product_cases()
     precond_cases()
+
+    m2l_cases(M, rng)
 
     top = M.lv[int(M.numlevels) - 1]
     data = (rng.standard_normal(top.data.shape)
