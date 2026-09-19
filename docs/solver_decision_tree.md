@@ -1015,7 +1015,12 @@ the operator is **resident when it fits and streamed when it does
 not**, chosen against a card budget (`SPPEEC_OCL_M2L` forces either
 form). Streaming keeps the operator on the host and uploads one channel
 per matvec, holding three work grids instead of the whole table: 42%
-less card at both R3 and R4, which at R4 is 2.93 GB down to 1.70. The
+less card at both R3 and R4, which at R4 is 165 MB down to 96. (An
+earlier version of this paragraph, and the commit that introduced it,
+said 2.93 GB down to 1.70. That was arithmetic from a guessed top-grid
+size, not a measurement; R4's padded top grid is 78 732 points, not the
+1.4 million I assumed. The proportion was right and the absolute was
+eighteen times too large.) The
 streamed kernel walks only the pairs that map to the channel in hand,
 about eight of the 625, so it does the same arithmetic as the resident
 contraction rather than the redundant dense per-channel product the
