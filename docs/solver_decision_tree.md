@@ -1296,8 +1296,8 @@ backend on a 12 GB consumer card:
 |---|---:|
 | cells | 18.04 M |
 | matvecs | 156 |
-| wall | 48 min |
-| card peak | 9.13 GiB of 11.99 (10.70 before the savings below) |
+| wall | 45 min |
+| card peak | 8.30 GiB of 11.99 (10.70 before the savings below) |
 | host peak | 35.85 GiB of 62 |
 | R, L | 5.286 mOhm, 0.1263 uH |
 
@@ -1333,8 +1333,37 @@ and a second kernel kept as the fallback; and both index narrowings
 raise on overflow rather than wrapping, so a model past the 32-bit
 assumption fails loudly.
 
-What is left: 8-bit coarse levels, worth an estimated 404 MB at R5 and
-the only item in the list that is an estimate rather than a
-measurement. The untiled right-hand side was dropped: worth 125 MB at
-R4 but only 21 at R5, because occupancy rises with refinement and the
-tiled and flat forms converge.
+A second bundle then took the hierarchy itself. An aggregation
+prolongator is 0/1 with exactly one entry per row, since every fine
+plaquette belongs to exactly one aggregate, so neither its values nor
+its row pointers carry information: it is one column index per row and
+the product is a gather. Its transpose keeps the pointers, aggregates
+varying in size, but still needs no values. And level 0's inverse
+diagonal is read only by the generic smoother, which never runs when
+level 0 sweeps itself, so it was uploaded and never touched.
+
+| R5 hierarchy | before | after | saved |
+|---|---:|---:|---:|
+| prolongations | 688 MB | 229 | 459 |
+| restrictions | 490 | 260 | 230 |
+| inverse diagonals | 229 | 31 | 198 |
+| multigrid operator | 3020 | 2134 | 886 |
+
+Across the day R5 went 10.70 -> 9.13 -> 8.30 GiB of card, 89% to 69%,
+at the same answer, the same 156 matvecs, and 2875 -> 2683 s.
+
+What is left: 8-bit data on operator levels 1 and 2, worth 255 MB at
+R5. They are already 8-bit on the host and this backend widens them on
+upload. Nothing below level 2 is worth narrowing: the Galerkin entries
+stay exact integers and grow about threefold per level, crossing 127
+only at level 3, by which point levels 3 through 8 together are 7.8 MB
+of a 2133 MB hierarchy. The untiled right-hand side was also dropped,
+worth 125 MB at R4 but only 21 at R5, because occupancy rises with
+refinement and the tiled and flat forms converge.
+
+The loop Gram itself never appears in any of this. Level 0 is applied
+as a stencil, so its {4, +-1} values are stored once as 35 8-bit
+coefficients. Materialised it would be roughly 580 M nonzeros at R5:
+4.7 GB as a 32-bit CSR, 3.0 GB as an 8-bit one, against 0.89 GB as the
+stencil. That decision, taken long before this port, is what makes the
+rest of the arithmetic possible at all.

@@ -199,6 +199,38 @@ void red_maxabs(__global const real_t *a, __global real_t *part,
     if (lid == 0) part[get_group_id(0)] = s[0];
 }
 
+/* A 0/1 matrix with exactly one entry per row -- which is what an
+   aggregation prolongator is, since every fine row belongs to exactly
+   one aggregate -- carries no information in its values or its row
+   pointers. The values are all 1 and the pointer is the row index, so
+   the whole matrix is one column index per row and the product is a
+   gather. Each work item owns one output, so nothing is scattered. */
+__kernel void ones_gather_add(__global const int *col,
+                              __global const real_t *x,
+                              __global real_t *y,
+                              const unsigned int n)
+{
+    const unsigned int i = get_global_id(0);
+    if (i < n) y[i] += x[col[i]];
+}
+
+/* Its transpose: sum the fine entries of each aggregate. Rows are an
+   aggregate's size, at most eight, so one work item per row sums them
+   in index order. */
+__kernel void ones_rowsum(__global const int *ptr,
+                          __global const int *ind,
+                          __global const real_t *x,
+                          __global real_t *y,
+                          const unsigned int nrow)
+{
+    const unsigned int r = get_global_id(0);
+    if (r >= nrow) return;
+    real_t acc = (real_t)0;
+    for (int k = ptr[r]; k < ptr[r + 1]; ++k)
+        acc += x[ind[k]];
+    y[r] = acc;
+}
+
 __kernel void gather_idx(__global const real_t *src,
                          __global const int *idx,
                          __global real_t *dst,
@@ -567,6 +599,7 @@ class CSR(object):
             self.shape, self.nnz = M.shape, M.nnz
             self.data, self.indices, self.indptr = (M.data, M.indices,
                                                     M.indptr)
+            self.src_dtype, self.ones_only, self.int8_ok = '?', False, False
             self.prg = program(self.dtype, self.WG)
             self._k = {n: ocl_core.kernel(self.prg, n)
                        for n in ('csr_spmv', 'csr_jacobi', 'csr_residual',
@@ -575,6 +608,13 @@ class CSR(object):
         M = sp.csr_matrix(M)
         self.shape = tuple(int(v) for v in M.shape)
         self.nnz = int(M.nnz)
+        # what the host held, and whether every stored value is 1: an
+        # aggregation prolongator is 0/1 with one entry per row, so it
+        # needs no data array at all
+        self.src_dtype = str(M.data.dtype)
+        self.ones_only = bool(M.nnz and np.all(M.data == 1))
+        self.int8_ok = bool(M.nnz and np.all(M.data == np.rint(M.data))
+                            and np.abs(M.data).max() <= 127)
         self.data = ocl_core.to_device(M.data.astype(self.dtype))
         self.indices = ocl_core.to_device(M.indices.astype(np.int32))
         self.indptr = ocl_core.to_device(M.indptr.astype(np.int32))
@@ -623,6 +663,70 @@ class CSR(object):
                               self.dtype.type(omega),
                               np.uint32(self.shape[0]))
         return xout
+
+
+class OnesProlong(object):
+    """An aggregation prolongator: one column index per row, no more.
+
+    Dropping the all-ones data array and the row pointer takes level
+    zero's prolongation from 595 MB to 198 at R5. Raises if the matrix
+    is not one entry per row, so the caller keeps the general form.
+    """
+
+    def __init__(self, P, dtype=np.float32):
+        import scipy.sparse as sp
+        M = sp.csr_matrix(P)
+        counts = np.diff(M.indptr)
+        if M.nnz and (counts.max() != 1 or counts.min() != 1
+                      or not np.all(M.data == 1)):
+            raise ValueError("not a one-per-row 0/1 prolongator")
+        self.dtype = np.dtype(dtype)
+        self.shape = tuple(int(v) for v in M.shape)
+        self.nnz = int(M.nnz)
+        self.src_dtype, self.ones_only, self.int8_ok = \
+            str(M.data.dtype), True, True
+        self.col = ocl_core.to_device(M.indices.astype(np.int32))
+        self._k = ocl_core.kernel(program(self.dtype, CSR.WG),
+                                  'ones_gather_add')
+
+    def device_bytes(self):
+        return int(self.col.nbytes)
+
+    def spmv_add(self, x, y):
+        """``y += P x``."""
+        n = int(self.shape[0])
+        self._k(ocl_core.queue(), (n,), None, self.col.data, x.data,
+                y.data, np.uint32(n))
+        return y
+
+
+class OnesRestrict(object):
+    """The transpose of an aggregation prolongator: a segmented sum."""
+
+    def __init__(self, P, dtype=np.float32):
+        import scipy.sparse as sp
+        M = sp.csr_matrix(sp.csr_matrix(P).T)
+        if M.nnz and not np.all(M.data == 1):
+            raise ValueError("not a 0/1 restriction")
+        self.dtype = np.dtype(dtype)
+        self.shape = tuple(int(v) for v in M.shape)
+        self.nnz = int(M.nnz)
+        self.src_dtype, self.ones_only, self.int8_ok = \
+            str(M.data.dtype), True, True
+        self.indptr = ocl_core.to_device(M.indptr.astype(np.int32))
+        self.indices = ocl_core.to_device(M.indices.astype(np.int32))
+        self._k = ocl_core.kernel(program(self.dtype, CSR.WG),
+                                  'ones_rowsum')
+
+    def device_bytes(self):
+        return int(self.indptr.nbytes + self.indices.nbytes)
+
+    def spmv(self, x, y):
+        """``y = P^T x``."""
+        n = int(self.shape[0])
+        self._k(ocl_core.queue(), (n,), None, self.indptr.data,
+                self.indices.data, x.data, y.data, np.uint32(n))
+        return y
 
 
 def program(dtype=np.float32, wg=64):

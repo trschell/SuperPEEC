@@ -109,9 +109,26 @@ class GeoCore(object):
         self.A = [A0 if (i == 0 and A0 is not None)
                   else ocl_sparse.CSR(L, dt)
                   for i, L in enumerate(levels)]
-        self.P = [ocl_sparse.CSR(P, dt) for P in mg.Ps]
-        self.R = [ocl_sparse.CSR(P.T.tocsr(), dt) for P in mg.Ps]
-        self.dinv = [ocl_core.to_device(np.asarray(d, dt)) for d in mg.dinv]
+        sweeps0 = hasattr(self.A[0], 'sweeps')
+        # An aggregation prolongator is 0/1 with exactly one entry per
+        # row, so its values and its row pointers carry nothing: it is
+        # one column index per row, and the product is a gather. Its
+        # transpose keeps the pointers but still needs no values. At R5
+        # that is 689 MB of the hierarchy. The general form stays as
+        # the fallback for an aggregation that is not of that shape.
+        self.P, self.R = [], []
+        for Pm in mg.Ps:
+            try:
+                self.P.append(ocl_sparse.OnesProlong(Pm, dt))
+                self.R.append(ocl_sparse.OnesRestrict(Pm, dt))
+            except ValueError:
+                self.P.append(ocl_sparse.CSR(Pm, dt))
+                self.R.append(ocl_sparse.CSR(Pm.T.tocsr(), dt))
+        # level 0's inverse diagonal is read only by the generic
+        # smoother, which never runs when level 0 sweeps itself
+        self.dinv = [None if (i == 0 and sweeps0)
+                     else ocl_core.to_device(np.asarray(d, dt))
+                     for i, d in enumerate(mg.dinv)]
         pinv = np.ascontiguousarray(mg.coarse_pinv, dtype=dt)
         self.pinv = ocl_core.to_device(pinv)
         self.pinv_shape = pinv.shape
@@ -122,7 +139,6 @@ class GeoCore(object):
         # of ours, and its Jacobi partner is unused when level 0 runs
         # its own sweeps (the stencil does). Both were allocated and
         # never read: 198 MB each at R5.
-        sweeps0 = hasattr(self.A[0], 'sweeps')
         self._x = [ocl_core.zeros((n,), dt) for n in self.sizes]
         self._b = [None] + [ocl_core.zeros((n,), dt)
                             for n in self.sizes[1:]]
@@ -131,12 +147,30 @@ class GeoCore(object):
                    else ocl_core.zeros((n,), dt)
                    for i, n in enumerate(self.sizes)]
 
+    def parts(self):
+        """Per-matrix device bytes, with what the host held."""
+        rows = []
+        for tag, lst in (('A', self.A), ('P', self.P), ('R', self.R)):
+            for i, M in enumerate(lst):
+                if not hasattr(M, 'device_bytes') \
+                        or getattr(M, 'nnz', None) is None:
+                    continue          # level 0 may be a stencil, not a matrix
+                rows.append((('%s%d' % (tag, i)), M.device_bytes(), M.nnz,
+                             getattr(M, 'src_dtype', '?'),
+                             bool(getattr(M, 'ones_only', False)),
+                             bool(getattr(M, 'int8_ok', False))))
+        rows.append(('dinv', sum(d.nbytes for d in self.dinv
+                                 if d is not None), 0, '-', False, False))
+        rows.append(('pinv', self.pinv.nbytes, 0, '-', False, False))
+        return rows
+
     def device_bytes(self):
         """Resident device bytes, split into operator and workspace."""
         op = sum(A.device_bytes() for A in self.A)
         op += sum(P.device_bytes() for P in self.P)
         op += sum(R.device_bytes() for R in self.R)
-        op += sum(d.nbytes for d in self.dinv) + self.pinv.nbytes
+        op += sum(d.nbytes for d in self.dinv
+                  if d is not None) + self.pinv.nbytes
         ws = sum(v.nbytes for lst in (self._x, self._b, self._r, self._t)
                  for v in lst if v is not None)
         return dict(operator=int(op), workspace=int(ws))
