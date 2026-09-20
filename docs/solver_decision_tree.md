@@ -1297,7 +1297,7 @@ backend on a 12 GB consumer card:
 | cells | 18.04 M |
 | matvecs | 156 |
 | wall | 48 min |
-| card peak | 10.70 GiB of 11.99 (solver share 9.45) |
+| card peak | 9.13 GiB of 11.99 (10.70 before the savings below) |
 | host peak | 35.85 GiB of 62 |
 | R, L | 5.286 mOhm, 0.1263 uH |
 
@@ -1313,10 +1313,28 @@ formed, the tile edge cut from 16 to 4, the mode slabs sized by the
 host's lean rule, and the top-level M2L streamed when its channel
 spectra do not fit.
 
-It is tight rather than comfortable. 89% of the card leaves no room for
-a larger model or for anything else holding video memory. The savings
-already measured at R4 and not yet taken -- constant stencil weights,
-an untiled right-hand side, 32-bit index maps in the stencil and the
-near field, two dead workspace vectors, 8-bit coarse levels -- are
-about 645 MB there and roughly 2.5 GiB at this scale, which would turn
-89% into something nearer 65%.
+Four of the measured savings were then taken together: 32-bit index
+packs in the near field, the two level-0 workspace vectors that were
+allocated and never read, the stencil's damped inverse diagonal
+collapsed to a constant plus a bit mask, and the stencil's flat index
+narrowed to 32 bits. R5 went from 10.70 to 9.13 GiB of card, 89% to
+76%, at the same answer, the same 156 matvecs and the same wall.
+
+| component, R5 | before | after |
+|---|---:|---:|
+| near field, three orientations | 1426 MB | 1012 |
+| multigrid operator | 3430 | 3020 |
+| multigrid workspace | 918 | 521 |
+
+Two of those carry their own guard rather than trusting the analysis.
+The weights collapse only if the array really holds one value on
+occupied cells, which is checked at construction with the full array
+and a second kernel kept as the fallback; and both index narrowings
+raise on overflow rather than wrapping, so a model past the 32-bit
+assumption fails loudly.
+
+What is left: 8-bit coarse levels, worth an estimated 404 MB at R5 and
+the only item in the list that is an estimate rather than a
+measurement. The untiled right-hand side was dropped: worth 125 MB at
+R4 but only 21 at R5, because occupancy rises with refinement and the
+tiled and flat forms converge.

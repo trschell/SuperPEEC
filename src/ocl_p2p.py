@@ -68,8 +68,8 @@ __kernel void p2p_mac(__global const cplx_t *trans,   /* (27, GS)      */
 
 /* filament data -> zeroed padded slab grid, one work item per entry */
 __kernel void scatter_slab(__global const cplx_t *data,
-                           __global const long *srcidx,
-                           __global const long *flatpos,
+                           __global const int *srcidx,
+                           __global const int *flatpos,
                            __global cplx_t *pad,
                            const unsigned int nent,
                            const unsigned int nflat,
@@ -79,9 +79,9 @@ __kernel void scatter_slab(__global const cplx_t *data,
 {
     const unsigned int q = get_global_id(0);
     if (q >= nent) return;
-    const long fp = flatpos[q];
-    const unsigned int box = (unsigned int)(fp/nflat);
-    const unsigned int f = (unsigned int)(fp - (long)box*nflat);
+    const int fp = flatpos[q];
+    const unsigned int box = (unsigned int)(fp/(int)nflat);
+    const unsigned int f = (unsigned int)(fp - (int)box*(int)nflat);
     const unsigned int a = f/(n1*n2), b = (f/n2) % n1, d = f % n2;
     pad[(unsigned long)box*GS + ((unsigned long)a*S1 + b)*S2 + d]
         = data[srcidx[q]];
@@ -89,8 +89,8 @@ __kernel void scatter_slab(__global const cplx_t *data,
 
 /* padded slab grid -> filament data */
 __kernel void gather_slab(__global const cplx_t *pad,
-                          __global const long *srcidx,
-                          __global const long *flatpos,
+                          __global const int *srcidx,
+                          __global const int *flatpos,
                           __global cplx_t *out,
                           const unsigned int nent,
                           const unsigned int nflat,
@@ -100,9 +100,9 @@ __kernel void gather_slab(__global const cplx_t *pad,
 {
     const unsigned int q = get_global_id(0);
     if (q >= nent) return;
-    const long fp = flatpos[q];
-    const unsigned int box = (unsigned int)(fp/nflat);
-    const unsigned int f = (unsigned int)(fp - (long)box*nflat);
+    const int fp = flatpos[q];
+    const unsigned int box = (unsigned int)(fp/(int)nflat);
+    const unsigned int f = (unsigned int)(fp - (int)box*(int)nflat);
     const unsigned int a = f/(n1*n2), b = (f/n2) % n1, d = f % n2;
     out[srcidx[q]] = pad[(unsigned long)box*GS
                          + ((unsigned long)a*S1 + b)*S2 + d];
@@ -140,6 +140,18 @@ class NearField(object):
         self.k_mac = ocl_core.kernel(self.prg, 'p2p_mac')
         self.k_gather = ocl_core.kernel(self.prg, 'gather_slab')
 
+    def parts(self):
+        """Device bytes by part, for sizing arguments."""
+        idx64 = sum(pk[k].nbytes for pk in self.packs
+                    for k in ('flatpos', 'srcidx') if pk.get(k) is not None)
+        other = sum(pk[k].nbytes for pk in self.packs
+                    for k in ('off', 'ep', 'etr', 'edx')
+                    if pk.get(k) is not None)
+        return dict(transfer=int(self._trans.nbytes),
+                    slabs=int(self._tgt.nbytes
+                              + sum(b.nbytes for b in self._slab)),
+                    packs_int64=int(idx64), packs_other=int(other))
+
     def device_bytes(self):
         """Resident device bytes: the transfer table, the rolling slab
         buffers, and the per-slab index packs."""
@@ -167,6 +179,16 @@ class NearField(object):
             flatpos = (np.concatenate(rows)*self.nflat + np.concatenate(cols)
                        if rows else np.zeros(0, np.int64))
             srcidx = (np.concatenate(src) if src else np.zeros(0, np.int64))
+            # both index small spaces -- a slab's padded grid and the
+            # filament array -- so they are 32-bit quantities that were
+            # being stored in 64: 432 MB of card at R5
+            for a in (flatpos, srcidx):
+                if a.size and int(a.max()) >= 2**31:
+                    raise OverflowError(
+                        "near-field index %d exceeds the 32-bit pack"
+                        % int(a.max()))
+            flatpos = flatpos.astype(np.int32)
+            srcidx = srcidx.astype(np.int32)
             # neighbour lists, grouped by target box so the kernel can
             # accumulate in a register and stay reproducible
             off = np.zeros(len(gs) + 1, dtype=np.int32)

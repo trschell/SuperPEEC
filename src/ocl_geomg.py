@@ -118,10 +118,18 @@ class GeoCore(object):
         self.sizes = [int(A.shape[0]) for A in self.A]
         # per-level workspace: solution, right-hand side, residual and
         # the Jacobi ping-pong partner
+        # Level 0's right-hand side is the caller's vector, never one
+        # of ours, and its Jacobi partner is unused when level 0 runs
+        # its own sweeps (the stencil does). Both were allocated and
+        # never read: 198 MB each at R5.
+        sweeps0 = hasattr(self.A[0], 'sweeps')
         self._x = [ocl_core.zeros((n,), dt) for n in self.sizes]
-        self._b = [ocl_core.zeros((n,), dt) for n in self.sizes]
+        self._b = [None] + [ocl_core.zeros((n,), dt)
+                            for n in self.sizes[1:]]
         self._r = [ocl_core.zeros((n,), dt) for n in self.sizes]
-        self._t = [ocl_core.zeros((n,), dt) for n in self.sizes]
+        self._t = [None if (i == 0 and sweeps0)
+                   else ocl_core.zeros((n,), dt)
+                   for i, n in enumerate(self.sizes)]
 
     def device_bytes(self):
         """Resident device bytes, split into operator and workspace."""
@@ -130,7 +138,7 @@ class GeoCore(object):
         op += sum(R.device_bytes() for R in self.R)
         op += sum(d.nbytes for d in self.dinv) + self.pinv.nbytes
         ws = sum(v.nbytes for lst in (self._x, self._b, self._r, self._t)
-                 for v in lst)
+                 for v in lst if v is not None)
         return dict(operator=int(op), workspace=int(ws))
 
     def _smooth(self, lv, x, b):

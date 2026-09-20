@@ -121,16 +121,44 @@ __kernel void sten_res(__global const real_t *xt,
 
 /* one fused damped-Jacobi sweep, y = x + wdi*(b - A x); wdi already
    carries the damping factor and the inverse diagonal */
+/* The damped inverse diagonal is one number. The plaquette Gram's
+   diagonal is 4 everywhere by construction, so the weight is the same
+   on every occupied cell and zero elsewhere -- verified at build, with
+   the full array kept as a fallback if a geometry ever disagrees. One
+   bit per slot replaces four bytes: 212 MB at R5. */
 __kernel void sten_jac(__global const real_t *xt,
                        __global const real_t *bt,
-                       __global const real_t *wt,
+                       __global const uint *mask,
                        __global const int *nbt,
                        __global const int *nsrc,
                        __global const int *of,
                        __global const char *cf,
                        __global const int *sptr,
                        __global real_t *yt,
+                       const real_t wdi,
                        const unsigned int nt)
+{
+    const size_t gid = get_global_id(0);
+    if (gid >= TOT(nt)) return;
+    DECOMPOSE(gid, t, on, a1, a2, a3);
+    const real_t ax = sten_acc(xt, nbt, nsrc, of, cf, sptr, t, on,
+                               (int)a1, (int)a2, (int)a3);
+    const real_t w = (mask[gid >> 5] & (1u << (gid & 31))) ? wdi
+                                                          : (real_t)0;
+    yt[gid] = xt[gid] + w*(bt[gid] - ax);
+}
+
+/* the same sweep where the weight really does vary */
+__kernel void sten_jac_w(__global const real_t *xt,
+                         __global const real_t *bt,
+                         __global const real_t *wt,
+                         __global const int *nbt,
+                         __global const int *nsrc,
+                         __global const int *of,
+                         __global const char *cf,
+                         __global const int *sptr,
+                         __global real_t *yt,
+                         const unsigned int nt)
 {
     const size_t gid = get_global_id(0);
     if (gid >= TOT(nt)) return;
@@ -142,7 +170,7 @@ __kernel void sten_jac(__global const real_t *xt,
 
 /* flat plaquette vector -> zeroed tiles, and back */
 __kernel void sten_pack(__global const real_t *v,
-                        __global const long *flat,
+                        __global const int *flat,
                         __global real_t *t,
                         const unsigned int n)
 {
@@ -151,7 +179,7 @@ __kernel void sten_pack(__global const real_t *v,
 }
 
 __kernel void sten_unpack(__global const real_t *t,
-                          __global const long *flat,
+                          __global const int *flat,
                           __global real_t *v,
                           const unsigned int n)
 {
@@ -181,7 +209,11 @@ class Stencil0(object):
         self.shape = (self.n, self.n)
         self.ntot = int(np.prod(self.shape_t))
         dt = self.dtype
-        self._flat = ocl_core.to_device(np.asarray(sten.flat, np.int64))
+        flat = np.asarray(sten.flat)
+        if int(flat.max()) >= 2**31:
+            raise OverflowError("stencil tile array has %d slots, past "
+                                "the 32-bit index" % int(flat.max()))
+        self._flat = ocl_core.to_device(flat.astype(np.int32))
         # the host holds these Fortran-shaped -- nbt is (27, tiles)
         # and of is (3, slots) -- so they are transposed on the way in
         # and the kernel indexes tile-major and slot-major
@@ -195,22 +227,49 @@ class Stencil0(object):
             np.ascontiguousarray(sten.cf).astype(np.int8))
         self._sptr = ocl_core.to_device(
             np.ascontiguousarray(sten.sptr).astype(np.int32))
-        self._wt = ocl_core.to_device(
-            np.ascontiguousarray(wdi_t).astype(dt))
+        # one weight, or the array if this geometry disagrees
+        w = np.ascontiguousarray(wdi_t).astype(dt).ravel()
+        nz = np.unique(w[w != 0])
+        self.uniform_w = bool(nz.size == 1)
+        if self.uniform_w:
+            self.wdi = dt.type(nz[0])
+            bits = np.packbits((w != 0).astype(np.uint8), bitorder='little')
+            pad = (-bits.size) % 4
+            if pad:
+                bits = np.concatenate([bits, np.zeros(pad, np.uint8)])
+            self._mask = ocl_core.to_device(bits.view(np.uint32))
+            self._wt = None
+        else:
+            self.wdi = dt.type(0)
+            self._mask = None
+            self._wt = ocl_core.to_device(w)
         self.prg = ocl_core.program(SOURCE, _DT[dt], {'TL': self.TL},
                                     key='ocl_stencil')
         self._k = {n: ocl_core.kernel(self.prg, n)
                    for n in ('sten_mv', 'sten_res', 'sten_jac',
-                             'sten_pack', 'sten_unpack')}
+                             'sten_jac_w', 'sten_pack', 'sten_unpack')}
         self._xt = ocl_core.zeros((self.ntot,), dt)
         self._bt = ocl_core.zeros((self.ntot,), dt)
         self._yt = ocl_core.zeros((self.ntot,), dt)
 
+    def parts(self):
+        """Device bytes by part, for sizing arguments."""
+        tables = (self._nbt.nbytes + self._nsrc.nbytes + self._of.nbytes
+                  + self._cf.nbytes + self._sptr.nbytes)
+        return dict(flat_index=int(self._flat.nbytes),
+                    weights=int((self._mask if self._wt is None
+                                 else self._wt).nbytes),
+                    work_grids=int(self._xt.nbytes + self._bt.nbytes
+                                   + self._yt.nbytes),
+                    tables=int(tables), slots=int(self.ntot),
+                    plaquettes=int(self.n))
+
     def device_bytes(self):
         """Resident device bytes: the tables, the weights, the tiles."""
+        w = (self._mask if self._wt is None else self._wt)
         return int(self._flat.nbytes + self._nbt.nbytes
                    + self._nsrc.nbytes + self._of.nbytes + self._cf.nbytes
-                   + self._sptr.nbytes + self._wt.nbytes
+                   + self._sptr.nbytes + w.nbytes
                    + self._xt.nbytes + self._bt.nbytes + self._yt.nbytes)
 
     # ------------------------------------------------------- packing
@@ -260,10 +319,16 @@ class Stencil0(object):
         self._pack(b, self._bt)
         cur, alt = self._xt, self._yt
         for _ in range(int(nu)):
-            self._k['sten_jac'](q, (self.ntot,), None, cur.data,
-                                self._bt.data, self._wt.data,
-                                *self._tiles(), alt.data,
-                                np.uint32(self.nt))
+            if self.uniform_w:
+                self._k['sten_jac'](q, (self.ntot,), None, cur.data,
+                                    self._bt.data, self._mask.data,
+                                    *self._tiles(), alt.data, self.wdi,
+                                    np.uint32(self.nt))
+            else:
+                self._k['sten_jac_w'](q, (self.ntot,), None, cur.data,
+                                      self._bt.data, self._wt.data,
+                                      *self._tiles(), alt.data,
+                                      np.uint32(self.nt))
             cur, alt = alt, cur
         return self._unpack(cur, x)
 
@@ -277,7 +342,14 @@ class Stencil0(object):
         q = ocl_core.queue()
         self._pack(x, self._xt)
         self._pack(b, self._bt)
-        self._k['sten_jac'](q, (self.ntot,), None, self._xt.data,
-                            self._bt.data, self._wt.data, *self._tiles(),
-                            self._yt.data, np.uint32(self.nt))
+        if self.uniform_w:
+            self._k['sten_jac'](q, (self.ntot,), None, self._xt.data,
+                                self._bt.data, self._mask.data,
+                                *self._tiles(), self._yt.data, self.wdi,
+                                np.uint32(self.nt))
+        else:
+            self._k['sten_jac_w'](q, (self.ntot,), None, self._xt.data,
+                                  self._bt.data, self._wt.data,
+                                  *self._tiles(), self._yt.data,
+                                  np.uint32(self.nt))
         return self._unpack(self._yt, xout)
