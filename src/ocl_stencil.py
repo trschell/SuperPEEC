@@ -206,6 +206,13 @@ class Stencil0(object):
         self._bt = ocl_core.zeros((self.ntot,), dt)
         self._yt = ocl_core.zeros((self.ntot,), dt)
 
+    def device_bytes(self):
+        """Resident device bytes: the tables, the weights, the tiles."""
+        return int(self._flat.nbytes + self._nbt.nbytes
+                   + self._nsrc.nbytes + self._of.nbytes + self._cf.nbytes
+                   + self._sptr.nbytes + self._wt.nbytes
+                   + self._xt.nbytes + self._bt.nbytes + self._yt.nbytes)
+
     # ------------------------------------------------------- packing
 
     def _pack(self, v, t):

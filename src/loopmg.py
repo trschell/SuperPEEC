@@ -86,7 +86,25 @@ class _Stencil0:
     EXACT probe equality against the csr path in :func:`build`, so a
     geometry that breaks any assumption silently keeps the csr.
     """
-    TL = 16
+    # Tile edge, 4 since 2026-09-19 (was 16). Slots are BOTH the
+    # storage and the work: every slot is swept whether or not it
+    # holds a plaquette. At edge 16 the R4 flagship's tiling is only
+    # 27.8% occupied, so nearly three quarters of the arithmetic and
+    # of the three tiled work grids went on empty cells. Occupancy
+    # saturates near 55% as the tile shrinks, and edge 4 reaches that
+    # without needing anisotropic tiles (which the Fortran kernels
+    # would not take, since they read one edge from the array shape).
+    #
+    # Measured on R4/R3, same answers, stencil certification clean at
+    # 16, 8 and 4:
+    #   host R3   7:34 -> 6:54 wall, 2.94 -> 2.83 GiB
+    #   device R4 4.36 -> 4.05 GiB of card, wall unchanged
+    # The halo grows relatively (padded/unpadded volume 1.42 -> 3.38),
+    # which is why the device wall does not improve, but the smaller
+    # slot count pays for it on the host where the sweeps dominate the
+    # apply. SPPEEC_STENCIL_TL overrides; a geometry whose occupancy
+    # behaves differently may prefer another edge.
+    TL = int(os.environ.get('SPPEEC_STENCIL_TL', '4'))
 
     def __init__(self, dtype, tables, tile_of, loc, shape):
         self.jac, self.mv = _STEN[dtype.type]

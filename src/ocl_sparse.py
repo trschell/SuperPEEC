@@ -583,6 +583,10 @@ class CSR(object):
                    for n in ('csr_spmv', 'csr_jacobi', 'csr_residual',
                              'csr_spmv_add')}
 
+    def device_bytes(self):
+        return int(self.data.nbytes + self.indices.nbytes
+                   + self.indptr.nbytes)
+
     def _grid(self):
         return (self.shape[0]*self.WG,), (self.WG,)
 

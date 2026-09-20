@@ -123,6 +123,16 @@ class GeoCore(object):
         self._r = [ocl_core.zeros((n,), dt) for n in self.sizes]
         self._t = [ocl_core.zeros((n,), dt) for n in self.sizes]
 
+    def device_bytes(self):
+        """Resident device bytes, split into operator and workspace."""
+        op = sum(A.device_bytes() for A in self.A)
+        op += sum(P.device_bytes() for P in self.P)
+        op += sum(R.device_bytes() for R in self.R)
+        op += sum(d.nbytes for d in self.dinv) + self.pinv.nbytes
+        ws = sum(v.nbytes for lst in (self._x, self._b, self._r, self._t)
+                 for v in lst)
+        return dict(operator=int(op), workspace=int(ws))
+
     def _smooth(self, lv, x, b):
         """``nu`` damped-Jacobi sweeps, leaving the result in ``x``."""
         A = self.A[lv]

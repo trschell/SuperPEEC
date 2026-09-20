@@ -140,6 +140,18 @@ class NearField(object):
         self.k_mac = ocl_core.kernel(self.prg, 'p2p_mac')
         self.k_gather = ocl_core.kernel(self.prg, 'gather_slab')
 
+    def device_bytes(self):
+        """Resident device bytes: the transfer table, the rolling slab
+        buffers, and the per-slab index packs."""
+        n = self._trans.nbytes + self._tgt.nbytes \
+            + sum(b.nbytes for b in self._slab)
+        for pk in self.packs:
+            for k in ('flatpos', 'srcidx', 'off', 'ep', 'etr', 'edx'):
+                a = pk.get(k)
+                if a is not None:
+                    n += a.nbytes
+        return int(n)
+
     def _build_packs(self, leaf):
         """Per-slab scatter maps and compressed neighbour lists."""
         packs = []

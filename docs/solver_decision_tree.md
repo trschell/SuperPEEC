@@ -1285,3 +1285,38 @@ now filed only as a portability item for Intel parts.
 One caveat on the level-0 stencil: it does not certify on the XNOR's
 geometry, so that model holds a materialised Gram on both backends and
 the saving the stencil gives on R4 does not transfer there.
+
+
+## R5 on a 12 GB card (2026-09-19)
+
+The DBC ladder's R5 rung, 18.04 M cells, now runs on the OpenCL
+backend on a 12 GB consumer card:
+
+| | |
+|---|---:|
+| cells | 18.04 M |
+| matvecs | 156 |
+| wall | 48 min |
+| card peak | 10.70 GiB of 11.99 (solver share 9.45) |
+| host peak | 35.85 GiB of 62 |
+| R, L | 5.286 mOhm, 0.1263 uH |
+
+R along the ladder runs 5.049, 5.178, 5.286 mOhm at R3, R4, R5, rising
+with refinement as the deep-skin resistance converges from below. The
+matvec count does not grow with the model: 167, 178, 156.
+
+Two things made this reachable. The rung itself is a 3.91x step from
+R4, not the five-fold step R3 to R4 was, so the extrapolation that said
+"needs 22 GB" was answering a question about a different model. And the
+card is where the work went: the level-0 stencil applied rather than
+formed, the tile edge cut from 16 to 4, the mode slabs sized by the
+host's lean rule, and the top-level M2L streamed when its channel
+spectra do not fit.
+
+It is tight rather than comfortable. 89% of the card leaves no room for
+a larger model or for anything else holding video memory. The savings
+already measured at R4 and not yet taken -- constant stencil weights,
+an untiled right-hand side, 32-bit index maps in the stencil and the
+near field, two dead workspace vectors, 8-bit coarse levels -- are
+about 645 MB there and roughly 2.5 GiB at this scale, which would turn
+89% into something nearer 65%.
