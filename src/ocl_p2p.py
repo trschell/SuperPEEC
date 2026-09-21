@@ -134,7 +134,7 @@ class NearField(object):
         self._slab = [ocl_core.zeros((mx,) + self.S, self.dtype)
                       for _ in range(3)]
         self._tgt = ocl_core.zeros((mx,) + self.S, self.dtype)
-        self._data = None
+        self._data = None        # input and output, in place
         self._fft = {}
         self.k_scatter = ocl_core.kernel(self.prg, 'scatter_slab')
         self.k_mac = ocl_core.kernel(self.prg, 'p2p_mac')
@@ -255,14 +255,22 @@ class NearField(object):
         host = np.ascontiguousarray(data, dtype=self.dtype)
         if self._data is None or self._data.shape != host.shape:
             self._data = ocl_core.empty(host.shape, self.dtype)
-            self._out = ocl_core.zeros(host.shape, self.dtype)
         dev = self._data
         dev.set(host, queue=q)
         # the traversal passes the leaf's own buffer as both input and
         # output, so the upload must be complete before anything writes
         # back into it
         q.finish()
-        out = self._out
+        # IN PLACE. The sweep writes each slab's result into the array
+        # it read its input from, which is what the host path does too.
+        # It is safe because of the ordering: at step cx the loop
+        # forward-transforms slab cx+1 and then gathers slab cx, so a
+        # slab's input is last read one step BEFORE its output is
+        # written, and the per-slab index sets partition the filaments
+        # so no two steps touch the same entry. That is one complex
+        # filament array per orientation, 800 MB across the three at
+        # R5, for an operator that is bandwidth-bound anyway.
+        out = dev
         # a dtype mismatch here should raise rather than silently
         # return a fresh array the caller will discard
         out_host = out_
