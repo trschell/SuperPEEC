@@ -31,6 +31,15 @@ The neighbour lists are stored once per slab in compressed form: an
 offset array indexed by target box, and parallel entry arrays holding
 the source position, the transfer channel and which of the three
 rolling slabs the source lives in.
+
+The scatter and gather maps are compressed the same way. A target box
+owns a *contiguous* range of the filament array, so the source index of
+entry ``q`` is the box's first filament plus how far into the box's own
+run ``q`` sits. Storing one base per box instead of one index per entry
+removes the whole source-index array: at R5 that is 221 MB of card
+across the three orientations, for a table of a few kilobytes. The box
+itself is already recovered from the position map the kernel reads
+anyway, so nothing extra is loaded per work item.
 """
 import numpy as np
 
@@ -68,7 +77,7 @@ __kernel void p2p_mac(__global const cplx_t *trans,   /* (27, GS)      */
 
 /* filament data -> zeroed padded slab grid, one work item per entry */
 __kernel void scatter_slab(__global const cplx_t *data,
-                           __global const int *srcidx,
+                           __global const int *rbase,   /* (nbox,) */
                            __global const int *flatpos,
                            __global cplx_t *pad,
                            const unsigned int nent,
@@ -84,12 +93,12 @@ __kernel void scatter_slab(__global const cplx_t *data,
     const unsigned int f = (unsigned int)(fp - (int)box*(int)nflat);
     const unsigned int a = f/(n1*n2), b = (f/n2) % n1, d = f % n2;
     pad[(unsigned long)box*GS + ((unsigned long)a*S1 + b)*S2 + d]
-        = data[srcidx[q]];
+        = data[rbase[box] + (int)q];
 }
 
 /* padded slab grid -> filament data */
 __kernel void gather_slab(__global const cplx_t *pad,
-                          __global const int *srcidx,
+                          __global const int *rbase,   /* (nbox,) */
                           __global const int *flatpos,
                           __global cplx_t *out,
                           const unsigned int nent,
@@ -104,8 +113,8 @@ __kernel void gather_slab(__global const cplx_t *pad,
     const unsigned int box = (unsigned int)(fp/(int)nflat);
     const unsigned int f = (unsigned int)(fp - (int)box*(int)nflat);
     const unsigned int a = f/(n1*n2), b = (f/n2) % n1, d = f % n2;
-    out[srcidx[q]] = pad[(unsigned long)box*GS
-                         + ((unsigned long)a*S1 + b)*S2 + d];
+    out[rbase[box] + (int)q] = pad[(unsigned long)box*GS
+                                   + ((unsigned long)a*S1 + b)*S2 + d];
 }
 """
 
@@ -143,7 +152,7 @@ class NearField(object):
     def parts(self):
         """Device bytes by part, for sizing arguments."""
         idx64 = sum(pk[k].nbytes for pk in self.packs
-                    for k in ('flatpos', 'srcidx') if pk.get(k) is not None)
+                    for k in ('flatpos', 'rbase') if pk.get(k) is not None)
         other = sum(pk[k].nbytes for pk in self.packs
                     for k in ('off', 'ep', 'etr', 'edx')
                     if pk.get(k) is not None)
@@ -158,7 +167,7 @@ class NearField(object):
         n = self._trans.nbytes + self._tgt.nbytes \
             + sum(b.nbytes for b in self._slab)
         for pk in self.packs:
-            for k in ('flatpos', 'srcidx', 'off', 'ep', 'etr', 'edx'):
+            for k in ('flatpos', 'rbase', 'off', 'ep', 'etr', 'edx'):
                 a = pk.get(k)
                 if a is not None:
                     n += a.nbytes
@@ -170,25 +179,35 @@ class NearField(object):
         mx = 0
         for cx in range(self.nslab):
             gs = leaf.slabidx[leaf.slabidx0[cx]:leaf.slabidx0[cx+1]]
-            rows, cols, src = [], [], []
+            rows, cols = [], []
+            # a box owns a contiguous run of filaments, so its entries'
+            # source indices are the run start offset by how far into
+            # the run each entry sits: one base per box replaces the
+            # per-entry array entirely
+            rbase = np.zeros(len(gs), dtype=np.int64)
+            nent = 0
             for cg, group in enumerate(gs):
                 a, b = int(leaf.idx0[group]), int(leaf.idx0[group+1])
                 cols.append(leaf.idx[a:b].astype(np.int64))
-                src.append(np.arange(a, b, dtype=np.int64))
                 rows.append(np.full(b - a, cg, dtype=np.int64))
+                rbase[cg] = a - nent
+                nent += b - a
             flatpos = (np.concatenate(rows)*self.nflat + np.concatenate(cols)
                        if rows else np.zeros(0, np.int64))
-            srcidx = (np.concatenate(src) if src else np.zeros(0, np.int64))
-            # both index small spaces -- a slab's padded grid and the
-            # filament array -- so they are 32-bit quantities that were
-            # being stored in 64: 432 MB of card at R5
-            for a in (flatpos, srcidx):
-                if a.size and int(a.max()) >= 2**31:
-                    raise OverflowError(
-                        "near-field index %d exceeds the 32-bit pack"
-                        % int(a.max()))
+            # the position map indexes a slab's padded grid, which is
+            # small, so it is a 32-bit quantity that was being stored
+            # in 64; the base is a difference of two filament indices
+            # and is signed, but bounded by the same array
+            if flatpos.size and int(flatpos.max()) >= 2**31:
+                raise OverflowError(
+                    "near-field index %d exceeds the 32-bit pack"
+                    % int(flatpos.max()))
+            if rbase.size and int(np.abs(rbase).max()) >= 2**31:
+                raise OverflowError(
+                    "near-field source base %d exceeds the 32-bit pack"
+                    % int(np.abs(rbase).max()))
             flatpos = flatpos.astype(np.int32)
-            srcidx = srcidx.astype(np.int32)
+            rbase = rbase.astype(np.int32)
             # neighbour lists, grouped by target box so the kernel can
             # accumulate in a register and stay reproducible
             off = np.zeros(len(gs) + 1, dtype=np.int32)
@@ -207,9 +226,9 @@ class NearField(object):
                 off[cg + 1] = len(ep)
             mx = max(mx, len(gs))
             packs.append(dict(
-                size=len(gs), nent=int(srcidx.size),
-                flatpos=ocl_core.to_device(flatpos) if srcidx.size else None,
-                srcidx=ocl_core.to_device(srcidx) if srcidx.size else None,
+                size=len(gs), nent=int(nent),
+                flatpos=ocl_core.to_device(flatpos) if nent else None,
+                rbase=ocl_core.to_device(rbase) if nent else None,
                 off=ocl_core.to_device(off.astype(np.int32)),
                 ep=ocl_core.to_device(np.asarray(ep, dtype=np.int32)),
                 etr=ocl_core.to_device(np.asarray(etr, dtype=np.int32)),
@@ -235,7 +254,7 @@ class NearField(object):
         _n0, n1, n2 = self.n
         _S0, S1, S2 = self.S
         self.k_scatter(
-            q, (pk['nent'],), None, data_d.data, pk['srcidx'].data,
+            q, (pk['nent'],), None, data_d.data, pk['rbase'].data,
             pk['flatpos'].data, buf.data, np.uint32(pk['nent']),
             np.uint32(self.nflat), np.uint64(self.GS), np.uint32(n1),
             np.uint32(n2), np.uint32(S1), np.uint32(S2))
@@ -295,7 +314,7 @@ class NearField(object):
                 np.uint32(nb))
             self._plan(nb).ifft(self._tgt[:nb])
             self.k_gather(
-                q, (pk['nent'],), None, self._tgt.data, pk['srcidx'].data,
+                q, (pk['nent'],), None, self._tgt.data, pk['rbase'].data,
                 pk['flatpos'].data, out.data, np.uint32(pk['nent']),
                 np.uint32(self.nflat), np.uint64(self.GS), np.uint32(n1),
                 np.uint32(n2), np.uint32(S1), np.uint32(S2))
