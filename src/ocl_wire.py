@@ -18,11 +18,31 @@ The solve is a Jacobi-preconditioned conjugate gradient, the same
 algorithm and the same convergence test as the CUDA path, with the
 vector updates fused so a long run does not allocate a temporary per
 step.
+
+One matrix at a time
+--------------------
+The incidence matrix, its transpose and the Laplacian are each wanted
+in a different part of this routine, and holding all three at once put
+1.14 GiB on the card at R4 and 4.55 GiB at R5 -- which, once the solve
+phase was narrowed to single precision, became the whole run's
+high-water mark. So each is built where it is needed and dropped where
+it is not: the transpose goes as soon as the Laplacian is formed, the
+Laplacian as soon as the iteration ends, and the incidence matrix is
+not uploaded until there is a solution to multiply. The transpose is
+rebuilt for the final KCL check, which costs one pass against a solve
+of hundreds of iterations.
 """
 import numpy as np
 
 import ocl_core
 import ocl_sparse
+
+
+def _copy(dst, src):
+    """Device-to-device copy of a whole array."""
+    import pyopencl as cl
+    cl.enqueue_copy(ocl_core.queue(), dst.data, src.data,
+                    byte_count=int(src.nbytes))
 
 SOURCE = """
 /* Dirichlet in place: scale each entry by d[i]*d[j], then a root's
@@ -100,9 +120,7 @@ def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000):
          for n in ('dirichlet', 'diag_inv', 'axpy', 'xpay', 'vmul')}
 
     Bc = B.tocsr()
-    Bd = ocl_sparse.CSR(Bc, dt)
     BTd_raw = ocl_sparse.transpose_device(Bc, dt)
-    BTd = ocl_sparse.CSR(BTd_raw, dt)
     # a Laplacian row holds the node's neighbours plus itself, so the
     # bound is small; widen on overflow rather than sizing the private
     # array for the worst node in the graph
@@ -115,6 +133,7 @@ def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000):
             if maxc >= 256:
                 raise
             maxc *= 2
+    del BTd_raw                   # the Laplacian is formed; B^T is dead
     nn = int(Ld.shape[0])
     d = ocl_core.to_device(np.asarray(parent >= 0, dt))   # zero at roots
     k['dirichlet'](q, (nn,), None, Ld.indptr.data, Ld.indices.data,
@@ -125,19 +144,19 @@ def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000):
                   Ld.data.data, dinv.data, np.uint32(nn))
 
     b0 = ocl_core.to_device(np.asarray(rhs, dt))
-    b = ocl_core.zeros((nn,), dt)
-    k['vmul'](q, (nn,), None, b.data, b0.data, d.data, np.uint32(nn))
+    # the masked right-hand side IS the initial residual at x = 0, so
+    # one vector serves both and its norm is the convergence scale
+    r = ocl_core.zeros((nn,), dt)
+    k['vmul'](q, (nn,), None, r.data, b0.data, d.data, np.uint32(nn))
+    bn = float(np.sqrt(ocl_sparse.dot(r, r, dt)))
 
     x = ocl_core.zeros((nn,), dt)
-    r = ocl_core.zeros((nn,), dt)
-    r.set(b.get(queue=q), queue=q)
     z = ocl_core.zeros((nn,), dt)
     p = ocl_core.zeros((nn,), dt)
     Ap = ocl_core.zeros((nn,), dt)
     k['vmul'](q, (nn,), None, z.data, dinv.data, r.data, np.uint32(nn))
-    p.set(z.get(queue=q), queue=q)
+    _copy(p, z)              # device to device, not out through the host
     rz = ocl_sparse.dot(r, z, dt)
-    bn = float(np.sqrt(ocl_sparse.dot(b, b, dt)))
 
     it = 0
     while it < maxiter and bn > 0.0:
@@ -160,9 +179,15 @@ def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000):
                   np.uint32(nn))
         rz = rz_new
 
+    del Lg, Ld               # the iteration is over; the Laplacian is dead
+    Bd = ocl_sparse.CSR(Bc, dt)
     ihat = ocl_core.zeros((int(Bd.shape[0]),), dt)
     Bd.spmv(x, ihat)
-    chk = ocl_core.zeros((nn,), dt)
+    del Bd
+    # the KCL check needs the transpose again; one pass to rebuild it
+    # beats carrying it through the whole iteration
+    BTd = ocl_sparse.CSR(ocl_sparse.transpose_device(Bc, dt), dt)
+    chk = z                  # dead since the last preconditioner sweep
     BTd.spmv(ihat, chk)
     k['axpy'](q, (nn,), None, chk.data, dt.type(-1.0), b0.data,
               np.uint32(nn))
