@@ -27,6 +27,53 @@ import backend
 _programs = {}
 _ffts = {}
 
+# Every device array this module hands out, by the call site that asked
+# for it. Component-by-component reporting misses whatever a phase
+# allocates lazily inside its apply, and on R5 that was a third of the
+# card: the accounting has to be at the allocator, not at the object.
+# A finalizer drops the entry when the array is collected, so `live()`
+# is what is actually resident rather than what was ever created.
+_alloc = {'bytes': 0, 'count': 0, 'peak': 0}
+_by_site = {}
+
+
+def _site(depth):
+    import sys
+    try:
+        f = sys._getframe(depth)
+        return '%s.%s' % (f.f_globals.get('__name__', '?'), f.f_code.co_name)
+    except Exception:
+        return '?'
+
+
+def _register(arr, depth=3):
+    import weakref
+    n = int(arr.nbytes)
+    tag = _site(depth)
+    _alloc['bytes'] += n
+    _alloc['count'] += 1
+    _alloc['peak'] = max(_alloc['peak'], _alloc['bytes'])
+    _by_site[tag] = _by_site.get(tag, 0) + n
+
+    def _drop(_=None, n=n, tag=tag):
+        _alloc['bytes'] -= n
+        _alloc['count'] -= 1
+        _by_site[tag] = _by_site.get(tag, 0) - n
+    try:
+        weakref.finalize(arr, _drop)
+    except TypeError:                      # not weak-referenceable
+        pass
+    return arr
+
+
+def live():
+    """Device bytes resident now, and which call site asked for them."""
+    return dict(bytes=_alloc['bytes'], count=_alloc['count'],
+                peak=_alloc['peak'],
+                by_site={k: v for k, v in
+                         sorted(_by_site.items(), key=lambda kv: -kv[1])
+                         if v > 0})
+
 
 def queue(index=0):
     """The command queue for device ``index``."""
@@ -103,13 +150,13 @@ def kernel(prg, fname):
 def empty(shape, dtype=np.complex128, index=0):
     """An uninitialised device array."""
     import pyopencl.array as cla
-    return cla.empty(queue(index), shape, dtype=dtype)
+    return _register(cla.empty(queue(index), shape, dtype=dtype))
 
 
 def zeros(shape, dtype=np.complex128, index=0):
     """A zeroed device array."""
     import pyopencl.array as cla
-    return cla.zeros(queue(index), shape, dtype=dtype)
+    return _register(cla.zeros(queue(index), shape, dtype=dtype))
 
 
 CHUNK = 64 << 20          # bytes per upload slice
@@ -144,7 +191,7 @@ def to_device(a, dtype=None, index=0):
             cl.enqueue_copy(q, d.data, flat[i:i + step],
                             device_offset=i*a.dtype.itemsize)
         q.finish()
-    return d
+    return _register(d)
 
 
 def to_host(d, out=None):
