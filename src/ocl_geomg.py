@@ -205,6 +205,15 @@ class GeoCore(object):
         self.P[lv].spmv_add(self._x[lv + 1], x)
         self._smooth(lv, x, b)
 
+    def solution(self):
+        """The level-0 solution buffer, live until the next solve.
+
+        ``solve`` computes into this and then copies it out, so a
+        caller that consumes the result before calling again needs no
+        destination of its own. One full-length vector at every scale.
+        """
+        return self._x[0]
+
     def solve(self, r, out=None):
         """``cycles`` V-cycles from a zero start, on a device vector."""
         x = self._x[0]
@@ -230,9 +239,11 @@ class GeoBlock(object):
         self.loc = ocl_core.to_device(np.asarray(factor.loc, np.int32))
         self.mac = (ocl_core.to_device(np.asarray(factor.mac, np.int32))
                     if self.nmac else None)
+        # The identity set is never indexed on the device any more:
+        # the apply leaves those entries where they already are. It is
+        # kept only to check the partition below, on the host.
         rest = getattr(factor, 'rest', None)
-        self.rest = (ocl_core.to_device(np.asarray(rest, np.int32))
-                     if rest is not None and np.size(rest) else None)
+        self.nrest = int(np.size(rest)) if rest is not None else 0
         self.B = ocl_sparse.CSR(factor.B, dt) if self.nmac else None
         self.BT = (ocl_sparse.CSR(factor.B.T.tocsr(), dt)
                    if self.nmac else None)
@@ -246,13 +257,28 @@ class GeoBlock(object):
                 "(%d)" % (nloc, self.core.sizes[0]))
         self._k_sub = ocl_core.kernel(
             ocl_sparse.program(dt, ocl_sparse.CSR.WG), 'scatter_sub')
-        self._rest_tmp = (ocl_core.zeros((int(np.size(rest)),), dt)
-                          if self.rest is not None else None)
+        # The apply writes its output over its input, which is only
+        # sound if the three sets cover the vector: the identity set
+        # is then the positions nothing else writes, and leaving the
+        # input there is exactly the pass-through. The factor builds
+        # `rest` as the complement of loc and mac, so this holds by
+        # construction -- but it is the whole safety argument for the
+        # aliasing below, so it is checked rather than assumed.
+        cov = np.zeros(self.n, dtype=bool)
+        cov[np.asarray(factor.loc)] = True
+        if self.nmac:
+            cov[np.asarray(factor.mac)] = True
+        if rest is not None and np.size(rest):
+            cov[np.asarray(rest)] = True
+        if not bool(cov.all()):
+            raise RuntimeError(
+                "the local, macro and identity sets leave %d of %d entries "
+                "unwritten; the in-place apply needs them to partition the "
+                "vector" % (int((~cov).sum()), self.n))
+        del cov
         self._bg = ocl_core.zeros((self.n,), dt)
-        self._out = ocl_core.zeros((self.n,), dt)
         self._rp = ocl_core.zeros((nloc,), dt)
         self._yp = ocl_core.zeros((nloc,), dt)
-        self._sub = ocl_core.zeros((nloc,), dt)
         self._rm = ocl_core.zeros((self.nmac,), dt) if self.nmac else None
         self._bt = ocl_core.zeros((self.nmac,), dt) if self.nmac else None
         self._ym = ocl_core.zeros((self.nmac,), dt) if self.nmac else None
@@ -265,37 +291,42 @@ class GeoBlock(object):
     def __call__(self, b):
         dt = self.dtype
         q = ocl_core.queue()
-        self._bg.set(np.ascontiguousarray(np.asarray(b, dt)), queue=q)
-        ocl_sparse.gather(self._bg, self.loc, self._rp, dt)
-        self.core.solve(self._rp, out=self._yp)
-        out = self._out
-        out.fill(dt.type(0), queue=q)
+        # The output is the input buffer. The local and macro sets are
+        # overwritten below and the identity set keeps the value it
+        # was handed, which is what the explicit pass-through used to
+        # copy; the zero fill goes with it, since every position is
+        # now either written or deliberately kept.
+        out = self._bg
+        out.set(np.ascontiguousarray(np.asarray(b, dt)), queue=q)
+        ocl_sparse.gather(out, self.loc, self._rp, dt)
+        yp = self.core.solve(self._rp, out=self._yp)
         if self.nmac:
-            ocl_sparse.gather(self._bg, self.mac, self._rm, dt)
-            self.BT.spmv(self._yp, self._bt)
+            ocl_sparse.gather(out, self.mac, self._rm, dt)
+            self.BT.spmv(yp, self._bt)
             ym_cpu = self._lu_solve(
                 self.S, np.float64(self._rm.get(queue=q)
                                    - self._bt.get(queue=q)))
+            # The macro correction lands in the hierarchy's own level-0
+            # solution buffer. `yp` already holds the first solve, so
+            # the second has nothing left to preserve and needs no
+            # destination of its own.
+            sub = self.core.solution()
             if self.MB is not None:
                 # the kept macro columns: a dense host product instead
                 # of a second V-cycle, as on the CUDA path
-                self._sub.set(np.ascontiguousarray(
+                sub.set(np.ascontiguousarray(
                     (self.MB @ ym_cpu.astype(np.float32)).astype(dt)),
                     queue=q)
             else:
                 self._ym.set(np.ascontiguousarray(ym_cpu.astype(dt)),
                              queue=q)
                 self.B.spmv(self._ym, self._rp)
-                self.core.solve(self._rp, out=self._sub)
-            nloc = int(self._yp.size)
-            self._k_sub(q, (nloc,), None, self._yp.data, self._sub.data,
+                self.core.solve(self._rp)          # result stays in `sub`
+            nloc = int(yp.size)
+            self._k_sub(q, (nloc,), None, yp.data, sub.data,
                         self.loc.data, out.data, np.uint32(nloc))
             self._ym.set(np.ascontiguousarray(ym_cpu.astype(dt)), queue=q)
             ocl_sparse.scatter(self._ym, self.mac, out, dt)
         else:
-            ocl_sparse.scatter(self._yp, self.loc, out, dt)
-        if self.rest is not None:
-            # the identity set passes through unchanged
-            ocl_sparse.gather(self._bg, self.rest, self._rest_tmp, dt)
-            ocl_sparse.scatter(self._rest_tmp, self.rest, out, dt)
+            ocl_sparse.scatter(yp, self.loc, out, dt)
         return np.float32(out.get(queue=q))
