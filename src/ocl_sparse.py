@@ -25,6 +25,8 @@ system is preconditioned through its real part, and the macro Schur
 solve stays on the host. So these kernels are real-valued, with the
 scalar type chosen at build time.
 """
+import os
+
 import numpy as np
 
 import ocl_core
@@ -35,6 +37,8 @@ _DT = {np.dtype(np.float32): np.complex64,
        np.dtype(np.float64): np.complex128}
 
 SOURCE = """
+typedef DATA data_t;          /* real_t, or char where values fit a byte */
+
 /* One work group per row, WG work items striding its nonzeros, then a
    fixed binary tree in local memory. Same operations in the same order
    on every call, whatever the scheduler does. */
@@ -50,7 +54,7 @@ inline real_t row_reduce(__local real_t *s, unsigned int lid)
 }
 
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
-void csr_spmv(__global const real_t *data,
+void csr_spmv(__global const data_t *data,
               __global const int *indices,
               __global const int *indptr,
               __global const real_t *x,
@@ -64,7 +68,7 @@ void csr_spmv(__global const real_t *data,
     const int a = indptr[row], b = indptr[row + 1];
     real_t acc = (real_t)0;
     for (int k = a + lid; k < b; k += WG)
-        acc += data[k]*x[indices[k]];
+        acc += (real_t)data[k]*x[indices[k]];
     part[lid] = acc;
     const real_t tot = row_reduce(part, lid);
     if (lid == 0) y[row] = tot;
@@ -73,7 +77,7 @@ void csr_spmv(__global const real_t *data,
 /* One damped Jacobi sweep, fused: xout = x + omega*dinv*(b - A x).
    The sweep reads only the old x, so no temporary is needed. */
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
-void csr_jacobi(__global const real_t *data,
+void csr_jacobi(__global const data_t *data,
                 __global const int *indices,
                 __global const int *indptr,
                 __global const real_t *x,
@@ -90,7 +94,7 @@ void csr_jacobi(__global const real_t *data,
     const int a = indptr[row], e = indptr[row + 1];
     real_t acc = (real_t)0;
     for (int k = a + lid; k < e; k += WG)
-        acc += data[k]*x[indices[k]];
+        acc += (real_t)data[k]*x[indices[k]];
     part[lid] = acc;
     const real_t ax = row_reduce(part, lid);
     if (lid == 0) xout[row] = x[row] + omega*dinv[row]*(b[row] - ax);
@@ -98,7 +102,7 @@ void csr_jacobi(__global const real_t *data,
 
 /* r = b - A x, same reduction */
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
-void csr_residual(__global const real_t *data,
+void csr_residual(__global const data_t *data,
                   __global const int *indices,
                   __global const int *indptr,
                   __global const real_t *x,
@@ -113,7 +117,7 @@ void csr_residual(__global const real_t *data,
     const int a = indptr[row], e = indptr[row + 1];
     real_t acc = (real_t)0;
     for (int k = a + lid; k < e; k += WG)
-        acc += data[k]*x[indices[k]];
+        acc += (real_t)data[k]*x[indices[k]];
     part[lid] = acc;
     const real_t ax = row_reduce(part, lid);
     if (lid == 0) r[row] = b[row] - ax;
@@ -121,7 +125,7 @@ void csr_residual(__global const real_t *data,
 
 /* y += A x, for the prolongation update */
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
-void csr_spmv_add(__global const real_t *data,
+void csr_spmv_add(__global const data_t *data,
                   __global const int *indices,
                   __global const int *indptr,
                   __global const real_t *x,
@@ -135,7 +139,7 @@ void csr_spmv_add(__global const real_t *data,
     const int a = indptr[row], e = indptr[row + 1];
     real_t acc = (real_t)0;
     for (int k = a + lid; k < e; k += WG)
-        acc += data[k]*x[indices[k]];
+        acc += (real_t)data[k]*x[indices[k]];
     part[lid] = acc;
     const real_t tot = row_reduce(part, lid);
     if (lid == 0) y[row] += tot;
@@ -600,6 +604,7 @@ class CSR(object):
             self.data, self.indices, self.indptr = (M.data, M.indices,
                                                     M.indptr)
             self.src_dtype, self.ones_only, self.int8_ok = '?', False, False
+            self.data8 = False
             self.prg = program(self.dtype, self.WG)
             self._k = {n: ocl_core.kernel(self.prg, n)
                        for n in ('csr_spmv', 'csr_jacobi', 'csr_residual',
@@ -611,14 +616,18 @@ class CSR(object):
         # what the host held, and whether every stored value is 1: an
         # aggregation prolongator is 0/1 with one entry per row, so it
         # needs no data array at all
+        d64 = M.data.astype(np.float64)
         self.src_dtype = str(M.data.dtype)
-        self.ones_only = bool(M.nnz and np.all(M.data == 1))
-        self.int8_ok = bool(M.nnz and np.all(M.data == np.rint(M.data))
-                            and np.abs(M.data).max() <= 127)
-        self.data = ocl_core.to_device(M.data.astype(self.dtype))
+        self.ones_only = bool(M.nnz and np.all(d64 == 1))
+        self.int8_ok = bool(M.nnz and np.all(d64 == np.rint(d64))
+                            and np.abs(d64).max() <= 127)
+        self.data8 = bool(self.int8_ok
+                          and os.environ.get('SPPEEC_OCL_INT8', '1') != '0')
+        self.data = ocl_core.to_device(
+            M.data.astype(np.int8 if self.data8 else self.dtype))
         self.indices = ocl_core.to_device(M.indices.astype(np.int32))
         self.indptr = ocl_core.to_device(M.indptr.astype(np.int32))
-        self.prg = program(self.dtype, self.WG)
+        self.prg = program(self.dtype, self.WG, self.data8)
         self._k = {n: ocl_core.kernel(self.prg, n)
                    for n in ('csr_spmv', 'csr_jacobi', 'csr_residual',
                              'csr_spmv_add')}
@@ -729,10 +738,22 @@ class OnesRestrict(object):
         return y
 
 
-def program(dtype=np.float32, wg=64):
-    """The sparse program for a scalar type and work-group width."""
-    return ocl_core.program(SOURCE, _DT[np.dtype(dtype)], {'WG': int(wg)},
-                            key='ocl_sparse')
+def program(dtype=np.float32, wg=64, data8=False):
+    """The sparse program for a scalar type, width and data type.
+
+    ``data8`` builds the variant whose matrix values are single bytes.
+    The loop Gram's entries are exactly 4 and plus or minus 1, and the
+    first two Galerkin levels inherit small integers from it, so those
+    matrices store losslessly in a byte and the product promotes to the
+    same reals. Level 3 crosses 127 and stays in floats, by which point
+    the matrices are negligible.
+    """
+    dt = np.dtype(dtype)
+    real = 'float' if dt == np.float32 else 'double'
+    data = 'char' if data8 else real
+    return ocl_core.program(SOURCE, _DT[dt],
+                            {'WG': int(wg), 'DATA': data},
+                            key='ocl_sparse/' + data)
 
 
 def gather(src, idx, dst, dtype=np.float32, wg=64):

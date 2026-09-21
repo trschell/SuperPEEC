@@ -1349,12 +1349,36 @@ level 0 sweeps itself, so it was uploaded and never touched.
 | inverse diagonals | 229 | 31 | 198 |
 | multigrid operator | 3020 | 2134 | 886 |
 
-Across the day R5 went 10.70 -> 9.13 -> 8.30 GiB of card, 89% to 69%,
-at the same answer, the same 156 matvecs, and 2875 -> 2683 s.
+Quote the solver's own share, not the raw peak: the desktop holds
+1.16 to 1.46 GiB of the card and that varies between runs by more than
+some of these savings. Across the day, at the same answer and the same
+156 matvecs:
 
-What is left: 8-bit data on operator levels 1 and 2, worth 255 MB at
-R5. They are already 8-bit on the host and this backend widens them on
-upload. Nothing below level 2 is worth narrowing: the Galerkin entries
+| R5 | desktop | solver | steady | wall |
+|---|---:|---:|---:|---:|
+| start of day | 1.25 | 9.45 GiB | 10.48 | 2875 s |
+| index widths and dead buffers | 1.40 | 7.74 | 9.13 | 2823 |
+| prolongators and the dead diagonal | 1.16 | 7.13 | 8.28 | 2683 |
+| 8-bit operator levels | 1.46 | 6.85 | 8.21 | 2747 |
+
+The solver's card usage fell 28%. Measured on raw peaks the last step
+looks like nothing, 8.30 to 8.31, purely because that run began with
+0.30 GiB more held by the desktop.
+
+The card profile is a step, not a drift: 6.05 GiB once the operator is
+built, a 2.2 GiB jump in three samples when the preconditioner
+hierarchy uploads, then flat for the remaining two thousand seconds.
+Nothing accumulates during the solve.
+
+The operator levels then took 8-bit data. The loop Gram's entries are
+exactly 4 and plus or minus 1, and the first two Galerkin levels
+inherit small integers from it, so a byte holds them exactly and the
+product promotes to the same reals: level 1 went 641.9 MB to 411.4 and
+level 2 69.5 to 44.7, for 255 MB, at 8.35 bytes per nonzero down to
+5.35. The validator pins the property that matters, that the same
+matrix stored either way gives a bit-identical product.
+
+Nothing below level 2 is worth narrowing: the Galerkin entries
 stay exact integers and grow about threefold per level, crossing 127
 only at level 3, by which point levels 3 through 8 together are 7.8 MB
 of a 2133 MB hierarchy. The untiled right-hand side was also dropped,

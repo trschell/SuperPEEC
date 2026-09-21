@@ -307,6 +307,39 @@ def sparse_product_cases():
           _np.array_equal(G.data, G2.data)
           and _np.array_equal(G.indices, G2.indices))
 
+    # byte-sized matrix values stored in a byte must give bit-identical
+    # products: the promotion to float is exact, so this is storage
+    # alone and not a precision trade
+    import ocl_core as _oc
+    small = _sp.csr_matrix(rng.integers(-4, 17, (2000, 2000))
+                           * (rng.random((2000, 2000)) < 0.004))
+    small.eliminate_zeros()
+    xh = rng.standard_normal(2000).astype(_np.float32)
+    got = {}
+    keep = os.environ.get('SPPEEC_OCL_INT8')
+    try:
+        for mode, flag in (('bytes', '1'), ('floats', '0')):
+            os.environ['SPPEEC_OCL_INT8'] = flag
+            A = ocl_sparse.CSR(small, _np.float32)
+            if mode == 'bytes':
+                check("8-bit path: a small-integer matrix takes it",
+                      A.data8, "int8_ok=%s data8=%s" % (A.int8_ok, A.data8))
+                check("8-bit path: the data array is one byte per entry",
+                      A.data.nbytes == A.nnz,
+                      "%d bytes for %d nonzeros" % (A.data.nbytes, A.nnz))
+            xd = _oc.to_device(xh)
+            yd = _oc.zeros((2000,), _np.float32)
+            got[mode] = A.spmv(xd, yd).get()
+    finally:
+        if keep is None:
+            os.environ.pop('SPPEEC_OCL_INT8', None)
+        else:
+            os.environ['SPPEEC_OCL_INT8'] = keep
+    check("8-bit path: product is bit-identical to the 32-bit one",
+          _np.array_equal(got['bytes'], got['floats']),
+          "max diff=%.3e" % float(_np.abs(got['bytes']
+                                          - got['floats']).max()))
+
 
 def precond_cases():
     """The multigrid preconditioner apply, against the host apply.
