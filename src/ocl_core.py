@@ -20,6 +20,8 @@ precision is emulated (some Intel generations) want the complex64 path
 instead; :func:`ctype` names the scalar so a program can be built
 either way from one source.
 """
+import os
+
 import numpy as np
 
 import backend
@@ -93,6 +95,44 @@ def ctype(dtype):
     if dt == np.complex64:
         return 'float', 'float2'
     raise TypeError("no OpenCL complex type for %s" % dt)
+
+
+def operator_dtype():
+    """Storage precision for the FMM operator's device arrays.
+
+    ``SPPEEC_OCL_FP32=1`` opts the near field and the top-level M2L
+    into complex64. Both are bandwidth-bound -- the inner op is 8 flop
+    per 32 bytes against a card balance of 1.07 flop/byte in fp64 --
+    so halving the word halves the phase, and at flagship scale they
+    are the two largest things on the card.
+
+    The price is about 1e-7 in the operator, measured against the host
+    Fortran kernels. These models solve to an engineering ``rtol`` of
+    1e-4, three decades above that, so GMRES does not see it. It is
+    opt-in rather than default because a caller asking for a much
+    tighter residual would, and because it changes answers.
+
+    Only the operator narrows. The Krylov algebra and the Arnoldi stay
+    double, where complex64 was measured to stall at 1e-4, and the
+    preconditioner is real float32 already.
+    """
+    return (np.complex64 if os.environ.get('SPPEEC_OCL_FP32') == '1'
+            else np.complex128)
+
+
+def fits_float32(a):
+    """True when every entry of ``a`` is inside float32's exponent range.
+
+    The M2L entries carry ``1/r**(j+n+1)`` and were measured at 5.2e38
+    on a 1e-5 m pitch (the ``ftrans`` lesson in :mod:`levels`), past
+    float32's 3.4e38 ceiling. The de-normalised channel spectra reach
+    6.9e23 at the R5 flagship, so there is room there -- but a finer
+    pitch closes it, and silently writing inf into an operator is the
+    kind of failure that shows up as a wrong answer rather than an
+    error. Checked, not assumed.
+    """
+    mag = np.abs(np.asarray(a))
+    return not bool((mag > np.finfo(np.float32).max).any())
 
 
 PRELUDE = """

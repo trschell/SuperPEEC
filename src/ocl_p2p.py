@@ -122,8 +122,9 @@ __kernel void gather_slab(__global const cplx_t *pad,
 class NearField(object):
     """Device state and apply for one leaf's near field."""
 
-    def __init__(self, leaf, dtype=np.complex128):
-        self.dtype = np.dtype(dtype)
+    def __init__(self, leaf, dtype=None):
+        self.dtype = np.dtype(dtype if dtype is not None
+                              else ocl_core.operator_dtype())
         self.n = tuple(int(v) for v in leaf.n)
         self.nflat = int(np.prod(self.n))
         self.S = tuple(int(v) for v in leaf.p2p_transfer.shape[1:])
@@ -144,6 +145,7 @@ class NearField(object):
                       for _ in range(3)]
         self._tgt = ocl_core.zeros((mx,) + self.S, self.dtype)
         self._data = None        # input and output, in place
+        self._stage = None       # host staging when the card is narrower
         self._fft = {}
         self.k_scatter = ocl_core.kernel(self.prg, 'scatter_slab')
         self.k_mac = ocl_core.kernel(self.prg, 'p2p_mac')
@@ -271,7 +273,19 @@ class NearField(object):
         q = ocl_core.queue()
         _n0, n1, n2 = self.n
         _S0, S1, S2 = self.S
-        host = np.ascontiguousarray(data, dtype=self.dtype)
+        src = np.asarray(data)
+        if src.dtype != self.dtype or not src.flags.c_contiguous:
+            # Narrowing the caller's vector allocates a whole filament
+            # array per call otherwise: 138 MB per orientation per
+            # matvec at R5, which glibc does not hand back. The same
+            # staging buffer serves the download, because the upload is
+            # finished before anything writes the output.
+            if self._stage is None or self._stage.shape != src.shape:
+                self._stage = np.empty(src.shape, self.dtype)
+            self._stage[...] = src
+            host = self._stage
+        else:
+            host = src
         if self._data is None or self._data.shape != host.shape:
             self._data = ocl_core.empty(host.shape, self.dtype)
         dev = self._data
@@ -318,4 +332,20 @@ class NearField(object):
                 pk['flatpos'].data, out.data, np.uint32(pk['nent']),
                 np.uint32(self.nflat), np.uint64(self.GS), np.uint32(n1),
                 np.uint32(n2), np.uint32(S1), np.uint32(S2))
+        if out_host is not None and out_host.dtype != self.dtype:
+            # Narrowed storage on the card, a double vector on the host:
+            # the traversal owns that array and other stages still write
+            # it in double, so convert on the way back rather than
+            # rebinding it to a narrower type.
+            #
+            # The staging buffer is kept. Letting `get` allocate its own
+            # each call cost 4.4 GiB of host peak and 16% of the wall on
+            # R5 -- 415 MB per orientation per matvec, which PyOpenCL
+            # has no pool to drain. It is written before it is read and
+            # never escapes, so one buffer serves every call.
+            if self._stage is None or self._stage.shape != out.shape:
+                self._stage = np.empty(out.shape, self.dtype)
+            out.get(queue=q, ary=self._stage)
+            out_host[...] = self._stage
+            return out_host
         return out.get(queue=q, ary=out_host)

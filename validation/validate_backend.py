@@ -477,6 +477,103 @@ def m2l_cases(M, rng):
           d < 1e-12, "rel diff=%.3e" % d)
 
 
+def fp32_cases(M, rng):
+    """The opt-in single-precision operator (``SPPEEC_OCL_FP32=1``).
+
+    Narrowing the near field and the top-level M2L to complex64 halves
+    the two largest device allocations in the corpus. It is a real
+    change to the operator, so what is checked here is that the error
+    lands where single precision puts it and nowhere worse, that the
+    saving is exactly a factor of two, and that determinism survives --
+    the preconditioner needs a map that does not drift, whatever the
+    storage width.
+    """
+    import ocl_core
+    import ocl_m2l
+    import ocl_p2p
+
+    keep = os.environ.get('SPPEEC_OCL_FP32')
+    try:
+        os.environ['SPPEEC_OCL_FP32'] = '1'
+        check("fp32: the environment selects complex64",
+              ocl_core.operator_dtype() == np.complex64,
+              str(np.dtype(ocl_core.operator_dtype())))
+        os.environ.pop('SPPEEC_OCL_FP32')
+        check("fp32: the default stays double",
+              ocl_core.operator_dtype() == np.complex128,
+              str(np.dtype(ocl_core.operator_dtype())))
+    finally:
+        if keep is None:
+            os.environ.pop('SPPEEC_OCL_FP32', None)
+        else:
+            os.environ['SPPEEC_OCL_FP32'] = keep
+
+    check("fp32: a table inside float32's range is accepted",
+          ocl_core.fits_float32(np.array([1e30 + 0j, 1e-30 + 0j])))
+    check("fp32: a table past float32's ceiling is refused",
+          not ocl_core.fits_float32(np.array([1e39 + 0j])))
+
+    for nm in ('e', 'f', 'g'):
+        lf = getattr(M, nm, None)
+        if lf is None or getattr(lf, 'p2p_transfer', None) is None:
+            continue
+        nfil = int(np.size(lf.idx))
+        data = (rng.standard_normal(nfil)
+                + 1j*rng.standard_normal(nfil)).astype(np.complex128)
+        lf.data = data.copy()
+        lf.p2pcpu()
+        ref = lf.data.copy()
+        wide = ocl_p2p.NearField(lf, dtype=np.complex128)
+        nar = ocl_p2p.NearField(lf, dtype=np.complex64)
+        # only the complex arrays narrow: the scatter maps and the
+        # neighbour lists are int32 indices and are the same either way
+        pw, pn = wide.parts(), nar.parts()
+        cw = pw['transfer'] + pw['slabs']
+        cn = pn['transfer'] + pn['slabs']
+        ixw = pw['packs_int64'] + pw['packs_other']
+        ixn = pn['packs_int64'] + pn['packs_other']
+        check("fp32 near field %s: the complex arrays halve, "
+              "the index packs do not" % nm,
+              2*cn == cw and ixn == ixw,
+              "complex %d->%d, packs %d->%d" % (cw, cn, ixw, ixn))
+        # the traversal's own call shape: a double host buffer, in place
+        host = data.copy()
+        got = nar.apply(host, out_=host)
+        check("fp32 near field %s: the host buffer keeps its dtype" % nm,
+              got is host and host.dtype == np.complex128, str(host.dtype))
+        scale = max(1e-300, float(np.abs(ref).max()))
+        err = float(np.abs(host - ref).max())/scale
+        check("fp32 near field %s: agrees with the host kernel" % nm,
+              err < 1e-5, "rel err=%.3e" % err)
+        again = data.copy()
+        nar.apply(again, out_=again)
+        check("fp32 near field %s: repeated call is bit-identical" % nm,
+              np.array_equal(host, again))
+        del wide, nar
+
+    top = M.lv[int(M.numlevels) - 1]
+    data = (rng.standard_normal(top.data.shape)
+            + 1j*rng.standard_normal(top.data.shape)).astype(np.complex128)
+    top.data = data.copy()
+    top.m2lfortran()
+    ref = top.data.copy()
+    wide = ocl_m2l.TopM2L(top, dtype=np.complex128)
+    nar = ocl_m2l.TopM2L(top, dtype=np.complex64)
+    check("fp32 top-level M2L: halves the card exactly",
+          2*nar.device_bytes() == wide.device_bytes(),
+          "%d vs %d bytes" % (nar.device_bytes(), wide.device_bytes()))
+    got = nar.apply(data.copy())
+    check("fp32 top-level M2L: the return keeps the caller's dtype",
+          got.dtype == np.complex128, str(got.dtype))
+    scale = max(1e-300, float(np.abs(ref).max()))
+    err = float(np.abs(got - ref).max())/scale
+    check("fp32 top-level M2L: agrees with the host kernel",
+          err < 1e-5, "rel err=%.3e" % err)
+    check("fp32 top-level M2L: repeated call is bit-identical",
+          np.array_equal(got, nar.apply(data.copy())))
+    del wide, nar
+
+
 def operator_cases():
     import backend
     if backend.name() != 'opencl':
@@ -516,6 +613,7 @@ def operator_cases():
     precond_cases()
 
     m2l_cases(M, rng)
+    fp32_cases(M, rng)
 
     top = M.lv[int(M.numlevels) - 1]
     data = (rng.standard_normal(top.data.shape)

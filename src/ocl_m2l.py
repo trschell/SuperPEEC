@@ -221,12 +221,23 @@ class TopM2L(object):
 
     TG = 16                      # grid points per work group
 
-    def __init__(self, level, dtype=np.complex128):
-        self.dtype = np.dtype(dtype)
+    def __init__(self, level, dtype=None):
+        self.dtype = np.dtype(dtype if dtype is not None
+                              else ocl_core.operator_dtype())
         self.nn = int(level.nnmax)
         self.nt = (2*int(level.nmax) + 1)**2
         self.n = tuple(int(v) for v in level.n)
         T, C, _Ct, S, ft2, pairs = operator_tables(level)
+        if self.dtype == np.complex64 and not ocl_core.fits_float32(ft2):
+            # the channel spectra carry the de-normalised 1/r**(j+n+1)
+            # magnitudes; on a fine enough pitch they leave float32's
+            # exponent range entirely, and narrowing would write inf
+            import warnings
+            warnings.warn(
+                "top-level M2L spectra reach %.3e, past float32's %.3e -- "
+                "keeping the operator in double on this level"
+                % (float(np.abs(ft2).max()), float(np.finfo(np.float32).max)))
+            self.dtype = np.dtype(np.complex128)
         self.S = S
         self.G = int(np.prod(S))
         self.ncell = int(np.size(level.idx))
@@ -276,6 +287,7 @@ class TopM2L(object):
         self._pad = ocl_core.zeros((self.nn,) + S, self.dtype)
         self._lnm = ocl_core.empty((self.nn,) + S, self.dtype)
         self._data = ocl_core.empty((self.ncell, self.nn), self.dtype)
+        self._stage = None       # host staging when the card is narrower
         self.prg = ocl_core.program(
             SOURCE, self.dtype,
             {'NN': self.nn, 'NT': self.nt, 'TG': self.TG},
@@ -302,7 +314,14 @@ class TopM2L(object):
         shape = (np.uint32(self.ncell), np.uint64(G), np.uint32(n1),
                  np.uint32(n2), np.uint32(S1), np.uint32(S2))
         nq = (self.ncell*nn,)
-        self._data.set(np.ascontiguousarray(data, dtype=self.dtype), queue=q)
+        src = np.asarray(data)
+        if src.dtype != self.dtype or not src.flags.c_contiguous:
+            # as in the near field: one staging buffer, not one per call
+            if self._stage is None or self._stage.shape != src.shape:
+                self._stage = np.empty(src.shape, self.dtype)
+            self._stage[...] = src
+            src = self._stage
+        self._data.set(src, queue=q)
         self._pad.fill(self.dtype.type(0), queue=q)
         self.k_scatter(q, nq, None, self._data.data, self._idx.data,
                        self._pad.data, *shape)
@@ -325,4 +344,16 @@ class TopM2L(object):
         self.fft.ifft(out)
         self.k_gather(q, nq, None, out.data, self._idx.data,
                       self._data.data, *shape)
-        return self._data.get(queue=q)
+        want = np.asarray(data).dtype
+        if self.dtype == want:
+            return self._data.get(queue=q)
+        # The caller rebinds the level's data array to whatever this
+        # returns, and the rest of the tree works in double, so a
+        # narrowed operator widens on the way back rather than quietly
+        # changing the host's precision downstream. The narrow staging
+        # buffer is kept for the same reason as the near field's: it is
+        # written before it is read and never escapes.
+        if self._stage is None or self._stage.shape != self._data.shape:
+            self._stage = np.empty(self._data.shape, self.dtype)
+        self._data.get(queue=q, ary=self._stage)
+        return self._stage.astype(want)
