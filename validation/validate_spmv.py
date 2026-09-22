@@ -269,11 +269,81 @@ def main():
             check('G: reordered matvec within reorder tolerance',
                   worst < 1e-5, 'worst rel %.2e' % worst)
 
+    palette_checks()
+
     if FAIL:
         print('FAIL: %d check(s): %s' % (len(FAIL), FAIL))
         return 1
     print('all checks passed')
     return 0
+
+
+def palette_checks():
+    """The palette basis form (:mod:`palette`, SPPEEC_PALETTE=1).
+
+    Its whole claim is EXACTNESS -- it replaces an operator, so a form
+    that merely approximates would move every answer silently. Both
+    directions are checked bit-for-bit against the dense-data products,
+    across several expansion blocks, and the refusal paths are checked
+    too: a palette that quietly declined to be exact would be worse
+    than one that refused.
+    """
+    import palette
+    from spmv import spmv_c
+
+    rng = np.random.default_rng(11)
+    nrow, ncol, nnz = 400000, 300000, 2000000
+    indptr = np.sort(rng.integers(0, nnz, ncol - 1))
+    indptr = np.r_[0, indptr, nnz].astype(np.int32)
+    indices = rng.integers(0, nrow, nnz).astype(np.int32)
+    vals = np.array([-1.0, -0.04, 0.04, 1.0])       # the DBC basis's own
+    data = vals[rng.integers(0, 4, nnz)]
+    A = sp.csc_matrix((data, indices, indptr), shape=(nrow, ncol))
+
+    keep = palette.MIN_NNZ
+    try:
+        palette.MIN_NNZ = 1 << 20                   # engage at test size
+        P = palette.PaletteCSC.maybe(A)
+        check('palette: builds on a four-value basis', P is not None)
+        if P is None:
+            return
+        check('palette: several expansion blocks', P._cols.size - 1 >= 2,
+              '%d blocks' % (P._cols.size - 1))
+        check('palette: one byte per nonzero',
+              P.code.nbytes == A.nnz, '%d for %d nonzeros'
+              % (P.code.nbytes, A.nnz))
+        check('palette: table round-trips exactly',
+              np.array_equal(P.table[P.code], A.data))
+
+        x = rng.standard_normal(ncol)
+        y = rng.standard_normal(nrow)
+        check('palette: A @ x bit-identical',
+              np.array_equal(P.matvec(x), A @ x))
+        check('palette: A.T @ y bit-identical',
+              np.array_equal(P.rmatvec(y), A.T @ y))
+
+        v = rng.standard_normal(ncol) + 1j*rng.standard_normal(ncol)
+        w = rng.standard_normal(nrow) + 1j*rng.standard_normal(nrow)
+        check('palette: complex forward bit-identical',
+              np.array_equal(spmv_c(P, v), spmv_c(A, v)))
+        check('palette: complex transposed bit-identical',
+              np.array_equal(spmv_c(P.T, w), spmv_c(A.T.tocsr(), w)))
+        check('palette: transpose is a view, not a copy',
+              P.T.T is P and P.T.nbytes() == 0)
+
+        B = sp.csc_matrix((rng.standard_normal(nnz), indices, indptr),
+                          shape=(nrow, ncol))
+        check('palette: refuses too many distinct values',
+              palette.PaletteCSC.maybe(B) is None)
+        check('palette: refuses a row-compressed matrix',
+              palette.PaletteCSC.maybe(A.tocsr()) is None)
+        check('palette: refuses float32 data',
+              palette.PaletteCSC.maybe(A.astype(np.float32)) is None)
+    finally:
+        palette.MIN_NNZ = keep
+    check('palette: declines below its size threshold',
+          palette.PaletteCSC.maybe(A) is None,
+          'MIN_NNZ=%d vs nnz=%d' % (palette.MIN_NNZ, A.nnz))
 
 
 if __name__ == '__main__':

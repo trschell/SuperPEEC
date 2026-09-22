@@ -1587,18 +1587,76 @@ class WireBondSolver:
         out[self.efg:] = v_w
         return out[:self.efg], out[self.efg:]
 
+    def _basis(self):
+        """The stacked basis as the operator should multiply it.
+
+        Its values come from a tiny set -- four distinct numbers across
+        48 M nonzeros on the DBC ladder -- so it is held as one byte
+        per entry against a table, and the float64 data array is
+        dropped (385 MB at R4, ~1.5 GB at R5). The products are
+        bit-identical; :mod:`palette` carries the argument.
+
+        Converted on FIRST USE, not at build time: construction slices
+        this matrix, multiplies it by itself for the Gram, and the KCL
+        check reads it, all of which want a real scipy matrix. By the
+        first product nothing needs it again.
+
+        OFF BY DEFAULT (``SPPEEC_PALETTE=1`` opts in), on measurement.
+        It is exact and it does free the data array -- 333 MB at R4,
+        553 at R5 -- but freeing resident state only moves the PEAK
+        where that state is what sets the peak, and at R5 the peak
+        belongs to the lgmres Krylov basis. Measured against the same
+        build: R4 peak -3.0% for wall +3.3%, R5 peak -0.5% for wall
+        +3.0%. The second is a bad trade and the first is a wash.
+
+        Where it earns its keep: a host-memory-bound run, and
+        ``method = "gmres_stream"``, which puts the Krylov basis on
+        the NVMe and leaves this matrix a much larger share of what
+        remains.
+        """
+        op = getattr(self, '_Bop', None)
+        if op is None:
+            op = self.Bmat
+            if os.environ.get('SPPEEC_PALETTE') == '1':
+                try:
+                    import palette
+                    pal = palette.PaletteCSC.maybe(self.Bmat)
+                except Exception as exc:
+                    warnings.warn("palette basis unavailable (%s: %s)"
+                                  % (type(exc).__name__, exc))
+                    pal = None
+                if pal is not None:
+                    # the index arrays are shared, so this frees the
+                    # data array and nothing else
+                    op = self.Bmat = pal
+            self._Bop = op
+        return op
+
+    def _basisT(self):
+        """``B.T``, as a view either way (scipy CSC->CSR, or the
+        palette's own transpose)."""
+        BT = getattr(self, '_BmatT', None)
+        if BT is None:
+            BT = self._basis().T
+            if getattr(BT, 'format', None) != 'palette':
+                BT = BT.tocsr()
+            self._BmatT = BT
+        return BT
+
     def _matvec(self, x):
         self.matvecs += 1
         buf = getattr(self, '_vfw', None)
         if buf is None or buf.size != self.efg + self.nwel:
             buf = self._vfw = np.empty(self.efg + self.nwel,
                                        dtype=np.complex128)
-        BT = getattr(self, '_BmatT', None)
-        if BT is None:
-            BT = self._BmatT = self.Bmat.T.tocsr()
-        i = spmv_c(self.Bmat, x)
+        B, BT = self._basis(), self._basisT()
+        # NOT a kept buffer. A vector this size is served by mmap, so
+        # freeing it returns it to the OS outright -- holding one
+        # instead converted 808 MB of R5 transient into 808 MB of
+        # permanent resident, and masked most of the palette's saving
+        # when both were measured together.
+        i = spmv_c(B, x)
         self._coupled(i[:self.efg], i[self.efg:], out=buf)
-        del i                                # before the transposed product
         return spmv_c(BT, buf)
 
     def _precond(self, vec):
@@ -1646,7 +1704,7 @@ class WireBondSolver:
         t0 = time.perf_counter()
         v_f0, v_w0 = self._coupled(self.ihat_f*current,
                                    self.ihat_w*current)
-        rhs = -spmv_c(self.Bmat.T, np.concatenate([v_f0, v_w0]))
+        rhs = -spmv_c(self._basisT(), np.concatenate([v_f0, v_w0]))
         Aop = LinearOperator((self.size,)*2, matvec=self._matvec,
                              dtype=np.complex128)
         Pop = LinearOperator((self.size,)*2, matvec=self._precond,
@@ -1658,7 +1716,7 @@ class WireBondSolver:
                                precision=precision)
         nrhs = np.linalg.norm(rhs)
         resid = (np.linalg.norm(rhs - Aop @ x)/nrhs if nrhs > 0 else 0.0)
-        i = spmv_c(self.Bmat, x)
+        i = spmv_c(self._basis(), x)
         i_f = self.ihat_f*current + i[:self.efg]
         i_w = self.ihat_w*current + i[self.efg:]
         v_f, v_w = self._coupled(i_f, i_w)
