@@ -416,8 +416,15 @@ class WireCoupler(WireNear):
             blk = self.C[:, off:off + size].tocsr()
             self._Cn.append(blk)
             self._CnT.append(blk.T.tocsr())
-        if M.numlevels > 1:
-            self._build_far()
+        # DEFERRED (2026-09-22). These tables are the largest
+        # solver-side store -- 610 MB at R4, measured -- and NOTHING in
+        # the solver build reads them: only the traversal hooks do, at
+        # solve time. Building them in the constructor left them
+        # standing through the multigrid hierarchy build, which is
+        # where the host peak is, for no reason at all. Built on first
+        # traversal instead; see :meth:`ensure_far`.
+        self._far = None
+        self._far_wanted = bool(M.numlevels > 1)
         self._build_wire_far()
         self.i_f = None
         self.i_w = None
@@ -475,6 +482,18 @@ class WireCoupler(WireNear):
                         "-- frame decode broke" % (leaf.orientation, g))
                 cg[g] = a[0]
         return cg
+
+    def ensure_far(self):
+        """The far tables, built on first use.
+
+        Deferred out of the constructor so they do not stand through
+        the hierarchy build (see there). Idempotent; returns the
+        tables, or None when this tree has a single level and the
+        traversal never asks for them.
+        """
+        if self._far is None and self._far_wanted:
+            self._build_far()
+        return self._far
 
     def _build_far(self):
         from special import sph_harm_of_cos
@@ -566,8 +585,9 @@ class WireCoupler(WireNear):
         k = self._leaf_index(leaf)
         if self.M.numlevels == 1:
             return
+        far_tbl = self.ensure_far()
         for s in range(len(self.segments)):
-            ent = self._far[k][s]
+            ent = far_tbl[k][s]
             if ent is None:
                 continue
             far, G = ent
@@ -586,8 +606,11 @@ class WireCoupler(WireNear):
 
     def pre_l2p(self, leaf):
         k = self._leaf_index(leaf)
+        far_tbl = self.ensure_far()
+        if far_tbl is None:
+            return
         for s in range(len(self.segments)):
-            ent = self._far[k][s]
+            ent = far_tbl[k][s]
             if ent is None:
                 continue
             far, G = ent
