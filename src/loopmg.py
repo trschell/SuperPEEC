@@ -57,6 +57,26 @@ if os.environ.get('SPPEEC_SPMV') != '0':
         _CSRMV, _CSRMV8, _JACOBI8 = {}, {}, {}
 
 
+def _triplets_to_csr(rows, cols, vals, n):
+    """CSR from duplicate-free int32 triplets in one counting-sort
+    pass into preallocated output, columns then sorted in place.
+
+    scipy's ``csr_matrix((v, (r, c)))`` does the same pass but follows
+    it with ``sum_duplicates``, which sorts every entry to look for
+    duplicates that cannot exist here, with the temporaries that
+    implies at 70 M entries."""
+    from scipy.sparse import _sparsetools
+    nnz = int(rows.size)
+    indptr = np.empty(n + 1, dtype=np.int32)
+    indices = np.empty(nnz, dtype=np.int32)
+    data = np.empty(nnz, dtype=vals.dtype)
+    _sparsetools.coo_tocsr(n, n, nnz, rows, cols, vals,
+                           indptr, indices, data)
+    A = sp.csr_matrix((data, indices, indptr), shape=(n, n))
+    A.sort_indices()
+    return A
+
+
 def _int8_ok(data):
     """True when the entries store losslessly in int8 (the {4, +-1}
     Gram and 0/1 prolongators do; a deep Galerkin level could in
@@ -640,8 +660,21 @@ class GeoMG:
         probes are 0/1 vectors, so every sum is an exact integer:
         the assembled values equal the SpGEMM's exactly (verified),
         only the storage order differs. Transient: two fine vectors
-        per probe (~100 MB at R4 vs ~1.8 GB)."""
+        per probe (~100 MB at R4 vs ~1.8 GB).
+
+        The triplets land in preallocated int32/float32 arrays behind
+        a fill pointer, not in per-probe lists. The lists were int64,
+        were concatenated (a second copy) and copied again to int32 by
+        the COO constructor, whose `tocsr` then sorted the lot to sum
+        duplicates -- and that instant, ~70 M entries and 2.4 GiB held
+        for 1.5 s at R5, was the whole run's high-water mark (the
+        2026-09-23 stage trace). There are no duplicates to sum: a
+        column has one colour, so each (row, column) pair is produced
+        by exactly one probe. The CSR is therefore assembled directly
+        from the triplets and only its column order made canonical."""
         nc = P0.shape[1]
+        if nc >= (1 << 31):
+            raise ValueError("coarse level past int32 indexing")
         m1 = int(bs1[:, 1].max()) + 2
         m2 = int(bs1[:, 2].max()) + 2
         ckey = ((nrm1*(int(bs1[:, 0].max()) + 2)
@@ -649,7 +682,13 @@ class GeoMG:
         order = np.argsort(ckey, kind='stable')
         skey = ckey[order]
         P0T = P0.T.tocsr()
-        rows_i, cols_i, vals_i = [], [], []
+        # ~10.7 entries per coarse row measured across the geometry
+        # family; grown in place on the rare overrun
+        cap = 12*nc + 1024
+        rows = np.empty(cap, dtype=np.int32)
+        cols = np.empty(cap, dtype=np.int32)
+        vals = np.empty(cap, dtype=self.dtype)
+        fill = 0
         mod = bs1 % 3
         for cn in range(3):
             base_sel = nrm1 == cn
@@ -694,15 +733,19 @@ class GeoMG:
                         i = np.searchsorted(skey, pk)
                         i = np.minimum(i, skey.size - 1)
                         ok = skey[i] == pk
-                        rows_i.append(r[ok])
-                        cols_i.append(order[i[ok]])
-                        vals_i.append(z[r[ok]].astype(self.dtype))
-        A1 = sp.csr_matrix(
-            (np.concatenate(vals_i), (np.concatenate(rows_i),
-                                      np.concatenate(cols_i))),
-            shape=(nc, nc))
-        A1.sum_duplicates()
-        return A1
+                        rk = r[ok]
+                        n = rk.size
+                        if fill + n > cap:
+                            cap = max(2*cap, fill + n)
+                            for arr in (rows, cols, vals):
+                                arr.resize(cap, refcheck=False)
+                        rows[fill:fill + n] = rk
+                        cols[fill:fill + n] = order[i[ok]]
+                        vals[fill:fill + n] = z[rk]
+                        fill += n
+        if fill >= (1 << 31):
+            raise ValueError("coarse operator past int32 indexing")
+        return _triplets_to_csr(rows[:fill], cols[:fill], vals[:fill], nc)
 
     def _aggregate(self, normal, base):
         """2x2x2 geometric agglomeration, per face orientation."""
