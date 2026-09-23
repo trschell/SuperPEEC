@@ -574,33 +574,6 @@ def fp32_cases(M, rng):
     del wide, nar
 
 
-def workspace_cases():
-    """The FMM data workspace's dtype (``SPPEEC_FMM_FP32``).
-
-    Complex64 only when asked for. Measured on both backends, no
-    Fortran kernel reads this array directly (see voxmodel), so the
-    flag needs no backend gate.
-    """
-    import voxmodel
-    import backend
-    keep = os.environ.get('SPPEEC_FMM_FP32')
-    try:
-        os.environ.pop('SPPEEC_FMM_FP32', None)
-        check("workspace: double by default",
-              voxmodel._workspace_dtype() == np.complex128)
-        os.environ['SPPEEC_FMM_FP32'] = '1'
-        check("workspace: complex64 when asked",
-              voxmodel._workspace_dtype() == np.complex64)
-        os.environ['SPPEEC_FMM_FP32'] = '0'
-        check("workspace: SPPEEC_FMM_FP32=0 keeps double",
-              voxmodel._workspace_dtype() == np.complex128)
-    finally:
-        if keep is None:
-            os.environ.pop('SPPEEC_FMM_FP32', None)
-        else:
-            os.environ['SPPEEC_FMM_FP32'] = keep
-
-
 def operator_cases():
     import backend
     if backend.name() != 'opencl':
@@ -641,7 +614,6 @@ def operator_cases():
 
     m2l_cases(M, rng)
     fp32_cases(M, rng)
-    workspace_cases()
 
     top = M.lv[int(M.numlevels) - 1]
     data = (rng.standard_normal(top.data.shape)

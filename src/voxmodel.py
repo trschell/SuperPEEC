@@ -34,32 +34,6 @@ import stencils as st
 MU0 = 4e-7*np.pi
 
 
-
-def _workspace_dtype():
-    """The FMM data workspace's dtype: complex64 on request, else double.
-
-    `_vhr_whole` is the concatenated leaf and level-0 data, 1.1 GB at
-    R5 in complex128. Measured on both paths, NO Fortran kernel reads
-    it: one matvec on the OpenCL path calls zero mp_fortran kernels
-    (the near field and the top-level M2L run on the card), and one
-    matvec on the CPU path calls only `p2pinto`, whose inputs are the
-    FFT-transformed slab spectra in pyfftw's own buffers and whose
-    output is a padded slab buffer. The leaf data enters and leaves
-    both paths through numpy gathers and scatters that cast on write
-    within a bounded chunk -- as do P2M and L2P. Nothing upcasts the
-    whole array, so ``SPPEEC_FMM_FP32=1`` halves it outright, and on
-    the device path the near field's host staging (415 MB at R5) goes
-    with it, because input and output dtypes then match.
-
-    Opt-in like SPPEEC_OCL_FP32, which it is meant to accompany: it
-    rounds the FMM's working vector to single at every stage, the same
-    ~1e-7 class as the device operator, against models solved to an
-    rtol of 1e-4.
-    """
-    import os
-    return (np.complex64 if os.environ.get('SPPEEC_FMM_FP32') == '1'
-            else np.complex128)
-
 def allocate(M, reuse=True):
     """Allocate the tree's solution buffer and alias the leaf views.
 
@@ -96,13 +70,12 @@ def allocate(M, reuse=True):
     sizes = [np.size(M.e.struc), np.size(M.f.struc), np.size(M.g.struc),
              np.size(M.lv[0].struc)]
     total = int(sum(sizes))
-    dt = _workspace_dtype()
     cur = getattr(M, '_vhr_whole', None)
-    if reuse and cur is not None and cur.size == total and cur.dtype == dt:
+    if reuse and cur is not None and cur.size == total:
         whole = cur
         whole[:] = 0
     else:
-        whole = np.zeros((total,), dtype=dt)
+        whole = np.zeros((total,), dtype=np.complex128)
         M._vhr_whole = whole
     off = 0
     for leaf, n in zip((M.e, M.f, M.g, M.lv[0]), sizes):
