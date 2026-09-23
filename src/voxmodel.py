@@ -326,7 +326,31 @@ class VoxelModel:
 
     def sigma_values(self):
         """Sorted distinct nonzero conductivities present, in S/m."""
+        tab = getattr(self.sigma, 'table', None)
+        if tab is not None:                    # palette: the table IS the answer
+            return tab[tab != 0.0].copy()
         return np.unique(self.sigma[self.sigma != 0.0])
+
+    def compact_sigma(self):
+        """Hold ``sigma`` as a byte grid plus a value table when it can.
+
+        The dense float32 grid is 800 MB at R5 for two distinct values
+        over a 9%-occupied box. :class:`sigmagrid.PaletteGrid` answers
+        every read this model makes -- indexing, scalar comparison,
+        distinct values -- bit for bit from 200 MB. Called by each
+        loader once the grid is final; ``SPPEEC_SIGMA_PALETTE=0`` keeps
+        the dense array. A grid with more than 255 values stays dense.
+        """
+        import os
+        if self.sigma is None or hasattr(self.sigma, 'table'):
+            return self
+        if os.environ.get('SPPEEC_SIGMA_PALETTE', '1') == '0':
+            return self
+        from sigmagrid import PaletteGrid
+        g = PaletteGrid.compact(self.sigma)
+        if g is not None:
+            self.sigma = g
+        return self
 
     def uniform_sigma(self):
         """The model's single conductivity, in S/m.

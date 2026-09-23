@@ -212,6 +212,7 @@ def read_pypeec(voxel_path, problem_path, ports=None, pitch_tol=0.02):
     m.dims = tuple(n)
     m.d = pitch
     m.sigma = sigma
+    m.compact_sigma()
     m.ports = plist
     freqs = sorted({float(sw['param']['freq']) for sw in sweeps.values()
                     if 'freq' in sw.get('param', {})})

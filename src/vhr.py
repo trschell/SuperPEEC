@@ -294,6 +294,7 @@ def read_vhr(path):
         else np.array([1.0])
     if not freq:
         print("%s: no frequencies specified, defaulting to 1 Hz" % m.name)
+    m.compact_sigma()
     return m
 
 

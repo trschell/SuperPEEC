@@ -779,6 +779,7 @@ class Problem:
                                  "declare film normal %s" % 'xyz'[film_normal])
             film_normal = 2
         m.film_normal = film_normal
+        m.compact_sigma()
         return m
 
     @staticmethod
