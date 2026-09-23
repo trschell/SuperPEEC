@@ -121,6 +121,19 @@ class _Stencil0:
         self.dtype = dtype
         self._buf = {}
 
+    def release_workspace(self):
+        """Drop the tiled work grids, keeping the tables.
+
+        Certification packs and sweeps once to prove this stencil
+        matches the reference, which leaves a (NT, 3, TL, TL, TL) grid
+        per key cached -- 262 MB at R4, measured, standing inside the
+        hierarchy build's peak. On the device path nothing ever calls
+        `matvec`/`jacobi` on this object again: only its TABLES are
+        read, and uploaded. `_tiled` allocates lazily, so a host apply
+        simply rebuilds what it needs on its next call.
+        """
+        self._buf = {}
+
     def _tiled(self, key):
         b = self._buf.get(key)
         if b is None:
@@ -500,6 +513,8 @@ class GeoMG:
         if use_basis:
             if got is not None:
                 self._sten0, self._wdi0_t = got
+                # the certification's tiled grids have done their job
+                self._sten0.release_workspace()
             self._mv0 = (mv0 if mv0 is not None else
                          self._sten0.matvec if got is not None else None)
             self.dtype = basis.dtype
@@ -585,6 +600,8 @@ class GeoMG:
                 got = None             # a solve; the csr path stands
             if got is not None:
                 self._sten0, self._wdi0_t = got
+                # the certification's tiled grids have done their job
+                self._sten0.release_workspace()
         Ac = self.levels[-1]
         # pinv rank decisions in float64 (the kernel is exact and must
         # be cut cleanly); STORAGE in the hierarchy dtype
