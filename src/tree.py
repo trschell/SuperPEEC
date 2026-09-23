@@ -1217,8 +1217,11 @@ class Tree:
         nn = np.size(adjnode, axis=1)
         (adjdat, adjind, adjindptr) = meshgraph_aux.adjmat(adjnode, node2fil,
                                                            adjnnz)
-        self.adjdat = adjdat.copy()
-        self.adjind = adjind.copy()
+        # Not kept on the tree. Copies of these two arrays were stored
+        # as `self.adjdat` / `self.adjind` and never read anywhere: the
+        # returned matrix owns the originals, so the copies were 414 MB
+        # of dead state at R5 (207 MB each, int32), O(N) and resident
+        # through the whole solve.
         return csr_matrix((adjdat, adjind, adjindptr), shape=(nn, nn))
 
     def node2e(self, vec):

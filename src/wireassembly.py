@@ -1098,6 +1098,17 @@ class WireBondSolver:
         from port_impedance import shrink_exact_f32
         shrink_exact_f32(self.Bmat)
         shrink_exact_f32(self.B)
+        self.release_incidence()
+        # The spanning forest (parent, pedge, psign, comp) and the cell
+        # index exist to BUILD the cycle basis and the chords, and to
+        # ground the particular current's Laplacian. Nothing past this
+        # constructor reads any of them -- audited: zero readers in the
+        # solve, the coupling, the re-tune, the validators, the studies
+        # -- yet they stood through the whole solve: five full-length
+        # int arrays, ~864 MB at R5. Released outright; a future reader
+        # gets None, which fails loudly rather than reading stale state.
+        self.parent = self.pedge = self.psign = self.comp = None
+        self.node_of_cell = None
         self.matvecs = 0
         self.t_setup = time.perf_counter() - t0
         if verbose:
@@ -1586,6 +1597,37 @@ class WireBondSolver:
         out[:self.efg] = self.whole[:self.efg]
         out[self.efg:] = v_w
         return out[:self.efg], out[self.efg:]
+
+    @property
+    def B(self):
+        """The filament incidence matrix, rebuilt on demand.
+
+        Every reader of it is CONSTRUCTION: adjacency, the basis and
+        KCL checks, the particular current's Laplacian, the spanning
+        forest. Nothing in the matvec, the coupling or the solve reads
+        it -- yet it stayed resident through the whole solve, 1.04 GB
+        at R5, directly under the high-water. So the constructor
+        releases it once it is done with it, and anything that asks
+        afterwards (a validator, an export) gets it rebuilt from the
+        same inputs: `sparse_incidence` is deterministic, so the
+        rebuild is the same matrix bit for bit.
+        """
+        B = getattr(self, '_B', None)
+        if B is None:
+            from port_impedance import shrink_exact_f32
+            B, _ = sparse_incidence(self.M, self.whole, self.efg,
+                                    self.nnode)
+            self._B = shrink_exact_f32(B)
+            B = self._B
+        return B
+
+    @B.setter
+    def B(self, value):
+        self._B = value
+
+    def release_incidence(self):
+        """Drop the incidence matrix; ``self.B`` rebuilds it if asked."""
+        self._B = None
 
     def _basis(self):
         """The stacked basis as the operator should multiply it.

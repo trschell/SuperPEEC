@@ -143,7 +143,23 @@ def dc_nodal_oracle(sol, current=1.0):
     r_f = np.concatenate([np.asarray(leaf.r, dtype=float)
                           * np.ones(np.size(leaf.idx))
                           for leaf, _, _ in sol.wc.leaves])
+    # the incidence matrix is RELEASED after construction (it is 1 GB at
+    # R5 and nothing past the build reads it) and rebuilt on demand from
+    # the same inputs; the contract is that the rebuild is the same
+    # matrix array for array, and that it is then cached
+    check('incidence matrix released after the build',
+          getattr(sol, '_B', 'unset') is None)
     B = sol.B
+    from equiterminal import sparse_incidence as _si
+    from port_impedance import shrink_exact_f32 as _sh
+    _ref = _sh(_si(sol.M, sol.whole, sol.efg, sol.nnode)[0])
+    check('incidence matrix rebuilt identically on demand',
+          B.format == _ref.format and B.data.dtype == _ref.data.dtype
+          and np.array_equal(B.indptr, _ref.indptr)
+          and np.array_equal(B.indices, _ref.indices)
+          and np.array_equal(B.data, _ref.data))
+    check('rebuilt incidence matrix is cached', sol.B is B)
+    del _ref
     G = (B.T @ sp.diags(1.0/r_f) @ B).tocsr()
     gw = []
     for j, w in enumerate(sol.wires):
