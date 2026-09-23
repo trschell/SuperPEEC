@@ -148,6 +148,45 @@ class CellIndex:
         return self._order[i]
 
 
+
+class _node_key_scratch(object):
+    """Run a node-KEY probe through a complex128 buffer, whatever the
+    workspace's dtype.
+
+    The incidence builders identify each filament's end nodes by
+    writing the node INDEX as a float key into ``lv0.data``, applying
+    ``connectA`` and decoding the key from the response. ``lv0.data``
+    is a slice of the FMM workspace, and when that workspace is
+    complex64 (``SPPEEC_FMM_FP32``) its 24-bit mantissa rounds every
+    key above 2**24 = 16,777,216 to the nearest even integer -- at R5
+    (18.04 M nodes) 628,992 keys, merging 629 k nodes with a neighbour.
+    The graph is then wrong, the basis built from it is
+    self-consistent (so the KCL check passes) and the solve converges
+    cleanly to the wrong circuit. That is how the first complex64
+    workspace shipped wrong (1c3a6ff, reverted b575c9f).
+
+    So the probe never runs in the workspace's precision: while this
+    is active ``lv0.data`` is a complex128 buffer of the same size,
+    and the workspace itself is untouched. Keys are exact in double to
+    2**53.
+    """
+
+    def __init__(self, lv0):
+        self.lv0 = lv0
+        self.saved = None
+
+    def __enter__(self):
+        d = self.lv0.data
+        if d.dtype != np.complex128:
+            self.saved = d
+            self.lv0.data = np.zeros(d.shape, dtype=np.complex128)
+        return self.lv0.data
+
+    def __exit__(self, *exc):
+        if self.saved is not None:
+            self.lv0.data = self.saved
+        return False
+
 def sparse_incidence(M, whole, efgsize, nodesize):
     """Explicit sparse incidence ``B`` (efg x nodes), entries +-1.
 
@@ -163,11 +202,12 @@ def sparse_incidence(M, whole, efgsize, nodesize):
     par = cells.sum(axis=1) % 2
     keys = np.arange(1, nodesize + 1, dtype=np.float64)
     resp = []
-    for p in (0, 1):
-        lv0.data[:] = 0.0
-        lv0.data[par == p] = keys[par == p]
-        ae, af, ag = M.connectA()
-        resp.append(np.real(np.concatenate([ae, af, ag])))
+    with _node_key_scratch(lv0) as data:
+        for p in (0, 1):
+            data[:] = 0.0
+            data[par == p] = keys[par == p]
+            ae, af, ag = M.connectA()
+            resp.append(np.real(np.concatenate([ae, af, ag])))
     whole[:] = 0.0
     beta = float(np.real(lv0.beta))
     r_ev, r_od = resp

@@ -574,6 +574,61 @@ def fp32_cases(M, rng):
     del wide, nar
 
 
+def workspace_cases():
+    """The FMM data workspace's dtype (``SPPEEC_FMM_FP32``).
+
+    Complex64 only when asked for. Measured on both backends, no
+    Fortran kernel reads this array directly (see voxmodel), so the
+    flag needs no backend gate.
+    """
+    import voxmodel
+    import backend
+    keep = os.environ.get('SPPEEC_FMM_FP32')
+    try:
+        os.environ.pop('SPPEEC_FMM_FP32', None)
+        check("workspace: double by default",
+              voxmodel._workspace_dtype() == np.complex128)
+        os.environ['SPPEEC_FMM_FP32'] = '1'
+        check("workspace: complex64 when asked",
+              voxmodel._workspace_dtype() == np.complex64)
+        os.environ['SPPEEC_FMM_FP32'] = '0'
+        check("workspace: SPPEEC_FMM_FP32=0 keeps double",
+              voxmodel._workspace_dtype() == np.complex128)
+        # THE failure that shipped once (1c3a6ff): the incidence builders
+        # probe node identity by writing the node INDEX as a float key
+        # into lv0.data, and a complex64 workspace rounds every key above
+        # 2**24 to even. The probe must run in a double buffer whatever
+        # the workspace holds. Tested exactly at the threshold.
+        from equiterminal import _node_key_scratch
+
+        class _Lv(object):
+            pass
+        lv0 = _Lv()
+        n = 1000
+        lv0.data = np.zeros(n, dtype=np.complex64)
+        keys = np.arange((1 << 24) + 1, (1 << 24) + 1 + n, dtype=np.float64)
+        with _node_key_scratch(lv0) as d:
+            d[:] = keys
+            seen = np.real(lv0.data).copy()          # what connectA reads
+        check("key probe: keys above 2**24 exact through the scratch",
+              np.array_equal(seen, keys))
+        check("key probe: complex64 workspace untouched and restored",
+              lv0.data.dtype == np.complex64 and not lv0.data.any())
+        lv0.data[:] = keys.astype(np.complex64)
+        check("key probe: the same keys stored directly in complex64 corrupt",
+              int((np.real(lv0.data) != keys).sum()) == n // 2,
+              "%d of %d rounded" % (int((np.real(lv0.data) != keys).sum()), n))
+        lv0.data = np.zeros(n, dtype=np.complex128)
+        with _node_key_scratch(lv0) as d:
+            check("key probe: a double workspace is used in place",
+                  d is lv0.data)
+    finally:
+        if keep is None:
+            os.environ.pop('SPPEEC_FMM_FP32', None)
+        else:
+            os.environ['SPPEEC_FMM_FP32'] = keep
+
+
 def operator_cases():
     import backend
     if backend.name() != 'opencl':
@@ -614,6 +669,7 @@ def operator_cases():
 
     m2l_cases(M, rng)
     fp32_cases(M, rng)
+    workspace_cases()
 
     top = M.lv[int(M.numlevels) - 1]
     data = (rng.standard_normal(top.data.shape)

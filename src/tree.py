@@ -1131,11 +1131,13 @@ class Tree:
         keys = np.arange(1, nn + 1, dtype=np.float64)
         saved = np.array(lv0.data)
         resp = []
-        for p in (0, 1):
-            lv0.data[:] = 0.0
-            lv0.data[par == p] = keys[par == p]
-            (ae, af, ag) = self.connectA()
-            resp.append(np.real(np.concatenate([ae, af, ag])))
+        from equiterminal import _node_key_scratch
+        with _node_key_scratch(lv0) as data:      # exact keys, see there
+            for p in (0, 1):
+                data[:] = 0.0
+                data[par == p] = keys[par == p]
+                (ae, af, ag) = self.connectA()
+                resp.append(np.real(np.concatenate([ae, af, ag])))
         lv0.data[:] = saved
         beta = float(np.real(lv0.beta))
         r_ev, r_od = resp
