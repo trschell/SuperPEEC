@@ -192,19 +192,24 @@ class Tree:
             if numlevels > 1:
                 leaf.struc = np.zeros((nnzsize[ii, 0],),
                                       dtype=fullstruc.dtype)
-                leaf.idx = np.zeros((nnzsize[ii, 0],), dtype=int)
-                leaf.idx0 = np.zeros((nnzsize[3, 1] + 1,), dtype=int)
+                # int32, not the platform int: the Fortran kernels take
+                # these as 4-byte integers, so an int64 array was BOTH
+                # twice the residency (0.5 GB at R5 across the leaves)
+                # AND a downcast copy on every kernel call, measured
+                # (f2py converts before it validates). Guarded below.
+                leaf.idx = np.zeros((nnzsize[ii, 0],), dtype=np.int32)
+                leaf.idx0 = np.zeros((nnzsize[3, 1] + 1,), dtype=np.int32)
                 leaf.above = lv[1]
                 ii += 1
         if numlevels > 1:
             nt = np.prod(ngroups)
             for level in range(1, numlevels):
-                lv[level].idx = np.zeros((nt,), dtype=int)
+                lv[level].idx = np.zeros((nt,), dtype=np.int32)
                 if level < numlevels-1:
                     lv[level].idx0 = np.zeros((int(nt/np.prod(lv[level].n)+1),),
-                                              dtype=int)
+                                              dtype=np.int32)
                 elif level == numlevels-1:
-                    lv[level].idx0 = np.zeros((2,), dtype=int)
+                    lv[level].idx0 = np.zeros((2,), dtype=np.int32)
                     lv[level].idx0[1] = nt
                 lv[level-1].xidx = np.zeros((nt,), dtype=int)
                 lv[level-1].yidx = np.zeros((nt,), dtype=int)
@@ -371,7 +376,10 @@ class Tree:
             for leaf, s in zip([leaf_e, leaf_f, leaf_g, lv[0], leaf_px,
                                 leaf_py, leaf_pz], strucs):
                 s = s.flatten()
-                leaf.idx = np.nonzero(s)[0]
+                if s.size >= (1 << 31):
+                    raise ValueError("flat grid of %d cells exceeds int32 "
+                                     "indexing" % s.size)
+                leaf.idx = np.nonzero(s)[0].astype(np.int32)
                 leaf.struc = s[leaf.idx]
             for leaf in [leaf_e, leaf_f, leaf_g, lv[0], leaf_px, leaf_py,
                          leaf_pz]:
