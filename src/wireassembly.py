@@ -849,6 +849,7 @@ class WireBondSolver:
         self.B, ncell = sparse_incidence(M, self.whole, self.efg,
                                          self.nnode)
         self.node_of_cell = CellIndex(ncell)
+        del ncell                  # the index keeps its own keys
         # share the coupler's copies -- filament_cells is linear in N
         self.fil_axis, self.fil_cell = wcs.fil_axis, wcs.fil_cell
         self.parent, self.pedge, self.psign, self.comp = _forest(
@@ -903,6 +904,7 @@ class WireBondSolver:
                         r0, float(l[0]), rho_pad)
             self.foot_cell.append(cells)
             self.foot_patch.append(patches)
+        del struc                  # read only by the foot search
         self.foot_node = [[self.node_of_cell[tuple(c)] for c in fc]
                           for fc in self.foot_cell]
         # chain aggregation and foot incidence (patch cells carry the
@@ -1017,8 +1019,21 @@ class WireBondSolver:
         self.size = self.Bmat.shape[1]
         self.nplaq, self.nd, self.nchord = Y.shape[1], S.shape[1], \
             Tf.shape[1]
+        del Y                      # bmat copied it; 2.6 GB at R5
         # KCL asserts with teeth
         self._assert_kcl()
+        # The incidence matrix, the spanning forest and the cell index
+        # have no reader past the KCL check (audited 2026-09-23: the
+        # cycle basis, the chords and the particular current are
+        # done). Released HERE, before the preconditioner is built,
+        # rather than at the end of the constructor: the factor's
+        # setup is the build's high-water mark, and these stood under
+        # it -- 1.9 GB at R5 (the 2026-09-24 plateau census). A later
+        # reader of B rebuilds it through the property; a reader of
+        # the others gets None and fails loudly.
+        self.release_incidence()
+        self.parent = self.pedge = self.psign = self.comp = None
+        self.node_of_cell = None
         if basis == 'overcomplete' and self.gram_solver == 'geo':
             # GEOMETRIC MG on the plaquettes, exact Schur over the
             # CHORDS ONLY, and the distribution block on its own tiny
@@ -1035,6 +1050,7 @@ class WireBondSolver:
             idx_yt = np.r_[0:self.nplaq,
                            self.nplaq + self.nd:self.size]
             Byt = self.Bmat[:, idx_yt].T.tocsr().astype(np.float32)
+            del idx_yt
             nrm, bse = loopmg.plaquette_geometry(
                 csc_prefix(self.Bmat, self.efg, self.nplaq),
                 self.fil_axis, self.fil_cell, self.nplaq)
@@ -1097,18 +1113,6 @@ class WireBondSolver:
         # full-precision copies of their own.
         from port_impedance import shrink_exact_f32
         shrink_exact_f32(self.Bmat)
-        shrink_exact_f32(self.B)
-        self.release_incidence()
-        # The spanning forest (parent, pedge, psign, comp) and the cell
-        # index exist to BUILD the cycle basis and the chords, and to
-        # ground the particular current's Laplacian. Nothing past this
-        # constructor reads any of them -- audited: zero readers in the
-        # solve, the coupling, the re-tune, the validators, the studies
-        # -- yet they stood through the whole solve: five full-length
-        # int arrays, ~864 MB at R5. Released outright; a future reader
-        # gets None, which fails loudly rather than reading stale state.
-        self.parent = self.pedge = self.psign = self.comp = None
-        self.node_of_cell = None
         self.matvecs = 0
         self.t_setup = time.perf_counter() - t0
         if verbose:
