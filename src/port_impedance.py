@@ -787,7 +787,10 @@ class _GeoMGFactor:
         # macro_idx=None keeps the historical positional split exactly,
         # including its contiguous slices.
         n = YT.shape[0]
-        self.loc = np.arange(min(nplaq, n))
+        # int32: the device block uploads it as int32 regardless, and
+        # as int64 the range alone was 400 MB at R5, resident through
+        # the solve for a `.size` and the host apply
+        self.loc = np.arange(min(nplaq, n), dtype=np.int32)
         if macro_idx is None:
             self.mac = np.arange(self.loc.size, n)
             self.rest = np.empty(0, dtype=np.intp)
@@ -917,8 +920,13 @@ class _GeoMGFactor:
                 # the device core holds its own copy of every level;
                 # __call__ never reaches the host V-cycle once it is
                 # up, so the host level-0 csr (if any), the certified
-                # stencil tiles and the basis are released. Coarse
-                # levels stay (small).
+                # stencil tiles, the basis, and the level-0 prolongator
+                # pair and Jacobi diagonals are released -- the device
+                # core took its own copies of those four in its
+                # constructor, and nothing on the host reads them
+                # afterwards (audited 2026-09-23: 1.1 GB at R5, the
+                # largest post-build host copies left). Coarse levels
+                # stay (small).
                 if os.environ.get('SPPEEC_KEEP_HOST_COPIES') != '1':
                     mg = self.mg
                     mg.levels[0] = None
@@ -926,6 +934,11 @@ class _GeoMGFactor:
                     mg._wdi0_t = None
                     mg._mv0 = None
                     self._basis = None
+                    if mg.Ps:
+                        mg.Ps[0] = None
+                        mg.PTs[0] = None
+                    mg.dinv[0] = None
+                    mg._wdi[0] = None
                     try:
                         import backend
                         backend.free_pools(device=False, pinned=True)
