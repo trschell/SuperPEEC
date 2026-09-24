@@ -810,8 +810,20 @@ class _GeoMGFactor:
             # slices where the split is the historical contiguous one
             # (the comment above about csr index order applies to those);
             # row-gather only when a caller supplied its own macro set
-            Yp = YT[:self.loc.size] if contiguous else YT[self.loc]
-            Ym = YT[self.loc.size:] if contiguous else YT[self.mac]
+            if contiguous:
+                # the leading rows of a csr are a PREFIX of its
+                # arrays: share them rather than slice-copy 1.8 GB at
+                # R5 while the caller still holds the whole matrix
+                nl = int(self.loc.size)
+                pl = int(YT.indptr[nl])
+                from scipy.sparse import csr_matrix
+                Yp = csr_matrix((YT.data[:pl], YT.indices[:pl],
+                                 YT.indptr[:nl + 1]),
+                                shape=(nl, YT.shape[1]))
+                Yp.has_sorted_indices = YT.has_sorted_indices
+                Ym = YT[nl:]
+            else:
+                Yp, Ym = YT[self.loc], YT[self.mac]
             del YT
             self.B = (Yp @ Ym.T).tocsr()
             C = (Ym @ Ym.T).toarray()
