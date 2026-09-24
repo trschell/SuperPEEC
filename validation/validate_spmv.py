@@ -237,10 +237,16 @@ def main():
     M2 = pr2.tree(m2)
     m2.prepare(M2, 1e5)
     sol2 = pr2.solver(M2, 1e5, model=m2)
-    fn = getattr(sol2.chol.__call__, '__func__', None)
-    cells = getattr(fn, '__closure__', None) or ()
-    geo = [c.cell_contents for c in cells
-           if type(c.cell_contents).__name__ == '_GeoMGFactor']
+    # the split exposes its factor as an attribute; the closure scan
+    # is kept for a preconditioner object that does not
+    g = getattr(sol2.chol, 'factor', None)
+    if type(g).__name__ == '_GeoMGFactor':
+        geo = [g]
+    else:
+        fn = getattr(sol2.chol.__call__, '__func__', None)
+        cells = getattr(fn, '__closure__', None) or ()
+        geo = [c.cell_contents for c in cells
+               if type(c.cell_contents).__name__ == '_GeoMGFactor']
     check('G: wire-path GeoMG reachable', len(geo) == 1)
     if geo:
         mg2 = geo[0].mg

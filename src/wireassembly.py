@@ -527,8 +527,13 @@ class WireEddySolver:
                                self.T.T @ v_w])
 
     def _precond(self, vec):
-        return (self.chol(np.real(vec))
-                + 1j*self.chol(np.imag(vec)))
+        # assembled into one complex128 result (see the wire-bond
+        # _precond below for why)
+        vec = np.asarray(vec)
+        out = np.empty(vec.shape[0], dtype=np.complex128)
+        out.real = self.chol(np.real(vec))
+        out.imag = self.chol(np.imag(vec))
+        return out
 
     # -- the solve -------------------------------------------------------
 
@@ -1068,16 +1073,37 @@ class WireBondSolver:
             class _GeoSplit:
                 nnz_ratio = geo.nnz_ratio
                 nmac = geo.nmac
+                factor = geo           # the GeoMG factor, for inspection
+
+                def apply_into(self, b, dst):
+                    """``dst[:] = M b`` for a real ``b`` (any float
+                    view), the same values ``__call__`` returns.
+
+                    One contiguous gather of the plaquette+chord part,
+                    the factor's float32 result, and the chord block
+                    rounded to float32 as before -- no float64 copy of
+                    the input, no widen-then-narrow round trip of the
+                    output (five full-length temporaries per call in
+                    the earlier form; the 2026-09-24 solve survey)."""
+                    # gathered in float32 directly: the factor rounds
+                    # its input to float32 either way (one rounding,
+                    # the same one), and a float64 gather was another
+                    # full-length temporary at the apply's peak
+                    yt = np.empty(size - nd, dtype=np.float32)
+                    yt[:nplaq] = b[:nplaq]
+                    yt[nplaq:] = b[nplaq + nd:]
+                    g = geo(yt)
+                    del yt
+                    dst[:nplaq] = g[:nplaq]
+                    dst[nplaq + nd:] = g[nplaq:]
+                    dst[nplaq:nplaq + nd] = np.float32(
+                        cholS(np.ascontiguousarray(b[nplaq:nplaq + nd],
+                                                   dtype=np.float64)))
+                    return dst
 
                 def __call__(self, b):
-                    b = np.float64(b)
-                    yt = np.concatenate([b[:nplaq], b[nplaq + nd:]])
-                    g = np.float64(geo(yt))
-                    out = np.empty(size)
-                    out[:nplaq] = g[:nplaq]
-                    out[nplaq + nd:] = g[nplaq:]
-                    out[nplaq:nplaq + nd] = cholS(b[nplaq:nplaq + nd])
-                    return np.float32(out)
+                    out = np.empty(size, dtype=np.float32)
+                    return self.apply_into(np.asarray(b), out)
 
             self.chol = _GeoSplit()
             if verbose:
@@ -1703,10 +1729,27 @@ class WireBondSolver:
         # when both were measured together.
         i = spmv_c(B, x)
         self._coupled(i[:self.efg], i[self.efg:], out=buf)
+        del i                      # dead once buf holds the response;
+        # it was standing under the second product's output and
+        # halves -- one full filament vector, 0.83 GB at R5, at the
+        # instant the 2026-09-24 solve survey put the run's peak
         return spmv_c(BT, buf)
 
     def _precond(self, vec):
-        return self.chol(np.real(vec)) + 1j*self.chol(np.imag(vec))
+        # the two real applies go straight into the halves of one
+        # complex128 result. The earlier form summed a float32 and a
+        # complex64 and left the Krylov solver to widen the sum: two
+        # more full-length temporaries per call at the solve's peak.
+        vec = np.asarray(vec)
+        out = np.empty(vec.shape[0], dtype=np.complex128)
+        into = getattr(self.chol, 'apply_into', None)
+        if into is None:
+            out.real = self.chol(np.real(vec))
+            out.imag = self.chol(np.imag(vec))
+        else:
+            into(np.real(vec), out.real)
+            into(np.imag(vec), out.imag)
+        return out
 
     def set_frequency(self, freq):
         """Retune the solver to a new frequency WITHOUT rebuilding
