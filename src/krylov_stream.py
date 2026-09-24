@@ -246,6 +246,14 @@ def _orthogonalise(V, k, vk, w, blk, H_col):
     H_col[k] = hk[0]
 
 
+def _apply_M(M, v):
+    """``M v`` in complex128, in place over ``v`` when ``M`` offers it."""
+    ip = getattr(M, 'apply_inplace', None)
+    if ip is not None and v.dtype == np.complex128 and v.flags.writeable:
+        return ip(v)
+    return np.asarray(M.matvec(v), np.complex128)
+
+
 def _combine(V, y, n, blk, dtype=np.complex128):
     """u = sum_j y[j] v_j over the file, in blocks."""
     u = np.zeros(n, dtype)
@@ -365,7 +373,7 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
             if nmv >= budget:
                 break
             V.reset()
-            vk = np.asarray(M.matvec(r), dt)
+            vk = _apply_M(M, r)          # r is ours; in place when M allows
             del r
             betap = float(np.linalg.norm(vk))
             ratio = betap/beta            # |M r| / |r|, refreshed below
@@ -381,8 +389,14 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
             done = False
             while True:
                 t = time.time()
-                w = np.asarray(M.matvec(np.asarray(A.matvec(
-                    np.asarray(vk, dt)), dt)), dt)
+                # vk goes to the operator as stored (complex64): its
+                # products are exact on float32 halves, and the
+                # complex128 copy that used to be made here was one
+                # full vector at the solve's peak. The preconditioner
+                # takes the operator's result in place when it can
+                # (the vector is ours and fresh), one vector more.
+                w = np.asarray(A.matvec(vk), dt)
+                w = _apply_M(M, w)
                 t_ops += time.time() - t
                 nmv += 1
                 # modified Gram-Schmidt against the streamed basis in
@@ -408,7 +422,10 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                 k += 1
                 breakdown = hk <= 1e-14*betap
                 if not breakdown:
-                    vk = V.append(w/hk)
+                    w /= hk
+                    vk = V.append(w)     # the stored complex64 copy
+                del w                    # dead once stored; it stood
+                # under the check's matvec as a whole extra vector
                 cycle_end = (k >= restart or nmv >= budget or breakdown)
                 # measure the true residual when the prediction says
                 # converged, and in any case every CHECK_EVERY steps:
@@ -427,7 +444,8 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                 u = _combine(V, y, n, blk)
                 u += x
                 t = time.time()
-                r = b - np.asarray(A.matvec(u), dt)
+                r = np.asarray(A.matvec(u), dt)
+                np.subtract(b, r, out=r)     # r = b - A u, no temporary
                 t_ops += time.time() - t
                 nmv += 1
                 nchecks += 1
@@ -468,7 +486,7 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                     x = u
                     break
                 del u, r
-            del vk, w
+            del vk                   # w is released as soon as it is stored
             if callback is not None:
                 callback(x)
             if done:

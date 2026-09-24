@@ -1019,8 +1019,30 @@ class WireBondSolver:
         if self._chords:
             Tf = sp.hstack([c[0] for c in self._chords], format='csc')
             Tw = sp.hstack([c[1] for c in self._chords], format='csc')
-        self.Bmat = sp.bmat([[sp.csc_matrix(Y), None, Tf],
-                             [None, S, Tw]], format='csc')
+        # Assembled as a 1x3 column stack of csc blocks, which scipy
+        # concatenates array-for-array: `bmat` on the 2x3 block form
+        # went through COO -- int64 rows, int64 columns and float64
+        # data for 199 M entries, then the csc conversion -- and that
+        # 1.5 s was the build's high-water mark at R5 (16.13 GiB in the
+        # 2026-09-24 stage trace) once the preconditioner's setup had
+        # been thinned. Y's rows extend over the wire rows for free
+        # (a csc's shape is not in its arrays); S moves down by the
+        # filament count through its row indices; the chord block is
+        # small. The result is sorted to the canonical form bmat
+        # produced, so every product downstream is bit-unchanged.
+        Yc = Y if Y.format == 'csc' else sp.csc_matrix(Y)
+        nrow = self.efg + self.nwel
+        blk_y = sp.csc_matrix((Yc.data, Yc.indices, Yc.indptr),
+                              shape=(nrow, Yc.shape[1]))
+        Sc = S.tocsc()
+        blk_s = sp.csc_matrix((Sc.data, Sc.indices + self.efg, Sc.indptr),
+                              shape=(nrow, Sc.shape[1]))
+        blk_t = sp.vstack([Tf, Tw], format='csc')
+        del Yc
+        self.Bmat = sp.hstack([blk_y, blk_s, blk_t], format='csc')
+        del blk_y, blk_s, blk_t
+        if not self.Bmat.has_sorted_indices:
+            self.Bmat.sort_indices()
         self.size = self.Bmat.shape[1]
         self.nplaq, self.nd, self.nchord = Y.shape[1], S.shape[1], \
             Tf.shape[1]
@@ -1751,6 +1773,22 @@ class WireBondSolver:
             into(np.imag(vec), out.imag)
         return out
 
+    def _precond_inplace(self, vec):
+        """``_precond`` written over its own complex128 input.
+
+        Sound because ``apply_into`` reads each range of its input
+        before it writes that range, and the chord block last; the
+        values are exactly ``_precond``'s. Only for a caller that owns
+        ``vec`` (the streamed solver, on the vector it just formed).
+        """
+        into = getattr(self.chol, 'apply_into', None)
+        if into is None or vec.dtype != np.complex128 \
+                or not vec.flags.writeable:
+            return self._precond(vec)
+        into(vec.real, vec.real)
+        into(vec.imag, vec.imag)
+        return vec
+
     def set_frequency(self, freq):
         """Retune the solver to a new frequency WITHOUT rebuilding
         (Tier 1, 2026-08-12): the only frequency-dependent physics is
@@ -1798,6 +1836,10 @@ class WireBondSolver:
                              dtype=np.complex128)
         Pop = LinearOperator((self.size,)*2, matvec=self._precond,
                              dtype=np.complex128)
+        # the streamed solver owns the vector it preconditions and
+        # may take the apply in place, one full-length vector fewer at
+        # the solve's peak; scipy's solvers never see this attribute
+        Pop.apply_inplace = self._precond_inplace
         n0 = self.matvecs
         from port_impedance import krylov_solve
         x, flag = krylov_solve(Aop, rhs, Pop, method=method, rtol=rtol,
