@@ -126,16 +126,18 @@ class _Stencil0:
     # behaves differently may prefer another edge.
     TL = int(os.environ.get('SPPEEC_STENCIL_TL', '4'))
 
-    def __init__(self, dtype, tables, tile_of, loc, shape):
+    def __init__(self, dtype, tables, flat, shape):
         self.jac, self.mv = _STEN[dtype.type]
         (self.nbt, self.nsrc, self.of, self.cf, self.sptr) = tables
         # ONE flat intp map replaces tile_of + the four loc arrays
         # (tier 3 bundle): five int64 vectors measured 549 MB at R4,
         # the flat index is 92 MB -- and a single fancy index is
-        # faster than a five-array one
-        TL = self.TL
-        self.flat = (((tile_of*3 + loc[0])*TL + loc[1])*TL
-                     + loc[2])*TL + loc[3]
+        # faster than a five-array one. `build` forms it in place
+        # (see there): this constructor used to chain the five arrays
+        # through four full-length temporaries while all five were
+        # still alive in the caller, and at R5 that second was the
+        # run's high-water mark once the probe assembly was gone.
+        self.flat = np.ascontiguousarray(flat, dtype=np.intp)
         self.n = int(self.flat.size)
         self.shape = shape              # (NT, 3, TL, TL, TL)
         self.dtype = dtype
@@ -313,11 +315,20 @@ class _Stencil0:
         of = np.asarray(of, np.int64)
         cf = np.asarray(cf, np.int8)
         sptr = np.asarray(sptr, np.int32)
-        # tiles
-        tc = base//TL
-        tkey = (tc[:, 0].astype(np.int64) << 42) \
-            | (tc[:, 1].astype(np.int64) << 21) | tc[:, 2]
+        # tiles. The key is formed column by column in one int64
+        # vector and released as soon as the tiles are known: a
+        # (n, 3) quotient array plus the key stood 1 GB at R5 for the
+        # whole tile step, under the flat map's own temporaries.
+        tkey = (base[:, 0]//TL).astype(np.int64)
+        tkey <<= 42
+        t = (base[:, 1]//TL).astype(np.int64)
+        t <<= 21
+        tkey |= t
+        t = base[:, 2]//TL
+        tkey |= t
+        del t
         ut, tile_of = np.unique(tkey, return_inverse=True)
+        del tkey
         nt = ut.size
         # neighbour table: 27 offsets per tile
         nbt = np.zeros((27, nt), np.int32, order='F')
@@ -337,16 +348,25 @@ class _Stencil0:
         # pack layout (NT, 3, TL, TL, TL) C-ordered; its .T is the
         # Fortran (X, Y, Z, ON, T) view, so the Fortran X axis is the
         # base-x local coordinate and OF rows are (dx, dy, dz)
-        loc = (normal.astype(np.intp),
-               (base[:, 2] % TL).astype(np.intp),
-               (base[:, 1] % TL).astype(np.intp),
-               (base[:, 0] % TL).astype(np.intp))
+        # the flat index ((tile*3 + normal)*TL + z)*TL + y)*TL + x,
+        # accumulated in place in the tile-index vector itself: one
+        # full-length array and one short-lived remainder at a time,
+        # where the tuple of four local coordinates plus the chained
+        # expression held nine
+        flat = np.ascontiguousarray(tile_of, dtype=np.intp)
+        del tile_of
+        flat *= 3
+        flat += normal
+        for k in (2, 1, 0):
+            flat *= TL
+            flat += base[:, k] % TL
         shape = (nt, 3, TL, TL, TL)
         s2 = _Stencil0(dtype, (np.asfortranarray(nbt), nsrc,
                                np.asfortranarray(
                                    of.T.astype(np.int32)),
                                cf, sptr),
-                       tile_of.astype(np.intp), loc, shape)
+                       flat, shape)
+        del flat
         s2.mode = mode
         # ---- certification ----------------------------------------
         # 'exact' mode: bitwise probe equality or bust. 'reordered'
