@@ -288,6 +288,76 @@ __kernel void sten_prolong_add(__global const int *col,
     if (i < n) xt[flat[i]] += x1[col[i]];
 }
 
+/* ---- level-0 aggregation from tile geometry (2026-09-25). An
+   aggregate is the set of same-normal plaquettes sharing base>>1 per
+   coarsened axis, and the tiles are base>>2, so every aggregate lies
+   inside one tile and one normal: a (TL>>shz, TL>>shy, TL>>shx) block
+   of slots. The prolongation reads the coarse index from a per-(tile,
+   normal, block) table instead of a per-plaquette column array; the
+   restriction sums the block's slots in slot order, where the host
+   has verified that this is the CSR's own order (ascending fine
+   index), so the bits are the same -- an empty slot adds an exact
+   zero. */
+#define NBLK(shz, shy, shx) ((TL >> (shz))*(TL >> (shy))*(TL >> (shx)))
+
+__kernel void sten_prolong_impl(__global const int *tab,
+                                __global const real_t *x1,
+                                __global const int *flat,
+                                __global real_t *xt,
+                                const unsigned int n,
+                                const int shz, const int shy,
+                                const int shx)
+{
+    const unsigned int i = get_global_id(0);
+    if (i >= n) return;
+    const size_t gid = (size_t)flat[i];
+    DECOMPOSE(gid, t, on, a1, a2, a3);
+    const int ny = TL >> shy, nx = TL >> shx;
+    const int blk = (((int)a1 >> shz)*ny + ((int)a2 >> shy))*nx
+                    + ((int)a3 >> shx);
+    const int nb = NBLK(shz, shy, shx);
+    xt[gid] += x1[tab[((size_t)t*3 + on)*nb + blk]];
+}
+
+/* The members of an aggregate are summed in the CSR's own order --
+   ascending fine index -- which is NOT a fixed loop nesting (the
+   plaquette numbering's axis priority varies by region), so each
+   coarse row carries its members' offsets inside the block, 3 bits
+   each in that order, and the count, in one uint. */
+__kernel void sten_restrict_impl(__global const int *inv_t,
+                                 __global const int *inv_b,
+                                 __global const uint *order,
+                                 __global const real_t *rt,
+                                 __global real_t *y,
+                                 const unsigned int nrow,
+                                 const int shz, const int shy,
+                                 const int shx)
+{
+    const unsigned int c = get_global_id(0);
+    if (c >= nrow) return;
+    const int ny = TL >> shy, nx = TL >> shx;
+    const int nb = NBLK(shz, shy, shx);
+    const int t = inv_t[c];
+    const int ob = inv_b[c];
+    const int on = ob / nb;
+    int blk = ob - on*nb;
+    const int bx = blk % nx; blk /= nx;
+    const int by = blk % ny; blk /= ny;
+    const int bz = blk;
+    const size_t base = ((size_t)t*3 + on)*TL*TL*TL
+                        + (((size_t)(bz << shz))*TL + (by << shy))*TL
+                        + (bx << shx);
+    const uint code = order[c];
+    const int cnt = (int)(code >> 24);
+    real_t acc = (real_t)0;
+    for (int k = 0; k < cnt; ++k) {
+        const uint off = (code >> (3*k)) & 7u;
+        acc += rt[base + ((size_t)(off >> 2)*TL + ((off >> 1) & 1u))*TL
+                  + (off & 1u)];
+    }
+    y[c] = acc;
+}
+
 /* out[i] = yp[i] - t[flat[i]]: the local block's final combination,
    read from the tiled solution without a flat copy of it */
 __kernel void sten_unpack_sub(__global const real_t *t,
@@ -381,7 +451,8 @@ class Stencil0(object):
         self._k = {n: ocl_core.kernel(self.prg, n)
                    for n in ('sten_mv_p', 'sten_res_t', 'sten_res_p',
                              'sten_jac_p', 'sten_jac_pw',
-                             'sten_prolong_add', 'sten_unpack_sub',
+                             'sten_prolong_add', 'sten_prolong_impl',
+                             'sten_restrict_impl', 'sten_unpack_sub',
                              'sten_pack', 'sten_unpack')}
         # Two tile grids, and only two: the V-cycle keeps level 0 in
         # them (x and its Jacobi partner; the residual takes the free
@@ -513,12 +584,37 @@ class Stencil0(object):
                               np.uint32(self.n))
         return rt
 
-    def t_prolong_add(self, col, x1):
-        """x += P x1 on the tiles, P one entry per row (``col``)."""
+    def t_prolong_add(self, P, x1):
+        """x += P x1 on the tiles; ``P`` is a one-per-row prolongator
+        (``.col``) or the implicit one from tile geometry (``.tab``)."""
         q = ocl_core.queue()
-        self._k['sten_prolong_add'](q, (self.n,), None, col.data, x1.data,
-                                    self._flat.data, self._cur.data,
-                                    np.uint32(self.n))
+        tab = getattr(P, 'tab', None)
+        if tab is not None:
+            shz, shy, shx = P.shifts
+            self._k['sten_prolong_impl'](q, (self.n,), None, tab.data,
+                                         x1.data, self._flat.data,
+                                         self._cur.data, np.uint32(self.n),
+                                         np.int32(shz), np.int32(shy),
+                                         np.int32(shx))
+            return
+        self._k['sten_prolong_add'](q, (self.n,), None, P.col.data,
+                                    x1.data, self._flat.data,
+                                    self._cur.data, np.uint32(self.n))
+
+    def t_restrict(self, R, rt, y):
+        """y = R r from the tile grid ``rt``; ``R`` is a remapped
+        OnesRestrict (``.spmv``) or the implicit one (``.inv_t``)."""
+        inv_t = getattr(R, 'inv_t', None)
+        if inv_t is None:
+            return R.spmv(rt, y)
+        q = ocl_core.queue()
+        shz, shy, shx = R.shifts
+        self._k['sten_restrict_impl'](q, (R.nrow,), None, inv_t.data,
+                                      R.inv_b.data, R.order.data, rt.data,
+                                      y.data, np.uint32(R.nrow),
+                                      np.int32(shz), np.int32(shy),
+                                      np.int32(shx))
+        return y
 
     def t_unpack(self, out):
         """The tiled x as a flat vector."""
@@ -531,3 +627,103 @@ class Stencil0(object):
                                    self._flat.data, yp.data, out.data,
                                    np.uint32(self.n))
         return out
+
+
+
+class ImplicitAggregation(object):
+    """Level-0 prolongation and restriction from tile geometry.
+
+    Built from the host's P0, the stencil's flat map and the level's
+    per-axis coarsening. Verifies, on the host, that every aggregate
+    is one whole (tile, normal, block) and one whole column -- raises
+    ValueError otherwise, so the caller keeps the explicit arrays --
+    and records, per coarse row, its members' offsets inside the block
+    in the CSR's own order (ascending fine index), so the device sums
+    exactly what the arrays would, in the same order. Tables: one int
+    per (tile, normal, block) for the prolongation; per coarse row a
+    tile, a packed (normal, block) and the packed order."""
+
+    def __init__(self, P0, flat, div, TL, nt):
+        # Everything here is O(n0) on the host and runs inside the
+        # preconditioner build, which sets the build's peak: int32
+        # throughout, checks by scatter and round trip rather than
+        # np.unique, intermediates released as they go. The first cut
+        # (nine int64 arrays and a transposed copy of P0) cost 1.4 GiB
+        # of host peak at R5 and put the build back above the solve.
+        import scipy.sparse as sp
+        M = sp.csr_matrix(P0)
+        counts = np.diff(M.indptr)
+        if M.nnz and (counts.max() != 1 or counts.min() != 1
+                      or not np.all(M.data == 1)):
+            raise ValueError("not a one-per-row 0/1 prolongator")
+        del counts
+        n0, nc = (int(v) for v in M.shape)
+        col = np.ascontiguousarray(M.indices, dtype=np.int32)
+        sh = [1 if int(d) == 2 else 0 for d in np.asarray(div)]
+        shz, shy, shx = sh[2], sh[1], sh[0]   # base axes (x, y, z) -> slot axes (z, y, x)
+        nz, ny, nx = TL >> shz, TL >> shy, TL >> shx
+        nb = nz*ny*nx
+        cell = TL*TL*TL
+        f32 = np.asarray(flat)
+        if f32.size and int(f32.max()) >= 2**31:
+            raise OverflowError("flat map past the 32-bit index")
+        f32 = f32.astype(np.int32)
+        loc = f32 % cell
+        z = (loc // (TL*TL)).astype(np.uint8)
+        y = ((loc // TL) % TL).astype(np.uint8)
+        x = (loc % TL).astype(np.uint8)
+        del loc
+        blk = (((z >> shz).astype(np.int32)*ny + (y >> shy))*nx
+               + (x >> shx)).astype(np.int32)
+        off = (((z & ((1 << shz) - 1)) << 2) | ((y & ((1 << shy) - 1)) << 1)
+               | (x & ((1 << shx) - 1))).astype(np.uint8)
+        del z, y, x
+        key = (f32 // cell)*np.int32(nb) + blk       # (tile*3 + normal)*nb + block
+        del f32, blk
+        # bijection between blocks and coarse columns, by scatter and
+        # round trip: every plaquette of a block names the same column,
+        # every column names one block, and every column has one
+        tab = np.full(int(nt)*3*nb, -1, np.int32)
+        tab[key] = col
+        if not np.array_equal(tab[key], col):
+            raise ValueError("aggregates are not whole tile blocks")
+        inv_key = np.full(nc, -1, np.int32)
+        inv_key[col] = key
+        if not (np.array_equal(inv_key[col], key)
+                and not np.any(inv_key < 0)
+                and np.array_equal(tab[inv_key], np.arange(nc, dtype=np.int32))):
+            raise ValueError("aggregates and coarse columns are not one to one")
+        del key
+        # the restriction's order: each column's members in ascending
+        # fine index (the CSR's canonical order); their block offsets
+        # packed 3 bits each in that order, the count in the top byte
+        cnt = np.bincount(col, minlength=nc)
+        if cnt.size and int(cnt.max()) > 8:
+            raise ValueError("an aggregate has more than 8 members")
+        ptr = np.zeros(nc + 1, np.int64)
+        np.cumsum(cnt, out=ptr[1:])
+        srt = np.argsort(col, kind='stable')          # members grouped by column, ascending index within
+        cols = col[srt]
+        k = (np.arange(n0, dtype=np.int64) - ptr[cols]).astype(np.uint32)
+        del cols
+        shifted = off[srt].astype(np.uint32) << (3*k)
+        del srt, k, off
+        order = np.bitwise_or.reduceat(shifted, ptr[:-1]).astype(np.uint32)
+        del shifted
+        order |= (cnt.astype(np.uint32) << 24)
+        inv_t = (inv_key // (3*nb)).astype(np.int32)
+        inv_b = (inv_key % (3*nb)).astype(np.int32)
+        del inv_key
+        self.shape = (int(n0), int(nc))
+        self.nrow = int(nc)
+        self.nnz = int(M.nnz)
+        self.shifts = (int(shz), int(shy), int(shx))
+        self.tab = ocl_core.to_device(tab)
+        self.inv_t = ocl_core.to_device(inv_t)
+        self.inv_b = ocl_core.to_device(inv_b)
+        self.order = ocl_core.to_device(order)
+        self.src_dtype, self.ones_only, self.int8_ok = 'implicit', True, True
+
+    def device_bytes(self):
+        return int(self.tab.nbytes + self.inv_t.nbytes + self.inv_b.nbytes
+                   + self.order.nbytes)

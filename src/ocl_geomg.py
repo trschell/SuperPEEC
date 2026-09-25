@@ -132,9 +132,25 @@ class GeoCore(object):
         # array once here; the prolongation adds into the tiles.
         self.tiled0 = hasattr(A0, 't_sweeps')
         self.P, self.R = [], []
+        self.aggregation0 = 'explicit'
         for i, Pm in enumerate(mg.Ps):
             remap = (np.asarray(sten.flat) if (i == 0 and self.tiled0)
                      else None)
+            if remap is not None and getattr(mg, 'divs', None) \
+                    and os.environ.get('SPPEEC_OCL_IMPLICIT_P0', '1') != '0':
+                # the aggregation from tile geometry: tables instead of
+                # a per-plaquette column array and a fine index list,
+                # when the host verifies it computes the same thing
+                try:
+                    import ocl_stencil
+                    agg = ocl_stencil.ImplicitAggregation(
+                        Pm, sten.flat, mg.divs[0], A0.TL, A0.nt)
+                    self.P.append(agg)
+                    self.R.append(agg)
+                    self.aggregation0 = 'implicit'
+                    continue
+                except ValueError as exc:
+                    self.aggregation0 = 'explicit (%s)' % exc
             try:
                 self.P.append(ocl_sparse.OnesProlong(Pm, dt))
                 self.R.append(ocl_sparse.OnesRestrict(Pm, dt, remap=remap))
@@ -193,8 +209,11 @@ class GeoCore(object):
     def device_bytes(self):
         """Resident device bytes, split into operator and workspace."""
         op = sum(A.device_bytes() for A in self.A)
-        op += sum(P.device_bytes() for P in self.P)
-        op += sum(R.device_bytes() for R in self.R)
+        seen = set()
+        for M in list(self.P) + list(self.R):
+            if id(M) not in seen:          # the implicit level-0 aggregation is one object for both
+                seen.add(id(M))
+                op += M.device_bytes()
         op += sum(d.nbytes for d in self.dinv
                   if d is not None) + self.pinv.nbytes
         ws = sum(v.nbytes for lst in (self._x, self._b, self._r, self._t)
@@ -221,10 +240,10 @@ class GeoCore(object):
         A0 = self.A[0]
         A0.t_sweeps(b, self.nu)
         rt = A0.t_residual(b)
-        self.R[0].spmv(rt, self._b[1])
+        A0.t_restrict(self.R[0], rt, self._b[1])
         self._x[1].fill(self.dtype.type(0), queue=ocl_core.queue())
         self._vcycle(1, self._b[1], self._x[1])
-        A0.t_prolong_add(self.P[0].col, self._x[1])
+        A0.t_prolong_add(self.P[0], self._x[1])
         A0.t_sweeps(b, self.nu)
 
     def _vcycle(self, lv, b, x):

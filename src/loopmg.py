@@ -505,6 +505,7 @@ class GeoMG:
         self.omega = float(omega)
         self.levels = []
         self.Ps = []
+        self.divs = []
         self._sten0 = None
         self._wdi0_t = None
         self._nnz0_est = 0
@@ -771,6 +772,9 @@ class GeoMG:
         """2x2x2 geometric agglomeration, per face orientation."""
         span = base.max(axis=0) - base.min(axis=0) + 1
         div = np.where(span > 2, 2, 1)            # semi-coarsening
+        # recorded for the device, which rebuilds the level-0
+        # aggregation from tile geometry (bookkeeping, no numerics)
+        self.divs.append(np.asarray(div, np.int64))
         cb = base//div[None, :]
         r0 = np.int64(cb[:, 0].max()) + 1
         r1 = np.int64(cb[:, 1].max()) + 1
