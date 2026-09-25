@@ -263,6 +263,42 @@ __kernel void scatter_sub(__global const real_t *src,
     const unsigned int i = get_global_id(0);
     if (i < n) dst[idx[i]] = src[i] - sub[i];
 }
+
+/* the same, for a local set that is the leading range */
+__kernel void sub_contig(__global const real_t *src,
+                         __global const real_t *sub,
+                         __global real_t *dst,
+                         const unsigned int n)
+{
+    const unsigned int i = get_global_id(0);
+    if (i < n) dst[i] = src[i] - sub[i];
+}
+
+/* csr_spmv over the NONEMPTY rows only: the same per-row reduction,
+   so the same bits, on a matrix whose row pointer would otherwise be
+   the whole cost (a 6-column coupling block over 49.6 M rows: 198 MB
+   of pointers for 2 M entries at R5). y is zeroed by the caller. */
+__kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
+void csr_spmv_rows(__global const data_t *data,
+                   __global const int *indices,
+                   __global const int *indptr,
+                   __global const int *rows,
+                   __global const real_t *x,
+                   __global real_t *y,
+                   const unsigned int nrow)
+{
+    __local real_t part[WG];
+    const unsigned int row = get_group_id(0);
+    const unsigned int lid = get_local_id(0);
+    if (row >= nrow) return;
+    const int a = indptr[row], b = indptr[row + 1];
+    real_t acc = (real_t)0;
+    for (int k = a + lid; k < b; k += WG)
+        acc += (real_t)data[k]*x[indices[k]];
+    part[lid] = acc;
+    const real_t tot = row_reduce(part, lid);
+    if (lid == 0) y[rows[row]] = tot;
+}
 """
 
 
@@ -672,6 +708,55 @@ class CSR(object):
                               self.dtype.type(omega),
                               np.uint32(self.shape[0]))
         return xout
+
+
+class CSRRows(object):
+    """A CSR matrix stored by its NONEMPTY rows: row ids, a row
+    pointer over those rows only, and the entries. ``spmv`` gives the
+    same bits as :class:`CSR` (the per-row kernel is the same
+    reduction), with the empty rows written as zero by a fill.
+
+    For the preconditioner's macro coupling block -- 49.6 M rows, six
+    columns, ~2 M entries at R5 -- the plain CSR was 198 MB of row
+    pointer for 16 MB of entries."""
+    WG = CSR.WG
+
+    def __init__(self, M, dtype=np.float32):
+        import scipy.sparse as sp
+        M = sp.csr_matrix(M)
+        self.dtype = np.dtype(dtype)
+        self.shape = tuple(int(v) for v in M.shape)
+        self.nnz = int(M.nnz)
+        cnt = np.diff(M.indptr)
+        rows = np.flatnonzero(cnt)
+        ptr = np.zeros(rows.size + 1, np.int32)
+        np.cumsum(cnt[rows], out=ptr[1:])
+        self.nrows = int(rows.size)
+        d64 = M.data.astype(np.float64)
+        self.int8_ok = bool(M.nnz and np.all(d64 == np.rint(d64))
+                            and np.abs(d64).max() <= 127)
+        self.data8 = bool(self.int8_ok
+                          and os.environ.get('SPPEEC_OCL_INT8', '1') != '0')
+        self.data = ocl_core.to_device(
+            M.data.astype(np.int8 if self.data8 else self.dtype))
+        self.indices = ocl_core.to_device(M.indices.astype(np.int32))
+        self.indptr = ocl_core.to_device(ptr)
+        self.rows = ocl_core.to_device(rows.astype(np.int32))
+        self.prg = program(self.dtype, self.WG, self.data8)
+        self._k = ocl_core.kernel(self.prg, 'csr_spmv_rows')
+
+    def device_bytes(self):
+        return int(self.data.nbytes + self.indices.nbytes
+                   + self.indptr.nbytes + self.rows.nbytes)
+
+    def spmv(self, x, y):
+        """``y = A x``."""
+        y.fill(self.dtype.type(0), queue=ocl_core.queue())
+        if self.nrows:
+            self._k(ocl_core.queue(), (self.nrows*self.WG,), (self.WG,),
+                    self.data.data, self.indices.data, self.indptr.data,
+                    self.rows.data, x.data, y.data, np.uint32(self.nrows))
+        return y
 
 
 class OnesProlong(object):

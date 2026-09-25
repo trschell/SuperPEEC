@@ -119,6 +119,26 @@ __kernel void gather_slab(__global const cplx_t *pad,
 """
 
 
+# One filament buffer on the card and one host staging buffer, shared
+# by the three orientations' near fields: their applies are sequential
+# and each downloads its result before returning, so the arrays only
+# ever needed to be as large as the largest orientation, not the sum of
+# the three (415 MB of card and of host at R5, now 144).
+_SHARED = {}
+
+
+def _shared(kind, dtype, n):
+    """A view of ``n`` entries of the shared buffer of ``kind``
+    ('dev' or 'host'), grown when a larger orientation asks."""
+    key = (kind, np.dtype(dtype))
+    buf = _SHARED.get(key)
+    if buf is None or buf.size < n:
+        buf = (ocl_core.empty((n,), dtype) if kind == 'dev'
+               else np.empty(n, dtype))
+        _SHARED[key] = buf
+    return buf[:n]
+
+
 class NearField(object):
     """Device state and apply for one leaf's near field."""
 
@@ -280,14 +300,14 @@ class NearField(object):
             # matvec at R5, which glibc does not hand back. The same
             # staging buffer serves the download, because the upload is
             # finished before anything writes the output.
-            if self._stage is None or self._stage.shape != src.shape:
-                self._stage = np.empty(src.shape, self.dtype)
+            self._stage = _shared('host', self.dtype,
+                                  int(src.size)).reshape(src.shape)
             self._stage[...] = src
             host = self._stage
         else:
             host = src
-        if self._data is None or self._data.shape != host.shape:
-            self._data = ocl_core.empty(host.shape, self.dtype)
+        self._data = _shared('dev', self.dtype,
+                             int(host.size)).reshape(host.shape)
         dev = self._data
         dev.set(host, queue=q)
         # the traversal passes the leaf's own buffer as both input and
@@ -343,8 +363,8 @@ class NearField(object):
             # R5 -- 415 MB per orientation per matvec, which PyOpenCL
             # has no pool to drain. It is written before it is read and
             # never escapes, so one buffer serves every call.
-            if self._stage is None or self._stage.shape != out.shape:
-                self._stage = np.empty(out.shape, self.dtype)
+            self._stage = _shared('host', self.dtype,
+                                  int(out.size)).reshape(out.shape)
             out.get(queue=q, ary=self._stage)
             out_host[...] = self._stage
             return out_host

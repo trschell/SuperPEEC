@@ -236,7 +236,19 @@ class GeoBlock(object):
         self.dtype = dt
         self.n = int(factor.n)
         self.nmac = int(factor.nmac)
-        self.loc = ocl_core.to_device(np.asarray(factor.loc, np.int32))
+        loc_h = np.asarray(factor.loc)
+        nloc = int(loc_h.size)
+        # The production split is the historical contiguous one: the
+        # local set is the leading range of the vector. Then the local
+        # right-hand side IS a view of the input, the local index array
+        # (198 MB at R5) need not exist on the card, and the gather and
+        # scatter through it are a view and a copy. A caller-supplied
+        # macro set keeps the indexed path.
+        self.contig = bool(nloc and loc_h[0] == 0
+                           and loc_h[-1] == nloc - 1
+                           and bool(np.all(np.diff(loc_h) == 1)))
+        self.loc = (None if self.contig
+                    else ocl_core.to_device(loc_h.astype(np.int32)))
         self.mac = (ocl_core.to_device(np.asarray(factor.mac, np.int32))
                     if self.nmac else None)
         # The identity set is never indexed on the device any more:
@@ -244,19 +256,22 @@ class GeoBlock(object):
         # kept only to check the partition below, on the host.
         rest = getattr(factor, 'rest', None)
         self.nrest = int(np.size(rest)) if rest is not None else 0
-        self.B = ocl_sparse.CSR(factor.B, dt) if self.nmac else None
+        # the coupling block by its nonempty rows: six columns do not
+        # need a row pointer over 49.6 M rows
+        self.B = ocl_sparse.CSRRows(factor.B, dt) if self.nmac else None
         self.BT = (ocl_sparse.CSR(factor.B.T.tocsr(), dt)
                    if self.nmac else None)
         self._lu_solve = factor._lu_solve
         self.S = factor.S
         self.MB = getattr(factor, '_MB', None)
-        nloc = int(np.size(factor.loc))
         if self.core.sizes[0] != nloc:
             raise RuntimeError(
                 "local block size %d does not match the hierarchy's level 0 "
                 "(%d)" % (nloc, self.core.sizes[0]))
         self._k_sub = ocl_core.kernel(
             ocl_sparse.program(dt, ocl_sparse.CSR.WG), 'scatter_sub')
+        self._k_sub_c = ocl_core.kernel(
+            ocl_sparse.program(dt, ocl_sparse.CSR.WG), 'sub_contig')
         # The apply writes its output over its input, which is only
         # sound if the three sets cover the vector: the identity set
         # is then the positions nothing else writes, and leaving the
@@ -277,7 +292,8 @@ class GeoBlock(object):
                 "vector" % (int((~cov).sum()), self.n))
         del cov
         self._bg = ocl_core.zeros((self.n,), dt)
-        self._rp = ocl_core.zeros((nloc,), dt)
+        self._rp = (self._bg[:nloc] if self.contig
+                    else ocl_core.zeros((nloc,), dt))
         self._yp = ocl_core.zeros((nloc,), dt)
         self._rm = ocl_core.zeros((self.nmac,), dt) if self.nmac else None
         self._bt = ocl_core.zeros((self.nmac,), dt) if self.nmac else None
@@ -298,7 +314,8 @@ class GeoBlock(object):
         # now either written or deliberately kept.
         out = self._bg
         out.set(np.ascontiguousarray(np.asarray(b, dt)), queue=q)
-        ocl_sparse.gather(out, self.loc, self._rp, dt)
+        if not self.contig:
+            ocl_sparse.gather(out, self.loc, self._rp, dt)
         yp = self.core.solve(self._rp, out=self._yp)
         if self.nmac:
             ocl_sparse.gather(out, self.mac, self._rm, dt)
@@ -323,10 +340,16 @@ class GeoBlock(object):
                 self.B.spmv(self._ym, self._rp)
                 self.core.solve(self._rp)          # result stays in `sub`
             nloc = int(yp.size)
-            self._k_sub(q, (nloc,), None, yp.data, sub.data,
-                        self.loc.data, out.data, np.uint32(nloc))
+            if self.contig:
+                self._k_sub_c(q, (nloc,), None, yp.data, sub.data,
+                              out.data, np.uint32(nloc))
+            else:
+                self._k_sub(q, (nloc,), None, yp.data, sub.data,
+                            self.loc.data, out.data, np.uint32(nloc))
             self._ym.set(np.ascontiguousarray(ym_cpu.astype(dt)), queue=q)
             ocl_sparse.scatter(self._ym, self.mac, out, dt)
+        elif self.contig:
+            _copy(out, yp, nbytes=int(yp.nbytes))
         else:
             ocl_sparse.scatter(yp, self.loc, out, dt)
         return np.float32(out.get(queue=q))
