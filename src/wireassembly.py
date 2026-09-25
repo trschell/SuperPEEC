@@ -1695,23 +1695,29 @@ class WireBondSolver:
         check reads it, all of which want a real scipy matrix. By the
         first product nothing needs it again.
 
-        OFF BY DEFAULT (``SPPEEC_PALETTE=1`` opts in), on measurement.
-        It is exact and it does free the data array -- 333 MB at R4,
-        553 at R5 -- but freeing resident state only moves the PEAK
-        where that state is what sets the peak, and at R5 the peak
-        belongs to the lgmres Krylov basis. Measured against the same
-        build: R4 peak -3.0% for wall +3.3%, R5 peak -0.5% for wall
-        +3.0%. The second is a bad trade and the first is a wash.
-
-        Where it earns its keep: a host-memory-bound run, and
-        ``method = "gmres_stream"``, which puts the Krylov basis on
-        the NVMe and leaves this matrix a much larger share of what
-        remains.
+        DEFAULT ON UNDER ``method = "gmres_stream"``, OFF UNDER lgmres
+        (decided with the user 2026-09-24, on measurement);
+        ``SPPEEC_PALETTE=1`` / ``=0`` override either way. Freeing
+        resident state only moves the PEAK where that state is what
+        sets the peak. Under lgmres the peak is the Krylov basis and
+        this was a wash (R4 -3.0% for wall +3.3%, R5 -0.5% for +3.0%).
+        Under the streamed solver, with the basis on the NVMe and the
+        solve at its copy floor, the peak is residency and the saving
+        arrives in full: R5 18.43 -> 17.19 GiB (-6.8%), post-solve
+        13.25 -> 11.97, for +7-10% of solve wall (R4: 2.58 -> 2.84 s
+        per matvec, the two basis products 0.30 -> 0.48 s). The
+        streamed method is the memory-over-wall choice already, so it
+        takes the palette; the wall is recoverable by a fused
+        code-and-table product kernel (5 B per entry streamed against
+        12), which is optimisation work outside this campaign.
         """
         op = getattr(self, '_Bop', None)
         if op is None:
             op = self.Bmat
-            if os.environ.get('SPPEEC_PALETTE') == '1':
+            env = os.environ.get('SPPEEC_PALETTE')
+            wanted = (env == '1' if env in ('0', '1')
+                      else bool(getattr(self, '_palette_default', False)))
+            if wanted:
                 try:
                     import palette
                     pal = palette.PaletteCSC.maybe(self.Bmat)
@@ -1827,6 +1833,10 @@ class WireBondSolver:
         _rd = getattr(self, 'redist', None)
         if _rd is not None:
             _rd.lean_slabs = bool(rtol >= 1e-5)
+        # the basis palette's default follows the method (see _basis):
+        # decided here, before the first product converts the basis
+        if getattr(self, '_Bop', None) is None:
+            self._palette_default = (method == 'gmres_stream')
         self.model.prepare(self.M, freq)
         t0 = time.perf_counter()
         v_f0, v_w0 = self._coupled(self.ihat_f*current,
