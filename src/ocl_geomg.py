@@ -36,6 +36,14 @@ import ocl_core
 import ocl_sparse
 
 
+def _sub_flat(a, b, out, dtype):
+    """``out = a - b`` on flat device vectors."""
+    k = ocl_core.kernel(ocl_sparse.program(dtype, ocl_sparse.CSR.WG),
+                        'sub_contig')
+    k(ocl_core.queue(), (int(out.size),), None, a.data, b.data, out.data,
+      np.uint32(out.size))
+
+
 def _copy(dst, src, nbytes=None):
     """Device-to-device copy of a whole array."""
     import pyopencl as cl
@@ -116,12 +124,24 @@ class GeoCore(object):
         # transpose keeps the pointers but still needs no values. At R5
         # that is 689 MB of the hierarchy. The general form stays as
         # the fallback for an aggregation that is not of that shape.
+        # Level 0 in tiles (2026-09-25): when level 0 is the stencil the
+        # V-cycle keeps x, its Jacobi partner and the residual in the
+        # stencil's two tile grids and never forms a flat level-0
+        # vector of its own. The restriction then reads the residual
+        # from the tiles, through the flat map folded into its index
+        # array once here; the prolongation adds into the tiles.
+        self.tiled0 = hasattr(A0, 't_sweeps')
         self.P, self.R = [], []
-        for Pm in mg.Ps:
+        for i, Pm in enumerate(mg.Ps):
+            remap = (np.asarray(sten.flat) if (i == 0 and self.tiled0)
+                     else None)
             try:
                 self.P.append(ocl_sparse.OnesProlong(Pm, dt))
-                self.R.append(ocl_sparse.OnesRestrict(Pm, dt))
+                self.R.append(ocl_sparse.OnesRestrict(Pm, dt, remap=remap))
             except ValueError:
+                if remap is not None:
+                    raise RuntimeError("the tiled level 0 needs a "
+                                       "one-per-row aggregation")
                 self.P.append(ocl_sparse.CSR(Pm, dt))
                 self.R.append(ocl_sparse.CSR(Pm.T.tocsr(), dt))
         # level 0's inverse diagonal is read only by the generic
@@ -139,10 +159,16 @@ class GeoCore(object):
         # of ours, and its Jacobi partner is unused when level 0 runs
         # its own sweeps (the stencil does). Both were allocated and
         # never read: 198 MB each at R5.
-        self._x = [ocl_core.zeros((n,), dt) for n in self.sizes]
+        # with level 0 in tiles, its flat solution and residual (198
+        # MB each at R5) do not exist either
+        self._x = [None if (i == 0 and self.tiled0)
+                   else ocl_core.zeros((n,), dt)
+                   for i, n in enumerate(self.sizes)]
         self._b = [None] + [ocl_core.zeros((n,), dt)
                             for n in self.sizes[1:]]
-        self._r = [ocl_core.zeros((n,), dt) for n in self.sizes]
+        self._r = [None if (i == 0 and self.tiled0)
+                   else ocl_core.zeros((n,), dt)
+                   for i, n in enumerate(self.sizes)]
         self._t = [None if (i == 0 and sweeps0)
                    else ocl_core.zeros((n,), dt)
                    for i, n in enumerate(self.sizes)]
@@ -190,6 +216,17 @@ class GeoCore(object):
         if cur is not x:
             _copy(x, cur)
 
+    def _vcycle0(self, b):
+        """One V-cycle with level 0 in the stencil's tiles; ``b`` flat."""
+        A0 = self.A[0]
+        A0.t_sweeps(b, self.nu)
+        rt = A0.t_residual(b)
+        self.R[0].spmv(rt, self._b[1])
+        self._x[1].fill(self.dtype.type(0), queue=ocl_core.queue())
+        self._vcycle(1, self._b[1], self._x[1])
+        A0.t_prolong_add(self.P[0].col, self._x[1])
+        A0.t_sweeps(b, self.nu)
+
     def _vcycle(self, lv, b, x):
         """One V-cycle at level ``lv``; ``x`` is updated in place."""
         if lv == len(self.A) - 1:
@@ -205,25 +242,38 @@ class GeoCore(object):
         self.P[lv].spmv_add(self._x[lv + 1], x)
         self._smooth(lv, x, b)
 
-    def solution(self):
-        """The level-0 solution buffer, live until the next solve.
-
-        ``solve`` computes into this and then copies it out, so a
-        caller that consumes the result before calling again needs no
-        destination of its own. One full-length vector at every scale.
-        """
-        return self._x[0]
-
-    def solve(self, r, out=None):
-        """``cycles`` V-cycles from a zero start, on a device vector."""
+    def _cycles(self, r):
+        if self.tiled0:
+            self.A[0].t_zero()
+            for _ in range(self.cycles):
+                self._vcycle0(r)
+            return None
         x = self._x[0]
         x.fill(self.dtype.type(0), queue=ocl_core.queue())
         for _ in range(self.cycles):
             self._vcycle(0, r, x)
-        if out is not None:
-            _copy(out, x)
-            return out
         return x
+
+    def solve(self, r, out):
+        """``cycles`` V-cycles from a zero start, on a device vector;
+        the result is written to ``out`` (which may alias ``r``: the
+        answer is unpacked after the last cycle)."""
+        x = self._cycles(r)
+        if self.tiled0:
+            return self.A[0].t_unpack(out)
+        if out is not x:
+            _copy(out, x)
+        return out
+
+    def solve_sub(self, r, yp, out):
+        """``out = yp - M r``: the solve and the subtraction in one,
+        read straight from the tiles when level 0 lives there. ``out``
+        may alias ``r``."""
+        x = self._cycles(r)
+        if self.tiled0:
+            return self.A[0].t_unpack_sub(yp, out)
+        _sub_flat(yp, x, out, self.dtype)
+        return out
 
 
 class GeoBlock(object):
@@ -295,6 +345,7 @@ class GeoBlock(object):
         self._rp = (self._bg[:nloc] if self.contig
                     else ocl_core.zeros((nloc,), dt))
         self._yp = ocl_core.zeros((nloc,), dt)
+        self._sub = None
         self._rm = ocl_core.zeros((self.nmac,), dt) if self.nmac else None
         self._bt = ocl_core.zeros((self.nmac,), dt) if self.nmac else None
         self._ym = ocl_core.zeros((self.nmac,), dt) if self.nmac else None
@@ -302,7 +353,7 @@ class GeoBlock(object):
     def solve_local(self, rp):
         """The local block solve for a host vector."""
         d = ocl_core.to_device(np.asarray(rp, self.dtype))
-        return self.core.solve(d).get(queue=ocl_core.queue())
+        return self.core.solve(d, d).get(queue=ocl_core.queue())
 
     def __call__(self, b):
         dt = self.dtype
@@ -316,40 +367,48 @@ class GeoBlock(object):
         out.set(np.ascontiguousarray(np.asarray(b, dt)), queue=q)
         if not self.contig:
             ocl_sparse.gather(out, self.loc, self._rp, dt)
-        yp = self.core.solve(self._rp, out=self._yp)
+        nloc = int(self._yp.size)
         if self.nmac:
+            yp = self.core.solve(self._rp, self._yp)
             ocl_sparse.gather(out, self.mac, self._rm, dt)
             self.BT.spmv(yp, self._bt)
             ym_cpu = self._lu_solve(
                 self.S, np.float64(self._rm.get(queue=q)
                                    - self._bt.get(queue=q)))
-            # The macro correction lands in the hierarchy's own level-0
-            # solution buffer. `yp` already holds the first solve, so
-            # the second has nothing left to preserve and needs no
-            # destination of its own.
-            sub = self.core.solution()
             if self.MB is not None:
                 # the kept macro columns: a dense host product instead
-                # of a second V-cycle, as on the CUDA path
-                sub.set(np.ascontiguousarray(
+                # of a second V-cycle, as on the CUDA path. One flat
+                # buffer for it, kept only where this branch exists
+                # (the small models whose MB fits the budget)
+                if self._sub is None:
+                    self._sub = ocl_core.zeros((nloc,), dt)
+                self._sub.set(np.ascontiguousarray(
                     (self.MB @ ym_cpu.astype(np.float32)).astype(dt)),
                     queue=q)
+                if self.contig:
+                    self._k_sub_c(q, (nloc,), None, yp.data,
+                                  self._sub.data, out.data,
+                                  np.uint32(nloc))
+                else:
+                    self._k_sub(q, (nloc,), None, yp.data, self._sub.data,
+                                self.loc.data, out.data, np.uint32(nloc))
             else:
                 self._ym.set(np.ascontiguousarray(ym_cpu.astype(dt)),
                              queue=q)
+                # rp was consumed by the first solve: it takes the
+                # correction's right-hand side, and the combined result
+                # yp - M(B ym) is written over it -- the local range of
+                # `out` itself when the split is contiguous -- straight
+                # from the tiles, with no flat solution buffer
                 self.B.spmv(self._ym, self._rp)
-                self.core.solve(self._rp)          # result stays in `sub`
-            nloc = int(yp.size)
-            if self.contig:
-                self._k_sub_c(q, (nloc,), None, yp.data, sub.data,
-                              out.data, np.uint32(nloc))
-            else:
-                self._k_sub(q, (nloc,), None, yp.data, sub.data,
-                            self.loc.data, out.data, np.uint32(nloc))
+                self.core.solve_sub(self._rp, yp, self._rp)
+                if not self.contig:
+                    ocl_sparse.scatter(self._rp, self.loc, out, dt)
             self._ym.set(np.ascontiguousarray(ym_cpu.astype(dt)), queue=q)
             ocl_sparse.scatter(self._ym, self.mac, out, dt)
-        elif self.contig:
-            _copy(out, yp, nbytes=int(yp.nbytes))
         else:
-            ocl_sparse.scatter(yp, self.loc, out, dt)
+            # no macro set: the answer goes straight to the local range
+            self.core.solve(self._rp, self._rp)
+            if not self.contig:
+                ocl_sparse.scatter(self._rp, self.loc, out, dt)
         return np.float32(out.get(queue=q))

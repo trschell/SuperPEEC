@@ -795,9 +795,14 @@ class OnesProlong(object):
 
 
 class OnesRestrict(object):
+    """``remap`` (2026-09-25): an int array over the fine index; the
+    stored indices become ``remap[indices]`` so the restriction reads
+    its fine entries from a TILE grid (the stencil's slots) instead of
+    a flat vector -- the same entries in the same order, so the same
+    bits, with no flat residual vector on the card."""
     """The transpose of an aggregation prolongator: a segmented sum."""
 
-    def __init__(self, P, dtype=np.float32):
+    def __init__(self, P, dtype=np.float32, remap=None):
         import scipy.sparse as sp
         M = sp.csr_matrix(sp.csr_matrix(P).T)
         if M.nnz and not np.all(M.data == 1):
@@ -807,8 +812,13 @@ class OnesRestrict(object):
         self.nnz = int(M.nnz)
         self.src_dtype, self.ones_only, self.int8_ok = \
             str(M.data.dtype), True, True
+        ind = M.indices
+        if remap is not None:
+            ind = np.asarray(remap)[ind]
+            if ind.size and int(ind.max()) >= 2**31:
+                raise OverflowError("restriction remap past the 32-bit index")
         self.indptr = ocl_core.to_device(M.indptr.astype(np.int32))
-        self.indices = ocl_core.to_device(M.indices.astype(np.int32))
+        self.indices = ocl_core.to_device(ind.astype(np.int32))
         self._k = ocl_core.kernel(program(self.dtype, CSR.WG),
                                   'ones_rowsum')
 
