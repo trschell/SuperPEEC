@@ -45,12 +45,19 @@ def _copy(dst, src):
                     byte_count=int(src.nbytes))
 
 SOURCE = """
+/* The Laplacian's values are node degrees and minus ones, and the
+   incidence matrix's are plus and minus ones: they travel as single
+   bytes (data_t) while every vector stays double (2026-09-25). The
+   arithmetic is unchanged -- a byte widened to double is the double
+   that was stored before. */
+typedef DATA data_t;
+
 /* Dirichlet in place: scale each entry by d[i]*d[j], then a root's
    diagonal becomes one. A root has d = 0, so its row and column
    vanish and the added (1 - d) leaves a clean unit pivot. */
 __kernel void dirichlet(__global const int *ptr,
                         __global const int *ind,
-                        __global real_t *dat,
+                        __global data_t *dat,
                         __global const real_t *d,
                         const unsigned int n)
 {
@@ -59,15 +66,15 @@ __kernel void dirichlet(__global const int *ptr,
     const real_t di = d[i];
     for (int p = ptr[i]; p < ptr[i + 1]; ++p) {
         const int j = ind[p];
-        real_t v = di*d[j]*dat[p];
+        real_t v = di*d[j]*(real_t)dat[p];
         if ((unsigned int)j == i) v += (real_t)1 - di;
-        dat[p] = v;
+        dat[p] = (data_t)v;
     }
 }
 
 __kernel void diag_inv(__global const int *ptr,
                        __global const int *ind,
-                       __global const real_t *dat,
+                       __global const data_t *dat,
                        __global real_t *out,
                        const unsigned int n)
 {
@@ -75,7 +82,7 @@ __kernel void diag_inv(__global const int *ptr,
     if (i >= n) return;
     real_t v = (real_t)0;
     for (int p = ptr[i]; p < ptr[i + 1]; ++p)
-        if ((unsigned int)ind[p] == i) v = dat[p];
+        if ((unsigned int)ind[p] == i) v = (real_t)dat[p];
     out[i] = (v != (real_t)0) ? (real_t)1/v : (real_t)1;
 }
 
@@ -102,9 +109,11 @@ __kernel void vmul(__global real_t *out, __global const real_t *a,
 """
 
 
-def _program(dt):
+def _program(dt, data8=True):
+    real = 'float' if np.dtype(dt) == np.float32 else 'double'
+    data = 'char' if data8 else real
     return ocl_core.program(SOURCE, ocl_sparse._DT[np.dtype(dt)],
-                            key='ocl_wire')
+                            {'DATA': data}, key='ocl_wire/' + data)
 
 
 def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000):
@@ -120,14 +129,22 @@ def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000):
          for n in ('dirichlet', 'diag_inv', 'axpy', 'xpay', 'vmul')}
 
     Bc = B.tocsr()
-    BTd_raw = ocl_sparse.transpose_device(Bc, dt)
+    # Byte-valued matrices (2026-09-25): B and B^T are plus and minus
+    # ones, the Laplacian's entries are node degrees and minus ones,
+    # so all three carry their values as single bytes -- the
+    # incidence pair was 2.5 GB of doubles during the product at R5,
+    # the Laplacian 1 GB through the whole iteration -- while every
+    # vector and every product stays double: a byte widened to double
+    # is the double that was stored, so the bits are unchanged.
+    BTd_raw = ocl_sparse.transpose_device(Bc, dt, data8=True)
     # a Laplacian row holds the node's neighbours plus itself, so the
     # bound is small; widen on overflow rather than sizing the private
     # array for the worst node in the graph
     maxc = 64
     while True:
         try:
-            Ld = ocl_sparse.spgemm_device(BTd_raw, Bc, dt, maxc=maxc)
+            Ld = ocl_sparse.spgemm_device(BTd_raw, Bc, dt, maxc=maxc,
+                                          data8=True)
             break
         except ocl_sparse.SpGEMMOverflow:
             if maxc >= 256:
@@ -186,7 +203,8 @@ def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000):
     del Bd
     # the KCL check needs the transpose again; one pass to rebuild it
     # beats carrying it through the whole iteration
-    BTd = ocl_sparse.CSR(ocl_sparse.transpose_device(Bc, dt), dt)
+    BTd = ocl_sparse.CSR(ocl_sparse.transpose_device(Bc, dt, data8=True),
+                         dt)
     chk = z                  # dead since the last preconditioner sweep
     BTd.spmv(ihat, chk)
     k['axpy'](q, (nn,), None, chk.data, dt.type(-1.0), b0.data,

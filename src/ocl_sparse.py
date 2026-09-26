@@ -323,6 +323,11 @@ void csr_spmv_rows(__global const data_t *data,
 # something wrong.
 
 SPGEMM_SOURCE = """
+/* Matrix VALUES come and go as data_t (a float, or a single byte for
+   the integer-valued incidence and Laplacian matrices, 2026-09-25);
+   the private accumulation is in real_t, exact for those integers. */
+typedef DATA data_t;
+
 /* insert (c, v) into the ascending private set; 0 on overflow */
 inline int ins(int *cols, real_t *vals, int *n, int c, real_t v)
 {
@@ -361,13 +366,13 @@ __kernel void spgemm_count(__global const int *aptr,
 
 __kernel void spgemm_fill(__global const int *aptr,
                           __global const int *aind,
-                          __global const real_t *adat,
+                          __global const data_t *adat,
                           __global const int *bptr,
                           __global const int *bind,
-                          __global const real_t *bdat,
+                          __global const data_t *bdat,
                           __global const int *cptr,
                           __global int *cind,
-                          __global real_t *cdat,
+                          __global data_t *cdat,
                           __global int *over,
                           const unsigned int nrow)
 {
@@ -378,12 +383,12 @@ __kernel void spgemm_fill(__global const int *aptr,
     int n = 0;
     for (int p = aptr[i]; p < aptr[i+1]; ++p) {
         const int k = aind[p];
-        const real_t av = adat[p];
+        const real_t av = (real_t)adat[p];
         for (int q = bptr[k]; q < bptr[k+1]; ++q)
-            if (!ins(cols, vals, &n, bind[q], av*bdat[q])) { over[0] = 1; return; }
+            if (!ins(cols, vals, &n, bind[q], av*(real_t)bdat[q])) { over[0] = 1; return; }
     }
     const int base = cptr[i];
-    for (int j = 0; j < n; ++j) { cind[base+j] = cols[j]; cdat[base+j] = vals[j]; }
+    for (int j = 0; j < n; ++j) { cind[base+j] = cols[j]; cdat[base+j] = (data_t)vals[j]; }
 }
 
 /* transpose: count, then scatter with an atomic cursor, then sort each
@@ -398,10 +403,10 @@ __kernel void trans_count(__global const int *aind,
 
 __kernel void trans_scatter(__global const int *aptr,
                             __global const int *aind,
-                            __global const real_t *adat,
+                            __global const data_t *adat,
                             __global int *cursor,
                             __global int *tind,
-                            __global real_t *tdat,
+                            __global data_t *tdat,
                             const unsigned int nrow)
 {
     const unsigned int i = get_global_id(0);
@@ -415,7 +420,7 @@ __kernel void trans_scatter(__global const int *aptr,
 
 __kernel void trans_sort(__global const int *tptr,
                          __global int *tind,
-                         __global real_t *tdat,
+                         __global data_t *tdat,
                          const unsigned int nrow)
 {
     const unsigned int i = get_global_id(0);
@@ -423,7 +428,7 @@ __kernel void trans_sort(__global const int *tptr,
     const int a = tptr[i], b = tptr[i+1];
     for (int j = a + 1; j < b; ++j) {           /* insertion sort */
         const int c = tind[j];
-        const real_t v = tdat[j];
+        const data_t v = tdat[j];
         int k = j - 1;
         while (k >= a && tind[k] > c) { tind[k+1] = tind[k]; tdat[k+1] = tdat[k]; --k; }
         tind[k+1] = c; tdat[k+1] = v;
@@ -436,10 +441,25 @@ class SpGEMMOverflow(RuntimeError):
     """A row needed more distinct columns than the build allows."""
 
 
-def _sp_program(dtype, maxc):
-    return ocl_core.program(SPGEMM_SOURCE, _DT[np.dtype(dtype)],
-                            {'MAXC': int(maxc)},
-                            key='ocl_spgemm/%d' % int(maxc))
+def _sp_program(dtype, maxc, data8=False):
+    dt = np.dtype(dtype)
+    real = 'float' if dt == np.float32 else 'double'
+    data = 'char' if data8 else real
+    return ocl_core.program(SPGEMM_SOURCE, _DT[dt],
+                            {'MAXC': int(maxc), 'DATA': data},
+                            key='ocl_spgemm/%d/%s' % (int(maxc), data))
+
+
+def _values(data, dt, data8):
+    """A matrix's values as the device will carry them: bytes when
+    ``data8`` (refused if any value would not survive it)."""
+    if not data8:
+        return np.asarray(data).astype(dt)
+    d64 = np.asarray(data).astype(np.float64)
+    if d64.size and not (np.all(d64 == np.rint(d64))
+                         and np.abs(d64).max() <= 127):
+        raise ValueError("values do not fit a signed byte")
+    return d64.astype(np.int8)
 
 
 class DeviceCSR(object):
@@ -460,15 +480,18 @@ class DeviceCSR(object):
         return M
 
 
-def transpose_device(A, dtype=np.float32):
-    """``A.T`` as a :class:`DeviceCSR`, formed on the device."""
+def transpose_device(A, dtype=np.float32, data8=False):
+    """``A.T`` as a :class:`DeviceCSR`, formed on the device.
+
+    ``data8``: the values travel as single bytes (a matrix of small
+    integers -- checked); the transpose only moves them."""
     dt = np.dtype(dtype)
     q = ocl_core.queue()
-    prg = _sp_program(dt, 64)
+    prg = _sp_program(dt, 64, data8)
     nrow, ncol = (int(v) for v in A.shape)
     aptr = ocl_core.to_device(A.indptr.astype(np.int32))
     aind = ocl_core.to_device(A.indices.astype(np.int32))
-    adat = ocl_core.to_device(A.data.astype(dt))
+    adat = ocl_core.to_device(_values(A.data, dt, data8))
     cnt = ocl_core.zeros((ncol,), np.int32)
     ocl_core.kernel(prg, 'trans_count')(
         q, (max(1, int(A.nnz)),), None, aind.data, cnt.data,
@@ -478,7 +501,7 @@ def transpose_device(A, dtype=np.float32):
     tptr_d = ocl_core.to_device(tptr)
     cursor = ocl_core.to_device(tptr[:-1].copy())
     tind = ocl_core.zeros((max(1, int(A.nnz)),), np.int32)
-    tdat = ocl_core.zeros((max(1, int(A.nnz)),), dt)
+    tdat = ocl_core.zeros((max(1, int(A.nnz)),), np.int8 if data8 else dt)
     ocl_core.kernel(prg, 'trans_scatter')(
         q, (max(1, nrow),), None, aptr.data, aind.data, adat.data,
         cursor.data, tind.data, tdat.data, np.uint32(nrow))
@@ -488,22 +511,29 @@ def transpose_device(A, dtype=np.float32):
     return DeviceCSR(tptr_d, tind, tdat, (ncol, nrow), int(A.nnz))
 
 
-def spgemm_device(A, B, dtype=np.float32, maxc=64):
+def spgemm_device(A, B, dtype=np.float32, maxc=64, data8=False):
     """``A @ B`` as a :class:`DeviceCSR`.
 
     ``A`` and ``B`` may be scipy matrices or :class:`DeviceCSR`, so a
     chain such as the Gram stays on the card from end to end.
+    ``data8``: inputs and output carry their values as single bytes;
+    the products are accumulated in the real type, so integer-valued
+    inputs give the same result as they would in floats, and the
+    caller answers for the output fitting a byte.
     """
     dt = np.dtype(dtype)
     q = ocl_core.queue()
-    prg = _sp_program(dt, maxc)
+    prg = _sp_program(dt, maxc, data8)
 
     def parts(M):
         if isinstance(M, DeviceCSR):
+            if (M.data.dtype == np.int8) != bool(data8):
+                raise ValueError("device operand's value type does not "
+                                 "match data8")
             return M.indptr, M.indices, M.data, M.shape
         return (ocl_core.to_device(M.indptr.astype(np.int32)),
                 ocl_core.to_device(M.indices.astype(np.int32)),
-                ocl_core.to_device(M.data.astype(dt)),
+                ocl_core.to_device(_values(M.data, dt, data8)),
                 tuple(int(v) for v in M.shape))
 
     aptr, aind, adat, ashape = parts(A)
@@ -522,7 +552,7 @@ def spgemm_device(A, B, dtype=np.float32, maxc=64):
     nnz = int(cptr[-1])
     cptr_d = ocl_core.to_device(cptr)
     cind = ocl_core.zeros((max(1, nnz),), np.int32)
-    cdat = ocl_core.zeros((max(1, nnz),), dt)
+    cdat = ocl_core.zeros((max(1, nnz),), np.int8 if data8 else dt)
     ocl_core.kernel(prg, 'spgemm_fill')(
         q, (max(1, nrow),), None, aptr.data, aind.data, adat.data,
         bptr.data, bind.data, bdat.data, cptr_d.data, cind.data,
@@ -640,8 +670,9 @@ class CSR(object):
             self.data, self.indices, self.indptr = (M.data, M.indices,
                                                     M.indptr)
             self.src_dtype, self.ones_only, self.int8_ok = '?', False, False
-            self.data8 = False
-            self.prg = program(self.dtype, self.WG)
+            self.data8 = bool(M.data.dtype == np.int8)   # adopted as stored
+            self.int8_ok = self.data8
+            self.prg = program(self.dtype, self.WG, self.data8)
             self._k = {n: ocl_core.kernel(self.prg, n)
                        for n in ('csr_spmv', 'csr_jacobi', 'csr_residual',
                                  'csr_spmv_add')}
