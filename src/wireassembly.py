@@ -1757,7 +1757,19 @@ class WireBondSolver:
         # the response from where the first one wrote the current.
         i = spmv_c(B, x)
         self._coupled(i[:self.efg], i[self.efg:], out=i)
-        return spmv_c(BT, i)
+        # The second product's output is the response's own storage.
+        # spmv_c takes a contiguous copy of each half before it writes
+        # that half, and writing the real parts leaves the imaginary
+        # parts for the second half, so the product can land over the
+        # leading `size` entries of the vector it reads. The array is
+        # then shrunk to that length in place (realloc serves it
+        # without a copy) and returned as the operator's own result --
+        # no 792 MB output allocated beside the response at R5, at the
+        # instant that set the solve's peak.
+        n = int(BT.shape[0])
+        spmv_c(BT, i, out=i[:n])
+        i.resize((n,), refcheck=False)
+        return i
 
     def _precond(self, vec):
         # the two real applies go straight into the halves of one
