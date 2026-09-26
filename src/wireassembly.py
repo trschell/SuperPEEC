@@ -1628,12 +1628,12 @@ class WireBondSolver:
 
     def _coupled(self, i_f, i_w, out=None):
         """``(v_f, v_w)`` for filament and wire currents. With ``out``
-        (a persistent ``efg + nwel`` buffer) the filament half is written
-        in place instead of copied and the pair is returned as views of
-        it -- the matvec's temporaries were 0.85 GiB per apply on R4
-        (memory survey 2026-09-14): the copy of ``whole``, the
-        concatenation and the coupler's current references all held a
-        0.2 GiB vector each at the peak."""
+        (an ``efg + nwel`` buffer) the pair is written there and returned
+        as views of it. ``out`` MAY BE THE INPUT VECTOR ITSELF: every read
+        of ``i_f``/``i_w`` -- the copy into the workspace, the coupler's
+        hooks during the traversal, the wire terms of ``v_w`` -- happens
+        before the first write to ``out``, and the hooks' references are
+        dropped in between. The matvec relies on that (2026-09-26)."""
         wcs, M = self.wc, self.M
         self.whole[:self.efg] = i_f
         wcs.i_f = np.ascontiguousarray(i_f, dtype=np.complex128)
@@ -1745,23 +1745,19 @@ class WireBondSolver:
 
     def _matvec(self, x):
         self.matvecs += 1
-        buf = getattr(self, '_vfw', None)
-        if buf is None or buf.size != self.efg + self.nwel:
-            buf = self._vfw = np.empty(self.efg + self.nwel,
-                                       dtype=np.complex128)
         B, BT = self._basis(), self._basisT()
-        # NOT a kept buffer. A vector this size is served by mmap, so
-        # freeing it returns it to the OS outright -- holding one
-        # instead converted 808 MB of R5 transient into 808 MB of
-        # permanent resident, and masked most of the palette's saving
-        # when both were measured together.
+        # The expanded current is the response's buffer (2026-09-26).
+        # _coupled reads it -- into the FMM workspace, and through the
+        # coupler's hooks during the traversal -- and only after the
+        # traversal, with those references dropped and v_w formed,
+        # writes the response out; so the vector it read from can be
+        # the vector it writes to. The persistent response buffer that
+        # stood beside it (829 MB at R5, resident through the solve
+        # and under its peak) is gone, and the second product reads
+        # the response from where the first one wrote the current.
         i = spmv_c(B, x)
-        self._coupled(i[:self.efg], i[self.efg:], out=buf)
-        del i                      # dead once buf holds the response;
-        # it was standing under the second product's output and
-        # halves -- one full filament vector, 0.83 GB at R5, at the
-        # instant the 2026-09-24 solve survey put the run's peak
-        return spmv_c(BT, buf)
+        self._coupled(i[:self.efg], i[self.efg:], out=i)
+        return spmv_c(BT, i)
 
     def _precond(self, vec):
         # the two real applies go straight into the halves of one
