@@ -257,10 +257,13 @@ def filament_cells(M):
 
     Same decode as ``port_impedance._interior_slots`` (a cell-centred
     filament at lattice index i joins cells i and i+1), returned for
-    all three orientations in buffer order. Returned int32: per-axis
-    cell coordinates stay far below 2**31 at any reachable scale, and
-    the arrays are a linear-in-N residency term (they were 2x81 MB of
-    int64 at R3 before the dedup + downcast).
+    all three orientations in buffer order. Returned NARROW: the axis
+    as int8 and the coordinates as int16 (signed, so differences of
+    nearby cells stay differences; any grid past 32767 cells on an
+    axis keeps int32), since the arrays are a linear-in-N residency
+    term -- 622 + 207 MB at R5 as int32, 311 + 52 as stored now -- and
+    every reader either indexes with them, subtracts neighbours, or
+    widens to int64 or float before arithmetic (audited 2026-09-26).
     """
     axis = []
     cells = []
@@ -280,9 +283,12 @@ def filament_cells(M):
                 off[1][sl] = by[g]*n[1]
                 off[2][sl] = bz[g]*n[2]
             c = [c[k] + off[k] for k in range(3)]
-        axis.append(np.full(idx.size, d, dtype=np.int32))
+        axis.append(np.full(idx.size, d, dtype=np.int8))
         cells.append(np.stack(c, axis=1))
-    return np.concatenate(axis), np.concatenate(cells).astype(np.int32)
+    cells = np.concatenate(cells)
+    ctype = np.int16 if (cells.size == 0 or int(cells.max()) < 2**15) \
+        else np.int32
+    return np.concatenate(axis), cells.astype(ctype)
 
 
 def _check_orientation(B, fil_axis, fil_cell, node_of_cell):
