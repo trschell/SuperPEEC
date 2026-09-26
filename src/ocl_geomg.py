@@ -160,6 +160,30 @@ class GeoCore(object):
                                        "one-per-row aggregation")
                 self.P.append(ocl_sparse.CSR(Pm, dt))
                 self.R.append(ocl_sparse.CSR(Pm.T.tocsr(), dt))
+        # Level 1 as a stencil (2026-09-25): with level 0 in tiles and
+        # its aggregation implicit, level 1's Galerkin operator is a
+        # table-driven stencil on the coarse lattice (see
+        # ocl_stencil.Stencil1). Its CSR -- 412 MB at R5 -- then goes,
+        # and level 1 lives in two coarse tile grids like level 0. The
+        # host verifies the construction and the device certifies the
+        # apply against the CSR before the CSR is dropped; anything
+        # short of that keeps the CSR.
+        self.level1 = 'csr'
+        if (self.tiled0 and self.aggregation0 == 'implicit'
+                and len(self.A) > 2
+                and os.environ.get('SPPEEC_OCL_STENCIL1', '1') != '0'):
+            try:
+                import ocl_stencil
+                A1 = ocl_stencil.Stencil1(levels[1], self.P[0], sten,
+                                          mg._wdi[1], dt, csr_dev=self.A[1])
+                self.A[1] = A1
+                self.P[0].retarget(A1.slot_of_col)
+                self.R[1] = ocl_sparse.OnesRestrict(mg.Ps[1], dt,
+                                                    remap=A1.slot_of_col)
+                self.level1 = 'stencil (certified %.1e)' % A1.cert_err
+            except (ValueError, OverflowError) as exc:
+                self.level1 = 'csr (%s)' % exc
+        self.tiled = [hasattr(A, 't_sweeps') for A in self.A]
         # level 0's inverse diagonal is read only by the generic
         # smoother, which never runs when level 0 sweeps itself
         self.dinv = [None if (i == 0 and sweeps0)
@@ -177,15 +201,13 @@ class GeoCore(object):
         # never read: 198 MB each at R5.
         # with level 0 in tiles, its flat solution and residual (198
         # MB each at R5) do not exist either
-        self._x = [None if (i == 0 and self.tiled0)
-                   else ocl_core.zeros((n,), dt)
+        self._x = [None if self.tiled[i] else ocl_core.zeros((n,), dt)
                    for i, n in enumerate(self.sizes)]
         self._b = [None] + [ocl_core.zeros((n,), dt)
                             for n in self.sizes[1:]]
-        self._r = [None if (i == 0 and self.tiled0)
-                   else ocl_core.zeros((n,), dt)
+        self._r = [None if self.tiled[i] else ocl_core.zeros((n,), dt)
                    for i, n in enumerate(self.sizes)]
-        self._t = [None if (i == 0 and sweeps0)
+        self._t = [None if (self.tiled[i] or (i == 0 and sweeps0))
                    else ocl_core.zeros((n,), dt)
                    for i, n in enumerate(self.sizes)]
 
@@ -235,16 +257,25 @@ class GeoCore(object):
         if cur is not x:
             _copy(x, cur)
 
-    def _vcycle0(self, b):
-        """One V-cycle with level 0 in the stencil's tiles; ``b`` flat."""
-        A0 = self.A[0]
-        A0.t_sweeps(b, self.nu)
-        rt = A0.t_residual(b)
-        A0.t_restrict(self.R[0], rt, self._b[1])
-        self._x[1].fill(self.dtype.type(0), queue=ocl_core.queue())
-        self._vcycle(1, self._b[1], self._x[1])
-        A0.t_prolong_add(self.P[0], self._x[1])
-        A0.t_sweeps(b, self.nu)
+    def _vcycle_t(self, lv, b, zero=True):
+        """One V-cycle at a level kept in tiles; ``b`` flat; x lives in
+        the tiles (read through ``grid()``) and starts at zero when
+        ``zero`` -- every visit of a coarse level, and the first cycle
+        at level 0, where later cycles carry x over."""
+        A = self.A[lv]
+        if zero:
+            A.t_zero()
+        A.t_sweeps(b, self.nu)
+        rt = A.t_residual(b)
+        A.t_restrict(self.R[lv], rt, self._b[lv + 1])
+        if self.tiled[lv + 1]:
+            self._vcycle_t(lv + 1, self._b[lv + 1])
+            A.t_prolong_add(self.P[lv], self.A[lv + 1].grid())
+        else:
+            self._x[lv + 1].fill(self.dtype.type(0), queue=ocl_core.queue())
+            self._vcycle(lv + 1, self._b[lv + 1], self._x[lv + 1])
+            A.t_prolong_add(self.P[lv], self._x[lv + 1])
+        A.t_sweeps(b, self.nu)
 
     def _vcycle(self, lv, b, x):
         """One V-cycle at level ``lv``; ``x`` is updated in place."""
@@ -265,7 +296,7 @@ class GeoCore(object):
         if self.tiled0:
             self.A[0].t_zero()
             for _ in range(self.cycles):
-                self._vcycle0(r)
+                self._vcycle_t(0, r, zero=False)
             return None
         x = self._x[0]
         x.fill(self.dtype.type(0), queue=ocl_core.queue())

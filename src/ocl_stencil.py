@@ -370,6 +370,127 @@ __kernel void sten_unpack_sub(__global const real_t *t,
     if (i < n) out[i] = yp[i] - t[flat[i]];
 }
 
+#ifdef TLC
+/* ---- level 1 as a stencil on the coarse lattice (2026-09-25). The
+   Galerkin coarse operator of the plaquette stencil under 2x2x2
+   aggregation is fixed by the two aggregates' occupancy patterns (a
+   bit per block position), their normals and the coarse offset:
+   verified on the host at construction, entry by entry. So a coarse
+   cell carries a pattern byte, and a coefficient comes from a
+   (slot, pattern_c, pattern_d) table. The tiles are the fine tiles at
+   half the edge (TLC = TL/2), with the same neighbour table. The sum
+   runs over the slots in order -- NOT the CSR kernel's lane tree, so
+   the bits differ at the ulp; the operator is the same, certified
+   to tolerance at construction like level 0's own stencil. */
+#define CTOT(nt) ((size_t)(nt)*3*TLC*TLC*TLC)
+inline int wrapc(int u, int *h)
+{
+    if (u < 0)    { *h = -1; return u + TLC; }
+    if (u >= TLC) { *h =  1; return u - TLC; }
+    *h = 0; return u;
+}
+
+inline real_t sten1_acc(__global const real_t *xt,
+                        __global const uchar *patg,
+                        __global const int *nbt,
+                        __global const int *nsrc,
+                        __global const int *of,
+                        __global const char *ctab,
+                        __global const int *sptr,
+                        unsigned int t, unsigned int on,
+                        int cz, int cy, int cx, uint pc)
+{
+    real_t acc = (real_t)0;
+    const int s0 = sptr[on], s1 = sptr[on + 1];
+    for (int s = s0; s < s1; ++s) {
+        int hx, hy, hz;
+        const int sx = wrapc(cx + of[3*s + 0], &hx);
+        const int sy = wrapc(cy + of[3*s + 1], &hy);
+        const int sz = wrapc(cz + of[3*s + 2], &hz);
+        const int nb = nbt[(size_t)t*27 + 9*(hx + 1) + 3*(hy + 1)
+                           + (hz + 1)];
+        if (nb >= 1) {
+            const int ns = nsrc[s] - 1;
+            const size_t i = ((((size_t)(nb - 1)*3 + ns)*TLC + sz)*TLC
+                              + sy)*TLC + sx;
+            const uint pd = patg[i];
+            acc += (real_t)ctab[((size_t)s*256 + pc)*256 + pd]*xt[i];
+        }
+    }
+    return acc;
+}
+
+#define DECOMPOSEC(gid, t, on, a1, a2, a3)                  \
+    size_t rem_ = (gid);                                    \
+    const unsigned int a3 = rem_ % TLC; rem_ /= TLC;        \
+    const unsigned int a2 = rem_ % TLC; rem_ /= TLC;        \
+    const unsigned int a1 = rem_ % TLC; rem_ /= TLC;        \
+    const unsigned int on = rem_ % 3;   rem_ /= 3;          \
+    const unsigned int t  = (unsigned int)rem_
+
+__kernel void sten1_mv_p(__global const real_t *xt,
+                         __global const int *flat,
+                         __global const uchar *patg,
+                         __global const int *nbt,
+                         __global const int *nsrc,
+                         __global const int *of,
+                         __global const char *ctab,
+                         __global const int *sptr,
+                         __global real_t *y,
+                         const unsigned int n)
+{
+    const unsigned int i = get_global_id(0);
+    if (i >= n) return;
+    const size_t gid = (size_t)flat[i];
+    DECOMPOSEC(gid, t, on, a1, a2, a3);
+    y[i] = sten1_acc(xt, patg, nbt, nsrc, of, ctab, sptr, t, on,
+                     (int)a1, (int)a2, (int)a3, patg[gid]);
+}
+
+__kernel void sten1_res_t(__global const real_t *xt,
+                          __global const real_t *b,
+                          __global const int *flat,
+                          __global const uchar *patg,
+                          __global const int *nbt,
+                          __global const int *nsrc,
+                          __global const int *of,
+                          __global const char *ctab,
+                          __global const int *sptr,
+                          __global real_t *rt,
+                          const unsigned int n)
+{
+    const unsigned int i = get_global_id(0);
+    if (i >= n) return;
+    const size_t gid = (size_t)flat[i];
+    DECOMPOSEC(gid, t, on, a1, a2, a3);
+    rt[gid] = b[i] - sten1_acc(xt, patg, nbt, nsrc, of, ctab, sptr, t, on,
+                               (int)a1, (int)a2, (int)a3, patg[gid]);
+}
+
+__kernel void sten1_jac_p(__global const real_t *xt,
+                          __global const real_t *b,
+                          __global const int *flat,
+                          __global const uchar *patg,
+                          __global const real_t *wtab,
+                          __global const int *nbt,
+                          __global const int *nsrc,
+                          __global const int *of,
+                          __global const char *ctab,
+                          __global const int *sptr,
+                          __global real_t *yt,
+                          const unsigned int n)
+{
+    const unsigned int i = get_global_id(0);
+    if (i >= n) return;
+    const size_t gid = (size_t)flat[i];
+    DECOMPOSEC(gid, t, on, a1, a2, a3);
+    const uint pc = patg[gid];
+    const real_t ax = sten1_acc(xt, patg, nbt, nsrc, of, ctab, sptr, t, on,
+                                (int)a1, (int)a2, (int)a3, pc);
+    yt[gid] = xt[gid] + wtab[on*256 + pc]*(b[i] - ax);
+}
+#endif
+
 /* flat plaquette vector -> zeroed tiles, and back */
 __kernel void sten_pack(__global const real_t *v,
                         __global const int *flat,
@@ -567,6 +688,9 @@ class Stencil0(object):
     def t_free(self):
         return self._yt if self._cur is self._xt else self._xt
 
+    def grid(self):
+        return self._cur
+
     def t_sweeps(self, b, nu):
         """``nu`` sweeps on the tiled x, flat ``b``."""
         cur, alt = self._cur, self.t_free()
@@ -707,13 +831,27 @@ class ImplicitAggregation(object):
         k = (np.arange(n0, dtype=np.int64) - ptr[cols]).astype(np.uint32)
         del cols
         shifted = off[srt].astype(np.uint32) << (3*k)
-        del srt, k, off
+        del k
         order = np.bitwise_or.reduceat(shifted, ptr[:-1]).astype(np.uint32)
         del shifted
         order |= (cnt.astype(np.uint32) << 24)
+        # the occupancy pattern of each aggregate (a bit per block
+        # position): level 1's coefficients are a function of the two
+        # patterns, the normals and the coarse offset
+        occ = (np.uint8(1) << off[srt]).astype(np.uint8)
+        del srt, off
+        self.pattern = np.bitwise_or.reduceat(occ, ptr[:-1]).astype(np.uint8)
+        del occ
         inv_t = (inv_key // (3*nb)).astype(np.int32)
         inv_b = (inv_key % (3*nb)).astype(np.int32)
         del inv_key
+        # per coarse column: its tile, normal and block, kept on the
+        # host for a coarse-level stencil to build on
+        self.h_tile = inv_t
+        self.h_normal = (inv_b // nb).astype(np.int32)
+        self.h_block = (inv_b % nb).astype(np.int32)
+        self.nb = int(nb)
+        self.h_tab = tab
         self.shape = (int(n0), int(nc))
         self.nrow = int(nc)
         self.nnz = int(M.nnz)
@@ -724,6 +862,252 @@ class ImplicitAggregation(object):
         self.order = ocl_core.to_device(order)
         self.src_dtype, self.ones_only, self.int8_ok = 'implicit', True, True
 
+    def retarget(self, slot_of_col):
+        """Point the prolongation table at coarse tile SLOTS instead of
+        coarse indices, for a level 1 that lives in tiles."""
+        tab = self.h_tab.copy()
+        ok = tab >= 0
+        tab[ok] = np.asarray(slot_of_col, np.int32)[tab[ok]]
+        self.tab = ocl_core.to_device(tab)
+
     def device_bytes(self):
         return int(self.tab.nbytes + self.inv_t.nbytes + self.inv_b.nbytes
                    + self.order.nbytes)
+
+
+class Stencil1(object):
+    """Level 1 as a table-driven stencil on the coarse lattice.
+
+    Built from the host's level-1 CSR, the level-0 implicit
+    aggregation (which knows each coarse cell's tile, normal, block
+    and occupancy pattern) and the host stencil's neighbour table.
+    Verifies on the host that every entry's coefficient is a function
+    of (normals, coarse offset, the two patterns) and that the damped
+    inverse diagonal is a function of the pattern; then certifies the
+    device apply against the CSR on a random vector. Any failure
+    raises ValueError and the caller keeps the CSR.
+
+    Keeps level 1 in two coarse tile grids exactly as Stencil0 keeps
+    level 0: the same t_* interface, the right-hand side flat.
+    """
+
+    def __init__(self, A1, agg, sten, wdi1, dtype, csr_dev=None):
+        import scipy.sparse as sp
+        dt = np.dtype(dtype)
+        self.dtype = dt
+        if agg.shifts != (1, 1, 1):
+            raise ValueError("level-1 stencil needs full 2x2x2 coarsening")
+        TL = int(sten.TL)
+        if TL % 2:
+            raise ValueError("odd tile edge")
+        TLC = TL // 2
+        self.TL, self.TLC = TL, TLC
+        self.nt = int(sten.shape[0])
+        nt = self.nt
+        ccell = TLC*TLC*TLC
+        self.ntot = int(nt*3*ccell)
+        A1 = sp.csr_matrix(A1)
+        A1.sort_indices()
+        nc = int(A1.shape[0])
+        self.n = nc
+        self.shape = (nc, nc)
+        tile, on, blk = agg.h_tile, agg.h_normal, agg.h_block
+        pat = agg.pattern
+        if pat.size != nc or tile.size != nc:
+            raise ValueError("aggregation and level 1 disagree in size")
+        # coarse local coordinates from the block index (z, y, x)
+        cz, cy, cx = blk // (TLC*TLC), (blk // TLC) % TLC, blk % TLC
+        slot1 = (((tile.astype(np.int64)*3 + on)*TLC + cz)*TLC + cy)*TLC + cx
+        if slot1.size and int(slot1.max()) >= 2**31:
+            raise OverflowError("coarse tile array past the 32-bit index")
+        slot1 = slot1.astype(np.int32)
+        # neighbour table on the host: (27, nt) with tile id + 1 or 0
+        nbt = np.ascontiguousarray(np.asarray(sten.nbt).T)          # (nt, 27)
+        # Per entry (c, d): the coarse offset -- from local coordinates,
+        # and across tiles from the neighbour slot that names d's tile
+        # -- then the (normals, offset, pattern_c, pattern_d) key and
+        # its coefficient. In chunks, int32, with the constancy check
+        # kept in three small min/max/seen tables: the entry list is
+        # 77 M long at R5 and this runs inside the build's peak.
+        NS = 3*3*27                        # (normal_c, normal_d, offset) keys
+        NK = NS*256*256
+        kmin = np.full(NK, 127, np.int8)
+        kmax = np.full(NK, -128, np.int8)
+        seen = np.zeros(NK, np.bool_)
+        nbt = np.ascontiguousarray(np.asarray(sten.nbt).T)          # (nt, 27), tile id + 1 or 0
+        indptr = A1.indptr
+        nnz = int(A1.nnz)
+        CH = 1 << 20
+        for a0 in range(0, nnz, CH):
+            a1 = min(nnz, a0 + CH)
+            cols = A1.indices[a0:a1].astype(np.int32)
+            vals = A1.data[a0:a1].astype(np.int8)
+            rows = (np.searchsorted(indptr, np.arange(a0, a1), side='right') - 1).astype(np.int32)
+            tc, td = tile[rows], tile[cols]
+            dx = (cx[cols] - cx[rows]).astype(np.int8)
+            dy = (cy[cols] - cy[rows]).astype(np.int8)
+            dz = (cz[cols] - cz[rows]).astype(np.int8)
+            diff = np.flatnonzero(tc != td)
+            if diff.size:
+                hit = nbt[tc[diff]] == (td[diff] + 1)[:, None]      # (m, 27)
+                if not np.all(hit.any(axis=1)):
+                    raise ValueError("a level-1 entry couples tiles that are not neighbours")
+                k = np.argmax(hit, axis=1)
+                dx[diff] += ((k // 9 - 1)*TLC).astype(np.int8)
+                dy[diff] += (((k // 3) % 3 - 1)*TLC).astype(np.int8)
+                dz[diff] += ((k % 3 - 1)*TLC).astype(np.int8)
+                del hit, k
+            if (int(np.abs(dx).max()) > 1 or int(np.abs(dy).max()) > 1
+                    or int(np.abs(dz).max()) > 1):
+                raise ValueError("level-1 reach exceeds one coarse cell")
+            skey = ((((on[rows].astype(np.int32)*3 + on[cols])*3 + (dz + 1))*3
+                     + (dy + 1))*3 + (dx + 1))
+            tkey = (skey*256 + pat[rows].astype(np.int32))*256 + pat[cols]
+            np.minimum.at(kmin, tkey, vals)
+            np.maximum.at(kmax, tkey, vals)
+            seen[tkey] = True
+            del cols, vals, rows, tc, td, dx, dy, dz, diff, skey, tkey
+        if not np.array_equal(kmin[seen], kmax[seen]):
+            raise ValueError("a level-1 coefficient is not fixed by the patterns")
+        # the slots actually present, ordered by (normal_c, normal_d, offset)
+        sk_seen = np.flatnonzero(seen.reshape(NS, 256*256).any(axis=1))
+        uk = sk_seen.astype(np.int64)
+        nslot = int(uk.size)
+        s_on = (uk // 81) % 3
+        s_ns = (uk // 27) % 3
+        s_dz = (uk // 9) % 3 - 1
+        s_dy = (uk // 3) % 3 - 1
+        s_dx = uk % 3 - 1
+        sptr = np.searchsorted(s_on, np.arange(4)).astype(np.int32)
+        ctab = np.zeros(nslot*256*256, np.int8)
+        for i, sk in enumerate(sk_seen):
+            blk_ = slice(int(sk)*65536, int(sk + 1)*65536)
+            v = kmin[blk_]
+            ctab[i*65536:(i + 1)*65536] = np.where(seen[blk_], v, 0)
+        del kmin, kmax, seen
+        # damped inverse diagonal: a function of the pattern AND the
+        # normal (a 2x2 slab of plaquettes couples to itself differently
+        # by orientation: diagonal 8 or 12 for one pattern at R4)
+        w = np.asarray(wdi1, dt).ravel()
+        if w.size != nc:
+            raise ValueError("level-1 weights and size disagree")
+        widx = on.astype(np.int64)*256 + pat
+        wtab = np.zeros(3*256, dt)
+        wtab[widx] = w
+        if not np.array_equal(wtab[widx], w):
+            raise ValueError("the level-1 weight is not fixed by the "
+                             "normal and pattern")
+        del widx
+        # pattern grid over coarse slots (0 = absent)
+        patg = np.zeros(self.ntot, np.uint8)
+        patg[slot1] = pat
+        # ---- device state
+        self._flat = ocl_core.to_device(slot1)
+        self._patg = ocl_core.to_device(patg)
+        self._nbt = ocl_core.to_device(np.ascontiguousarray(nbt).astype(np.int32))
+        self._nsrc = ocl_core.to_device((s_ns + 1).astype(np.int32))
+        self._of = ocl_core.to_device(np.ascontiguousarray(
+            np.stack([s_dx, s_dy, s_dz], axis=1)).astype(np.int32))
+        self._ctab = ocl_core.to_device(ctab)
+        self._sptr = ocl_core.to_device(sptr)
+        self._wtab = ocl_core.to_device(wtab)
+        self.nslot = nslot
+        self.prg = ocl_core.program(SOURCE, _DT[dt], {'TL': TL, 'TLC': TLC},
+                                    key='ocl_stencil1')
+        self._k = {n: ocl_core.kernel(self.prg, n)
+                   for n in ('sten1_mv_p', 'sten1_res_t', 'sten1_jac_p',
+                             'sten_prolong_add', 'sten_pack', 'sten_unpack')}
+        self._xt = ocl_core.zeros((self.ntot,), dt)
+        self._yt = ocl_core.zeros((self.ntot,), dt)
+        self._cur = self._xt
+        self.slot_of_col = slot1        # host: coarse index -> coarse slot
+        # ---- certification against the CSR, on the device
+        if csr_dev is not None:
+            rng = np.random.default_rng(23)
+            xh = rng.standard_normal(nc).astype(dt)
+            xd = ocl_core.to_device(xh)
+            y_ref = ocl_core.zeros((nc,), dt)
+            y_got = ocl_core.zeros((nc,), dt)
+            csr_dev.spmv(xd, y_ref)
+            self.spmv(xd, y_got)
+            ref = y_ref.get(); got = y_got.get()
+            nr = float(np.linalg.norm(ref))
+            err = float(np.linalg.norm(got - ref))/nr if nr else 0.0
+            tol = 1e-5 if dt.itemsize == 4 else 1e-11
+            self.cert_err = err
+            if err > tol:
+                raise ValueError("level-1 stencil disagrees with the CSR "
+                                 "(rel %.2e)" % err)
+            del xd, y_ref, y_got
+
+    def _tiles(self):
+        return (self._patg.data, self._nbt.data, self._nsrc.data,
+                self._of.data, self._ctab.data, self._sptr.data)
+
+    def device_bytes(self):
+        return int(self._flat.nbytes + self._patg.nbytes + self._nbt.nbytes
+                   + self._nsrc.nbytes + self._of.nbytes + self._ctab.nbytes
+                   + self._sptr.nbytes + self._wtab.nbytes
+                   + self._xt.nbytes + self._yt.nbytes)
+
+    def parts(self):
+        return dict(flat_index=int(self._flat.nbytes),
+                    pattern_grid=int(self._patg.nbytes),
+                    tables=int(self._ctab.nbytes + self._nbt.nbytes
+                               + self._of.nbytes + self._wtab.nbytes),
+                    work_grids=int(self._xt.nbytes + self._yt.nbytes),
+                    slots=int(self.ntot), cells=int(self.n))
+
+    # ---- flat API (certification)
+    def spmv(self, x, y):
+        q = ocl_core.queue()
+        self._xt.fill(self.dtype.type(0), queue=q)
+        self._k['sten_pack'](q, (self.n,), None, x.data, self._flat.data,
+                             self._xt.data, np.uint32(self.n))
+        self._k['sten1_mv_p'](q, (self.n,), None, self._xt.data,
+                              self._flat.data, *self._tiles(), y.data,
+                              np.uint32(self.n))
+        return y
+
+    # ---- tiled-native API, as Stencil0
+    def t_zero(self):
+        q = ocl_core.queue()
+        self._xt.fill(self.dtype.type(0), queue=q)
+        self._yt.fill(self.dtype.type(0), queue=q)
+        self._cur = self._xt
+
+    def t_free(self):
+        return self._yt if self._cur is self._xt else self._xt
+
+    def grid(self):
+        return self._cur
+
+    def t_sweeps(self, b, nu):
+        q = ocl_core.queue()
+        cur, alt = self._cur, self.t_free()
+        for _ in range(int(nu)):
+            self._k['sten1_jac_p'](q, (self.n,), None, cur.data, b.data,
+                                   self._flat.data, self._patg.data,
+                                   self._wtab.data, self._nbt.data,
+                                   self._nsrc.data, self._of.data,
+                                   self._ctab.data, self._sptr.data,
+                                   alt.data, np.uint32(self.n))
+            cur, alt = alt, cur
+        self._cur = cur
+
+    def t_residual(self, b):
+        q = ocl_core.queue()
+        rt = self.t_free()
+        self._k['sten1_res_t'](q, (self.n,), None, self._cur.data, b.data,
+                               self._flat.data, *self._tiles(), rt.data,
+                               np.uint32(self.n))
+        return rt
+
+    def t_prolong_add(self, P, x2):
+        q = ocl_core.queue()
+        self._k['sten_prolong_add'](q, (self.n,), None, P.col.data, x2.data,
+                                    self._flat.data, self._cur.data,
+                                    np.uint32(self.n))
+
+    def t_restrict(self, R, rt, y):
+        return R.spmv(rt, y)
