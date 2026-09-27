@@ -225,6 +225,93 @@ class BasisFile(object):
         self.close()
 
 
+class ParkedVector(object):
+    """A full-length vector parked in an unlinked file on the stream
+    directory, consumed in chunks where it is needed.
+
+    Made for the right-hand side of the streamed solve (2026-09-27):
+    b is touched only where the true residual is formed -- the cycle
+    start and every convergence check -- so it need not stand in
+    memory through the solve. Parking it takes one full-length vector
+    off every instant of the solve, at one write and one chunked read
+    per check. ``sub_from`` computes the same elementwise difference
+    ``np.subtract(b, r, out=r)`` would, so the bits are unchanged.
+    """
+
+    def __init__(self, b, workdir=None, chunk=1 << 22):
+        b = np.asarray(b)
+        self.shape = b.shape
+        self.n = int(b.shape[0])
+        self.dtype = b.dtype
+        self.norm = float(np.linalg.norm(b))
+        self.chunk = int(chunk)
+        self._f = BasisFile(self.n, self.dtype, workdir)
+        self._f.append(b)
+        self.t_io = 0.0
+
+    def __len__(self):
+        return self.n
+
+    def _chunks(self):
+        itm = self.dtype.itemsize
+        for a in range(0, self.n, self.chunk):
+            yield a, min(self.chunk, self.n - a), a*itm
+
+    def read(self, out=None):
+        """The whole vector, into ``out`` or a new array."""
+        if out is None:
+            out = np.empty(self.n, self.dtype)
+        t = time.time()
+        self._f.read(0, out=out)
+        self.t_io += time.time() - t
+        return out
+
+    def sub_from(self, r):
+        """``r = b - r`` in place, ``chunk`` entries at a time."""
+        t = time.time()
+        buf = np.empty(min(self.chunk, self.n), self.dtype)
+        for a, m, off in self._chunks():
+            _pread_all(self._f.fd, buf[:m], off)
+            np.subtract(buf[:m], r[a:a + m], out=r[a:a + m])
+        self.t_io += time.time() - t
+        return r
+
+    def round_to(self, dtype):
+        """Round the parked entries through ``dtype`` and back, chunk
+        by chunk: what the dispatcher's single-precision cast does to
+        a right-hand side in memory. The norm is recomputed from the
+        chunks (a whole-array norm to the last ulp is not available
+        without the whole array)."""
+        t = time.time()
+        buf = np.empty(min(self.chunk, self.n), self.dtype)
+        sq = 0.0
+        for a, m, off in self._chunks():
+            _pread_all(self._f.fd, buf[:m], off)
+            buf[:m] = buf[:m].astype(dtype).astype(self.dtype)
+            _pwrite_all(self._f.fd, buf[:m], off)
+            sq += float(np.linalg.norm(buf[:m]))**2
+        self.norm = float(np.sqrt(sq))
+        self.t_io += time.time() - t
+        return self
+
+    def close(self):
+        self._f.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+
+def residual_into(b, r):
+    """``r = b - r`` in place, for ``b`` in memory or parked."""
+    if hasattr(b, 'sub_from'):
+        return b.sub_from(r)
+    np.subtract(b, r, out=r)
+    return r
+
+
 _T_KERNEL = [0.0]                  # seconds inside the projections/updates
 
 
@@ -320,9 +407,14 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
     system that costs one to three extra matvecs per solve.
     """
     dt = np.complex128
-    b = np.asarray(b, dt)
-    n = b.shape[0]
-    bnorm = float(np.linalg.norm(b))
+    parked = hasattr(b, 'sub_from')      # a ParkedVector: b on the NVMe
+    if parked:
+        n = b.n
+        bnorm = b.norm
+    else:
+        b = np.asarray(b, dt)
+        n = b.shape[0]
+        bnorm = float(np.linalg.norm(b))
     if bnorm == 0.0:
         return np.zeros(n, dt), 0, 0
     tol = rtol*bnorm
@@ -353,11 +445,12 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
     nmv = 0
     if x0 is not None:
         x = np.array(x0, dt, copy=True)
-        r = b - np.asarray(A.matvec(x), dt)
+        r = np.asarray(A.matvec(x), dt)
+        residual_into(b, r)              # r = b - A x, no temporary
         nmv += 1
     else:
         x = np.zeros(n, dt)
-        r = b.copy()
+        r = b.read() if parked else b.copy()
     flag = 1
     # STALL GUARD (2026-09-17): left preconditioning minimises |M r|,
     # which is close to the error and is why the answers come out so
@@ -476,7 +569,7 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                 XF.add_into(0, u)              # u += x, from the file
                 t = time.time()
                 r = np.asarray(A.matvec(u), dt)
-                np.subtract(b, r, out=r)     # r = b - A u, no temporary
+                residual_into(b, r)          # r = b - A u, no temporary
                 t_ops += time.time() - t
                 nmv += 1
                 nchecks += 1

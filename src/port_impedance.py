@@ -296,6 +296,15 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
             "'auto' (which picks double here) or loosen rtol."
             % (rtol, _SINGLE_RTOL_FLOOR))
     Aop_d, Pop_d = Aop, Pop        # the complex128 operators
+    # a right-hand side parked on the NVMe (krylov_stream.ParkedVector,
+    # 2026-09-27): the streamed solve consumes it in chunks; every
+    # other consumer here (the checkpoint, the lgmres fallbacks, the
+    # other methods) takes it back into memory first
+    _parked = hasattr(rhs, 'sub_from')
+
+    def _dense(v):
+        return v.read() if hasattr(v, 'sub_from') else v
+
     if single:
         n = Aop.shape[0]
         c64 = np.complex64
@@ -307,7 +316,13 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
             (n, n), matvec=lambda v, _P=Pop: np.asarray(
                 _P.matvec(np.asarray(v, np.complex128)), c64),
             dtype=c64)
-        rhs = np.asarray(rhs, c64)
+        if _parked:
+            rhs.round_to(c64)    # the same rounding, on the file
+        else:
+            rhs = np.asarray(rhs, c64)
+    if method != 'gmres_stream':
+        rhs = _dense(rhs)
+        _parked = False
 
     def _finish(x, flag):
         if _ckpath and flag == 0:
@@ -347,7 +362,7 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
     # system's file fails the rhs test and is ignored.
     _ckpath = os.environ.get('SPPEEC_CHECKPOINT')
     if _ckpath:
-        x0 = _checkpoint_load(_ckpath, rhs, x0)
+        x0 = _checkpoint_load(_ckpath, _dense(rhs), x0)
     # Status hooks: percent is matvecs against the HARD budget
     # (maxiter*inner_m for either method), so it never overshoots. The
     # counting wrapper forwards arrays untouched -- the iterate
@@ -368,7 +383,7 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
     with _status.krylov_task(budget=int(maxiter)*int(inner_m),
                              rtol=rtol, method=method):
         if _status.enabled():
-            _nrhs = float(np.linalg.norm(rhs))
+            _nrhs = rhs.norm if _parked else float(np.linalg.norm(rhs))
             _last = [None]
 
             def _res_snoop(xk):
@@ -376,8 +391,12 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
                 if pair is not None and _nrhs > 0 and \
                         np.shape(pair[0]) == np.shape(xk) and \
                         np.array_equal(pair[0], xk):
-                    _status.krylov_residual(
-                        float(np.linalg.norm(pair[1] - rhs))/_nrhs)
+                    if _parked:
+                        d = np.array(pair[1], np.complex128, copy=True)
+                        rhs.sub_from(d)          # |b - A x| = |A x - b|
+                    else:
+                        d = pair[1] - rhs
+                    _status.krylov_residual(float(np.linalg.norm(d))/_nrhs)
             _cbs.append(_res_snoop)
 
             def _counted(v, _mv=Aop.matvec):
@@ -397,7 +416,7 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
                 now = time.time()
                 if now - _ck_last[0] >= _ck_every:
                     _ck_last[0] = now
-                    _checkpoint_dump(_ckpath, np.asarray(xk), rhs)
+                    _checkpoint_dump(_ckpath, np.asarray(xk), _dense(rhs))
             _cbs.append(_ck_dump)
         if _cbs:
             def _snoop(xk):
@@ -429,20 +448,23 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
                     return _mv(v)
                 _A = LinearOperator(Aop_d.shape, matvec=_counted_d,
                                     dtype=np.complex128)
+            _b = rhs if _parked else np.asarray(rhs, np.complex128)
             try:
                 x, flag, _ = gmres_stream(
-                    _A, np.asarray(rhs, np.complex128), Pop_d, rtol=rtol,
+                    _A, _b, Pop_d, rtol=rtol,
                     budget=int(maxiter)*int(inner_m),
                     restart=int(_restart) if _restart else None,
-                    x0=_cast_x0(x0, np.asarray(rhs, np.complex128)),
+                    x0=_cast_x0(x0, _b),
                     callback=_snoop, on_residual=_on_res,
                     basis_dtype=np.complex64 if single else np.complex128)
             except OSError as exc:
                 warnings.warn("streamed Krylov basis unavailable (%s); "
                               "falling back to lgmres" % (exc,))
+                rhs = _dense(rhs)
                 x, flag = lgmres(Aop, rhs, M=Pop, rtol=rtol,
                                  maxiter=maxiter, inner_m=inner_m,
                                  x0=_cast_x0(x0, rhs), callback=_snoop)
+            del _b
             if flag == 2:
                 # the true residual stalled under the streamed cycle
                 # (krylov_stream's stall guard): lgmres finishes from
@@ -450,6 +472,7 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
                 # residual
                 warnings.warn("streamed Krylov basis: true residual "
                               "stalled; lgmres finishes from its iterate")
+                rhs = _dense(rhs)
                 x, flag = lgmres(Aop, rhs, M=Pop, rtol=rtol,
                                  maxiter=maxiter, inner_m=inner_m,
                                  x0=_cast_x0(x, rhs), callback=_snoop)

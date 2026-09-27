@@ -304,6 +304,35 @@ def spline_points(points, start_vec, end_vec, radius, max_seglen=None,
     return cs(want[keep])
 
 
+def _park_rhs(rhs, method):
+    """Under the streamed solve, the right-hand side goes to the NVMe
+    (krylov_stream.ParkedVector) and the array is let go: the solve
+    touches b only where it forms the true residual, so parking it
+    takes one full-length vector off every instant of the solve
+    (2026-09-27). Other methods keep the array."""
+    if method != 'gmres_stream':
+        return rhs
+    from krylov_stream import ParkedVector
+    return ParkedVector(rhs)
+
+
+def _true_residual(rhs, Aop, x, nrhs):
+    """``|rhs - A x| / |rhs|`` with the difference formed in place over
+    the product (no temporary); a parked rhs is read in chunks and
+    closed."""
+    if nrhs <= 0:
+        if hasattr(rhs, 'close'):
+            rhs.close()
+        return 0.0
+    r = np.asarray(Aop @ x, np.complex128)
+    if hasattr(rhs, 'sub_from'):
+        rhs.sub_from(r)
+        rhs.close()
+    else:
+        np.subtract(rhs, r, out=r)
+    return float(np.linalg.norm(r))/nrhs
+
+
 class Wire:
     """A bond wire: polyline -> chain of straight segments, each with
     the settled 1-4-8-12 cross-section (25 elements).
@@ -567,11 +596,12 @@ class WireEddySolver:
                              dtype=np.complex128)
         n0 = self.matvecs
         from port_impedance import krylov_solve
+        nrhs = np.linalg.norm(rhs)
+        rhs = _park_rhs(rhs, method)
         x, flag = krylov_solve(Aop, rhs, Pop, method=method, rtol=rtol,
                                maxiter=maxiter, inner_m=inner_m,
                                precision=precision)
-        nrhs = np.linalg.norm(rhs)
-        resid = (np.linalg.norm(rhs - Aop @ x)/nrhs if nrhs > 0 else 0.0)
+        resid = _true_residual(rhs, Aop, x, nrhs)
         i_f, i_hom = self._expand(x)
         i_w = self.ihat*current + i_hom
         v_f, v_w = self._coupled(i_f, i_w)
@@ -1860,11 +1890,12 @@ class WireBondSolver:
         Pop.apply_inplace = self._precond_inplace
         n0 = self.matvecs
         from port_impedance import krylov_solve
+        nrhs = np.linalg.norm(rhs)
+        rhs = _park_rhs(rhs, method)
         x, flag = krylov_solve(Aop, rhs, Pop, method=method, rtol=rtol,
                                maxiter=maxiter, inner_m=inner_m,
                                precision=precision)
-        nrhs = np.linalg.norm(rhs)
-        resid = (np.linalg.norm(rhs - Aop @ x)/nrhs if nrhs > 0 else 0.0)
+        resid = _true_residual(rhs, Aop, x, nrhs)
         i = spmv_c(self._basis(), x)
         i_f = self.ihat_f*current + i[:self.efg]
         i_w = self.ihat_w*current + i[self.efg:]
