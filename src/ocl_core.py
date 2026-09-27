@@ -77,8 +77,44 @@ def live():
                          if v > 0})
 
 
+_WARDS_RELEASED = False
+
+
+def _release_wards():
+    """Stop pyopencl arrays from keeping the host side of every copy.
+
+    ``Array.set(host)`` and ``Array.get(ary=out)`` enqueue a blocking
+    copy and then store its NannyEvent on the array, and a NannyEvent
+    holds a reference to the host buffer (its "ward") until it is
+    waited on. The array keeps up to twelve such events, so a table
+    uploaded once at setup keeps its host copy resident for the life
+    of the device array, and a Krylov-sized buffer read back into a
+    caller's array is kept alive past the caller's `del`. At R4 that
+    was 1.5 GiB of live host memory reachable only through those
+    events (heap_probe, 2026-09-26). The copies are blocking, so the
+    event is complete when it is offered: waiting on it costs nothing
+    and releases the ward, and it is not stored.
+    """
+    global _WARDS_RELEASED
+    if _WARDS_RELEASED:
+        return
+    import pyopencl as cl
+    import pyopencl.array as cla
+    orig = cla.Array.add_event
+
+    def add_event(self, evt, _orig=orig, _nanny=cl.NannyEvent):
+        if isinstance(evt, _nanny):
+            evt.wait()
+            return
+        _orig(self, evt)
+    cla.Array.add_event = add_event
+    _WARDS_RELEASED = True
+
+
 def queue(index=0):
     """The command queue for device ``index``."""
+    if not _WARDS_RELEASED:
+        _release_wards()
     return backend.ocl_queue(index)
 
 
