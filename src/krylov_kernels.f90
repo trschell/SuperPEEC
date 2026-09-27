@@ -66,3 +66,58 @@ subroutine block_update(n, nb, v, h, w)
   end do
   !$omp end parallel do
 end subroutine block_update
+
+
+! Spanning forest of the lattice node graph (2026-09-27): the DFS of
+! wireassembly._forest_walk, step for step -- roots in the given
+! order, a root skipped when already reached or isolated, each node's
+! edges in adjacency order, one LIFO stack -- so the forest, and every
+! gauge-dependent byte downstream, is the one the Python loop made.
+! The Python loop ran over .tolist() copies of the adjacency (boxed
+! ints: ~9 GiB at R5, the build's high-water instant once the solve's
+! own copies were gone); this walks the arrays as they are. All
+! indices are 0-based on both sides.
+
+subroutine forest_walk(nn, m, nroots, ptr, nbr, eid, sgn, roots, &
+                       parent, pedge, psign, comp, ncomp)
+  implicit none
+  integer, intent(in) :: nn, m, nroots
+  integer(8), intent(in) :: ptr(nn + 1), nbr(m), eid(m), roots(nroots)
+  integer(1), intent(in) :: sgn(m)
+  integer(8), intent(out) :: parent(nn), pedge(nn), comp(nn)
+  real(8), intent(out) :: psign(nn)
+  integer, intent(out) :: ncomp
+  integer(8), allocatable :: stack(:)
+  integer(8) :: top, u, v, i, r
+  integer :: k
+  parent = -1
+  pedge = -1
+  comp = -1
+  psign = 0d0
+  allocate(stack(nn))
+  ncomp = 0
+  do k = 1, nroots
+    r = roots(k)
+    if (comp(r + 1) >= 0 .or. ptr(r + 1) == ptr(r + 2)) cycle
+    comp(r + 1) = ncomp
+    top = 1
+    stack(1) = r
+    do while (top > 0)
+      u = stack(top)
+      top = top - 1
+      do i = ptr(u + 1), ptr(u + 2) - 1
+        v = nbr(i + 1)
+        if (comp(v + 1) < 0) then
+          comp(v + 1) = ncomp
+          parent(v + 1) = u
+          pedge(v + 1) = eid(i + 1)
+          psign(v + 1) = dble(sgn(i + 1))
+          top = top + 1
+          stack(top) = v
+        end if
+      end do
+    end do
+    ncomp = ncomp + 1
+  end do
+  deallocate(stack)
+end subroutine forest_walk

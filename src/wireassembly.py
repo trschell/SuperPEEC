@@ -108,12 +108,30 @@ def _forest_adjacency(B):
     return ptr, nbr[o], eid[o], sgn[o]
 
 
+try:                                   # krylov_kernels (Makefile_multipole)
+    from krylov_kernels import forest_walk as _forest_walk_f
+except ImportError:                    # the Python DFS below
+    _forest_walk_f = None
+
+
 def _forest_walk(B, nn, roots):
     """The shared DFS behind :func:`_forest`/:func:`_forest_rooted`;
     traversal order identical to the historical dict version (same
     per-node edge order, same LIFO stack), so the forest -- and every
-    gauge-dependent byte downstream -- is unchanged."""
+    gauge-dependent byte downstream -- is unchanged.
+
+    The walk runs in Fortran when the kernel module has it
+    (2026-09-27): the Python loop below needed .tolist() copies of
+    the adjacency -- boxed ints, ~9 GiB at R5 -- which were the
+    build's high-water instant once the solve's own copies were gone.
+    Same traversal, same arrays out (A/B bitwise on random graphs and
+    the R4 incidence)."""
     ptr, nbr, eid, sgn = _forest_adjacency(B)
+    if _forest_walk_f is not None:
+        roots = np.ascontiguousarray(roots, dtype=np.int64)
+        parent, pedge, psign, comp, ncomp = _forest_walk_f(
+            ptr, nbr, eid, sgn, roots)
+        return parent, pedge, psign, comp, int(ncomp)
     # plain python ints for the DFS hot loop: per-element numpy
     # scalar boxing made the first array version several times
     # slower than the old tuple dict; these lists cost ~0.9 GB
