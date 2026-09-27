@@ -154,7 +154,10 @@ class BasisFile(object):
         os.unlink(path)
         self.fd = fd
         self.count = 0
-        self.buf = np.empty(self.n, self.dtype)
+        self.buf = None            # only for read() without a destination:
+        # never taken by the solver (every read lands in a caller's
+        # block), and as an eager allocation it was one full vector
+        # (396 MB at R5) resident for nothing
         self._pool = None
         self.t_read = 0.0          # seconds inside reads (summed over threads)
         self.t_block = 0.0         # wall seconds inside read_block
@@ -167,9 +170,26 @@ class BasisFile(object):
         return v
 
     def read(self, j, out=None):
-        out = self.buf if out is None else out
+        if out is None:
+            if self.buf is None:
+                self.buf = np.empty(self.n, self.dtype)
+            out = self.buf
         t = time.time()
         _pread_all(self.fd, out, j*self.nbytes)
+        self.t_read += time.time() - t
+        return out
+
+    def add_into(self, j, out, chunk=1 << 22):
+        """``out += v_j``, read from the file ``chunk`` entries at a time
+        -- the vector never exists whole in memory."""
+        t = time.time()
+        buf = np.empty(min(chunk, self.n), self.dtype)
+        base = j*self.nbytes
+        itm = self.dtype.itemsize
+        for a in range(0, self.n, chunk):
+            m = min(chunk, self.n - a)
+            _pread_all(self.fd, buf[:m], base + a*itm)
+            out[a:a + m] += buf[:m]
         self.t_read += time.time() - t
         return out
 
@@ -362,7 +382,15 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
     t_ops = 0.0                    # seconds inside A and M applies
     nchecks = 0
     _T_KERNEL[0] = 0.0
-    with BasisFile(n, basis_dtype, workdir) as V:
+    with BasisFile(n, basis_dtype, workdir) as V, \
+            BasisFile(n, dt, workdir) as XF:
+        # XF parks the iterate x during a convergence check (2026-09-26):
+        # the check forms u = x + V y and applies the operator to it,
+        # and x -- untouched by the check -- was one full vector
+        # standing beside u at what became the solve's peak instant.
+        # It is written before u is formed, added into u from the
+        # file in chunks, and read back only when the check fails and
+        # the cycle continues; one 792 MB write per check at R5.
         nb = max(1, min(BLOCK_MAX, BLOCK_BYTES//(n*V.dtype.itemsize)))
         blk = np.empty((nb, n), V.dtype)
         while True:
@@ -441,8 +469,11 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                 # form the iterate and measure the true residual
                 y = solve_triangular(H[:k, :k], g[:k], lower=False,
                                      check_finite=False)
+                XF.reset()
+                XF.append(x)                   # parked; the same bytes
+                del x
                 u = _combine(V, y, n, blk)
-                u += x
+                XF.add_into(0, u)              # u += x, from the file
                 t = time.time()
                 r = np.asarray(A.matvec(u), dt)
                 np.subtract(b, r, out=r)     # r = b - A u, no temporary
@@ -486,6 +517,8 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                     x = u
                     break
                 del u, r
+                x = np.empty(n, dt)
+                XF.read(0, out=x)              # the check failed: x is back
             del vk                   # w is released as soon as it is stored
             if callback is not None:
                 callback(x)
