@@ -85,6 +85,36 @@ inline real_t sten_acc(__global const real_t *xt,
     const unsigned int on = rem_ % 3;  rem_ /= 3;           \\
     const unsigned int t  = (unsigned int)rem_
 
+/* The plaquette -> slot map (2026-09-27). Explicit: one int per
+   plaquette, one work item per plaquette. Implicit (IMPLICIT_FLAT,
+   the plaquettes in tile order so the map is monotone): an occupancy
+   mask per tile (NWORD ulongs) and a prefix count, one work item per
+   SLOT -- an empty slot has no plaquette and returns, an occupied one
+   finds its plaquette index by popcount. `n` is the plaquette count
+   in the explicit form and the slot count in the implicit one. */
+#define NWORD ((3*TL*TL*TL + 63)/64)
+#ifdef IMPLICIT_FLAT
+#define FLAT_ARGS __global const ulong *mask, __global const int *pre
+#define FLAT_PROLOGUE(i, gid)                                          \\
+    const size_t gid = get_global_id(0);                               \\
+    if (gid >= (size_t)n) return;                                      \\
+    const unsigned int t_ = (unsigned int)(gid / (3*TL*TL*TL));        \\
+    const unsigned int l_ = (unsigned int)(gid - (size_t)t_*(3*TL*TL*TL)); \\
+    const unsigned int w_ = l_ >> 6, b_ = l_ & 63u;                    \\
+    const ulong mw_ = mask[(size_t)t_*NWORD + w_];                     \\
+    if (!((mw_ >> b_) & 1UL)) return;                                  \\
+    unsigned int i = (unsigned int)pre[t_]                             \\
+        + (unsigned int)popcount(mw_ & ((1UL << b_) - 1UL));           \\
+    for (unsigned int q_ = 0; q_ < w_; ++q_)                           \\
+        i += (unsigned int)popcount(mask[(size_t)t_*NWORD + q_])
+#else
+#define FLAT_ARGS __global const int *flat
+#define FLAT_PROLOGUE(i, gid)                                          \\
+    const unsigned int i = get_global_id(0);                           \\
+    if (i >= n) return;                                                \\
+    const size_t gid = (size_t)flat[i]
+#endif
+
 __kernel void sten_mv(__global const real_t *xt,
                       __global const int *nbt,
                       __global const int *nsrc,
@@ -177,7 +207,7 @@ __kernel void sten_jac_w(__global const real_t *xt,
    item), and the result goes either to the slot (for the V-cycle,
    which keeps level 0 in tiles) or to a flat vector. */
 __kernel void sten_mv_p(__global const real_t *xt,
-                        __global const int *flat,
+                        FLAT_ARGS,
                         __global const int *nbt,
                         __global const int *nsrc,
                         __global const int *of,
@@ -186,9 +216,7 @@ __kernel void sten_mv_p(__global const real_t *xt,
                         __global real_t *y,
                         const unsigned int n)
 {
-    const unsigned int i = get_global_id(0);
-    if (i >= n) return;
-    const size_t gid = (size_t)flat[i];
+    FLAT_PROLOGUE(i, gid);
     DECOMPOSE(gid, t, on, a1, a2, a3);
     y[i] = sten_acc(xt, nbt, nsrc, of, cf, sptr, t, on,
                     (int)a1, (int)a2, (int)a3);
@@ -197,7 +225,7 @@ __kernel void sten_mv_p(__global const real_t *xt,
 /* r = b - A x: into a tile grid (rt) or a flat vector (r) */
 __kernel void sten_res_t(__global const real_t *xt,
                          __global const real_t *b,
-                         __global const int *flat,
+                         FLAT_ARGS,
                          __global const int *nbt,
                          __global const int *nsrc,
                          __global const int *of,
@@ -206,9 +234,7 @@ __kernel void sten_res_t(__global const real_t *xt,
                          __global real_t *rt,
                          const unsigned int n)
 {
-    const unsigned int i = get_global_id(0);
-    if (i >= n) return;
-    const size_t gid = (size_t)flat[i];
+    FLAT_PROLOGUE(i, gid);
     DECOMPOSE(gid, t, on, a1, a2, a3);
     rt[gid] = b[i] - sten_acc(xt, nbt, nsrc, of, cf, sptr, t, on,
                               (int)a1, (int)a2, (int)a3);
@@ -216,7 +242,7 @@ __kernel void sten_res_t(__global const real_t *xt,
 
 __kernel void sten_res_p(__global const real_t *xt,
                          __global const real_t *b,
-                         __global const int *flat,
+                         FLAT_ARGS,
                          __global const int *nbt,
                          __global const int *nsrc,
                          __global const int *of,
@@ -225,9 +251,7 @@ __kernel void sten_res_p(__global const real_t *xt,
                          __global real_t *r,
                          const unsigned int n)
 {
-    const unsigned int i = get_global_id(0);
-    if (i >= n) return;
-    const size_t gid = (size_t)flat[i];
+    FLAT_PROLOGUE(i, gid);
     DECOMPOSE(gid, t, on, a1, a2, a3);
     r[i] = b[i] - sten_acc(xt, nbt, nsrc, of, cf, sptr, t, on,
                            (int)a1, (int)a2, (int)a3);
@@ -236,7 +260,7 @@ __kernel void sten_res_p(__global const real_t *xt,
 /* one damped-Jacobi sweep, tiles to tiles, b flat; uniform weight */
 __kernel void sten_jac_p(__global const real_t *xt,
                          __global const real_t *b,
-                         __global const int *flat,
+                         FLAT_ARGS,
                          __global const int *nbt,
                          __global const int *nsrc,
                          __global const int *of,
@@ -246,9 +270,7 @@ __kernel void sten_jac_p(__global const real_t *xt,
                          const real_t wdi,
                          const unsigned int n)
 {
-    const unsigned int i = get_global_id(0);
-    if (i >= n) return;
-    const size_t gid = (size_t)flat[i];
+    FLAT_PROLOGUE(i, gid);
     DECOMPOSE(gid, t, on, a1, a2, a3);
     const real_t ax = sten_acc(xt, nbt, nsrc, of, cf, sptr, t, on,
                                (int)a1, (int)a2, (int)a3);
@@ -258,7 +280,7 @@ __kernel void sten_jac_p(__global const real_t *xt,
 /* the same where the weight varies, one per plaquette */
 __kernel void sten_jac_pw(__global const real_t *xt,
                           __global const real_t *b,
-                          __global const int *flat,
+                          FLAT_ARGS,
                           __global const real_t *wp,
                           __global const int *nbt,
                           __global const int *nsrc,
@@ -268,24 +290,22 @@ __kernel void sten_jac_pw(__global const real_t *xt,
                           __global real_t *yt,
                           const unsigned int n)
 {
-    const unsigned int i = get_global_id(0);
-    if (i >= n) return;
-    const size_t gid = (size_t)flat[i];
+    FLAT_PROLOGUE(i, gid);
     DECOMPOSE(gid, t, on, a1, a2, a3);
     const real_t ax = sten_acc(xt, nbt, nsrc, of, cf, sptr, t, on,
                                (int)a1, (int)a2, (int)a3);
     yt[gid] = xt[gid] + wp[i]*(b[i] - ax);
 }
 
-/* prolongation straight into the tiles: xt[flat[i]] += x1[col[i]] */
+/* prolongation straight into the tiles: xt[slot(i)] += x1[col[i]] */
 __kernel void sten_prolong_add(__global const int *col,
                                __global const real_t *x1,
-                               __global const int *flat,
+                               FLAT_ARGS,
                                __global real_t *xt,
                                const unsigned int n)
 {
-    const unsigned int i = get_global_id(0);
-    if (i < n) xt[flat[i]] += x1[col[i]];
+    FLAT_PROLOGUE(i, gid);
+    xt[gid] += x1[col[i]];
 }
 
 /* ---- level-0 aggregation from tile geometry (2026-09-25). An
@@ -302,15 +322,13 @@ __kernel void sten_prolong_add(__global const int *col,
 
 __kernel void sten_prolong_impl(__global const int *tab,
                                 __global const real_t *x1,
-                                __global const int *flat,
+                                FLAT_ARGS,
                                 __global real_t *xt,
                                 const unsigned int n,
                                 const int shz, const int shy,
                                 const int shx)
 {
-    const unsigned int i = get_global_id(0);
-    if (i >= n) return;
-    const size_t gid = (size_t)flat[i];
+    FLAT_PROLOGUE(i, gid);
     DECOMPOSE(gid, t, on, a1, a2, a3);
     const int ny = TL >> shy, nx = TL >> shx;
     const int blk = (((int)a1 >> shz)*ny + ((int)a2 >> shy))*nx
@@ -358,16 +376,16 @@ __kernel void sten_restrict_impl(__global const int *inv_t,
     y[c] = acc;
 }
 
-/* out[i] = yp[i] - t[flat[i]]: the local block's final combination,
+/* out[i] = yp[i] - t[slot(i)]: the local block's final combination,
    read from the tiled solution without a flat copy of it */
 __kernel void sten_unpack_sub(__global const real_t *t,
-                              __global const int *flat,
+                              FLAT_ARGS,
                               __global const real_t *yp,
                               __global real_t *out,
                               const unsigned int n)
 {
-    const unsigned int i = get_global_id(0);
-    if (i < n) out[i] = yp[i] - t[flat[i]];
+    FLAT_PROLOGUE(i, gid);
+    out[i] = yp[i] - t[gid];
 }
 
 #ifdef TLC
@@ -429,7 +447,7 @@ inline real_t sten1_acc(__global const real_t *xt,
     const unsigned int t  = (unsigned int)rem_
 
 __kernel void sten1_mv_p(__global const real_t *xt,
-                         __global const int *flat,
+                         FLAT_ARGS,
                          __global const uchar *patg,
                          __global const int *nbt,
                          __global const int *nsrc,
@@ -439,9 +457,7 @@ __kernel void sten1_mv_p(__global const real_t *xt,
                          __global real_t *y,
                          const unsigned int n)
 {
-    const unsigned int i = get_global_id(0);
-    if (i >= n) return;
-    const size_t gid = (size_t)flat[i];
+    FLAT_PROLOGUE(i, gid);
     DECOMPOSEC(gid, t, on, a1, a2, a3);
     y[i] = sten1_acc(xt, patg, nbt, nsrc, of, ctab, sptr, t, on,
                      (int)a1, (int)a2, (int)a3, patg[gid]);
@@ -449,7 +465,7 @@ __kernel void sten1_mv_p(__global const real_t *xt,
 
 __kernel void sten1_res_t(__global const real_t *xt,
                           __global const real_t *b,
-                          __global const int *flat,
+                          FLAT_ARGS,
                           __global const uchar *patg,
                           __global const int *nbt,
                           __global const int *nsrc,
@@ -459,9 +475,7 @@ __kernel void sten1_res_t(__global const real_t *xt,
                           __global real_t *rt,
                           const unsigned int n)
 {
-    const unsigned int i = get_global_id(0);
-    if (i >= n) return;
-    const size_t gid = (size_t)flat[i];
+    FLAT_PROLOGUE(i, gid);
     DECOMPOSEC(gid, t, on, a1, a2, a3);
     rt[gid] = b[i] - sten1_acc(xt, patg, nbt, nsrc, of, ctab, sptr, t, on,
                                (int)a1, (int)a2, (int)a3, patg[gid]);
@@ -469,7 +483,7 @@ __kernel void sten1_res_t(__global const real_t *xt,
 
 __kernel void sten1_jac_p(__global const real_t *xt,
                           __global const real_t *b,
-                          __global const int *flat,
+                          FLAT_ARGS,
                           __global const uchar *patg,
                           __global const real_t *wtab,
                           __global const int *nbt,
@@ -480,9 +494,7 @@ __kernel void sten1_jac_p(__global const real_t *xt,
                           __global real_t *yt,
                           const unsigned int n)
 {
-    const unsigned int i = get_global_id(0);
-    if (i >= n) return;
-    const size_t gid = (size_t)flat[i];
+    FLAT_PROLOGUE(i, gid);
     DECOMPOSEC(gid, t, on, a1, a2, a3);
     const uint pc = patg[gid];
     const real_t ax = sten1_acc(xt, patg, nbt, nsrc, of, ctab, sptr, t, on,
@@ -493,21 +505,21 @@ __kernel void sten1_jac_p(__global const real_t *xt,
 
 /* flat plaquette vector -> zeroed tiles, and back */
 __kernel void sten_pack(__global const real_t *v,
-                        __global const int *flat,
+                        FLAT_ARGS,
                         __global real_t *t,
                         const unsigned int n)
 {
-    const unsigned int i = get_global_id(0);
-    if (i < n) t[flat[i]] = v[i];
+    FLAT_PROLOGUE(i, gid);
+    t[gid] = v[i];
 }
 
 __kernel void sten_unpack(__global const real_t *t,
-                          __global const int *flat,
+                          FLAT_ARGS,
                           __global real_t *v,
                           const unsigned int n)
 {
-    const unsigned int i = get_global_id(0);
-    if (i < n) v[i] = t[flat[i]];
+    FLAT_PROLOGUE(i, gid);
+    v[i] = t[gid];
 }
 """
 
@@ -536,7 +548,42 @@ class Stencil0(object):
         if int(flat.max()) >= 2**31:
             raise OverflowError("stencil tile array has %d slots, past "
                                 "the 32-bit index" % int(flat.max()))
-        self._flat = ocl_core.to_device(flat.astype(np.int32))
+        # The map (2026-09-27): when the plaquettes are in tile order
+        # (loopmg.tile_permutation, applied by the solver before the
+        # factor) the map is monotone, and it is kept as an occupancy
+        # mask per tile plus a prefix count -- 28 B per tile against 4 B
+        # per plaquette -- with every kernel launched per SLOT. Any
+        # other order keeps the explicit int32 map and per-plaquette
+        # launches (SPPEEC_OCL_IMPLICIT_FLAT=0 forces that form).
+        import os
+        mono = bool(np.all(flat[1:] > flat[:-1]))
+        self.implicit = mono and \
+            os.environ.get('SPPEEC_OCL_IMPLICIT_FLAT', '1') != '0'
+        if self.implicit:
+            per = 3*self.TL**3
+            nw = (per + 63)//64
+            t = flat//per
+            loc = flat - t*per
+            key = t*nw + (loc >> 6)
+            bit = np.uint64(1) << (loc & 63).astype(np.uint64)
+            starts = np.flatnonzero(np.r_[True, key[1:] != key[:-1]])
+            mask = np.zeros(self.nt*nw, np.uint64)
+            mask[key[starts]] = np.bitwise_or.reduceat(bit, starts)
+            pre = np.zeros(self.nt + 1, np.int32)
+            np.cumsum(np.bincount(t, minlength=self.nt), out=pre[1:])
+            del t, loc, key, bit, starts
+            self._mask = ocl_core.to_device(mask)
+            self._pre = ocl_core.to_device(pre)
+            self._flat = None
+            self._fargs = (self._mask.data, self._pre.data)
+            self._nl = self.ntot
+            self._map_bytes = int(self._mask.nbytes + self._pre.nbytes)
+        else:
+            self._flat = ocl_core.to_device(flat.astype(np.int32))
+            self._mask = self._pre = None
+            self._fargs = (self._flat.data,)
+            self._nl = self.n
+            self._map_bytes = int(self._flat.nbytes)
         # the host holds these Fortran-shaped -- nbt is (27, tiles)
         # and of is (3, slots) -- so they are transposed on the way in
         # and the kernel indexes tile-major and slot-major
@@ -567,8 +614,10 @@ class Stencil0(object):
             self.wdi = dt.type(0)
             self._wp = ocl_core.to_device(wp)
         del w, wp
-        self.prg = ocl_core.program(SOURCE, _DT[dt], {'TL': self.TL},
-                                    key='ocl_stencil')
+        defs = {'TL': self.TL}
+        if self.implicit:
+            defs['IMPLICIT_FLAT'] = 1
+        self.prg = ocl_core.program(SOURCE, _DT[dt], defs, key='ocl_stencil')
         self._k = {n: ocl_core.kernel(self.prg, n)
                    for n in ('sten_mv_p', 'sten_res_t', 'sten_res_p',
                              'sten_jac_p', 'sten_jac_pw',
@@ -588,7 +637,7 @@ class Stencil0(object):
         """Device bytes by part, for sizing arguments."""
         tables = (self._nbt.nbytes + self._nsrc.nbytes + self._of.nbytes
                   + self._cf.nbytes + self._sptr.nbytes)
-        return dict(flat_index=int(self._flat.nbytes),
+        return dict(flat_index=int(self._map_bytes),
                     weights=int(0 if self._wp is None else self._wp.nbytes),
                     work_grids=int(self._xt.nbytes + self._yt.nbytes),
                     tables=int(tables), slots=int(self.ntot),
@@ -597,7 +646,7 @@ class Stencil0(object):
     def device_bytes(self):
         """Resident device bytes: the tables, the weights, the tiles."""
         w = 0 if self._wp is None else self._wp.nbytes
-        return int(self._flat.nbytes + self._nbt.nbytes
+        return int(self._map_bytes + self._nbt.nbytes
                    + self._nsrc.nbytes + self._of.nbytes + self._cf.nbytes
                    + self._sptr.nbytes + w
                    + self._xt.nbytes + self._yt.nbytes)
@@ -607,14 +656,14 @@ class Stencil0(object):
     def _pack(self, v, t):
         q = ocl_core.queue()
         t.fill(self.dtype.type(0), queue=q)
-        self._k['sten_pack'](q, (self.n,), None, v.data, self._flat.data,
-                             t.data, np.uint32(self.n))
+        self._k['sten_pack'](q, (self._nl,), None, v.data, *self._fargs,
+                             t.data, np.uint32(self._nl))
         return t
 
     def _unpack(self, t, v):
         q = ocl_core.queue()
-        self._k['sten_unpack'](q, (self.n,), None, t.data,
-                               self._flat.data, v.data, np.uint32(self.n))
+        self._k['sten_unpack'](q, (self._nl,), None, t.data,
+                               *self._fargs, v.data, np.uint32(self._nl))
         return v
 
     # ------------------------------------------- the operator itself
@@ -627,32 +676,32 @@ class Stencil0(object):
         """One sweep from tiles ``cur`` with flat ``b`` into tiles ``alt``."""
         q = ocl_core.queue()
         if self.uniform_w:
-            self._k['sten_jac_p'](q, (self.n,), None, cur.data, b.data,
-                                  self._flat.data, *self._tiles(),
-                                  alt.data, self.wdi, np.uint32(self.n))
+            self._k['sten_jac_p'](q, (self._nl,), None, cur.data, b.data,
+                                  *self._fargs, *self._tiles(),
+                                  alt.data, self.wdi, np.uint32(self._nl))
         else:
-            self._k['sten_jac_pw'](q, (self.n,), None, cur.data, b.data,
-                                   self._flat.data, self._wp.data,
+            self._k['sten_jac_pw'](q, (self._nl,), None, cur.data, b.data,
+                                   *self._fargs, self._wp.data,
                                    *self._tiles(), alt.data,
-                                   np.uint32(self.n))
+                                   np.uint32(self._nl))
 
     # ---- the flat API (validators, the generic smoother loop)
     def spmv(self, x, y):
         """``y = A x`` on flat vectors."""
         q = ocl_core.queue()
         self._pack(x, self._xt)
-        self._k['sten_mv_p'](q, (self.n,), None, self._xt.data,
-                             self._flat.data, *self._tiles(), y.data,
-                             np.uint32(self.n))
+        self._k['sten_mv_p'](q, (self._nl,), None, self._xt.data,
+                             *self._fargs, *self._tiles(), y.data,
+                             np.uint32(self._nl))
         return y
 
     def residual(self, x, b, r):
         """``r = b - A x`` on flat vectors."""
         q = ocl_core.queue()
         self._pack(x, self._xt)
-        self._k['sten_res_p'](q, (self.n,), None, self._xt.data, b.data,
-                              self._flat.data, *self._tiles(), r.data,
-                              np.uint32(self.n))
+        self._k['sten_res_p'](q, (self._nl,), None, self._xt.data, b.data,
+                              *self._fargs, *self._tiles(), r.data,
+                              np.uint32(self._nl))
         return r
 
     def sweeps(self, x, b, nu):
@@ -703,9 +752,9 @@ class Stencil0(object):
         """``b - A x`` into the free grid; returns that grid."""
         q = ocl_core.queue()
         rt = self.t_free()
-        self._k['sten_res_t'](q, (self.n,), None, self._cur.data, b.data,
-                              self._flat.data, *self._tiles(), rt.data,
-                              np.uint32(self.n))
+        self._k['sten_res_t'](q, (self._nl,), None, self._cur.data, b.data,
+                              *self._fargs, *self._tiles(), rt.data,
+                              np.uint32(self._nl))
         return rt
 
     def t_prolong_add(self, P, x1):
@@ -715,15 +764,15 @@ class Stencil0(object):
         tab = getattr(P, 'tab', None)
         if tab is not None:
             shz, shy, shx = P.shifts
-            self._k['sten_prolong_impl'](q, (self.n,), None, tab.data,
-                                         x1.data, self._flat.data,
-                                         self._cur.data, np.uint32(self.n),
+            self._k['sten_prolong_impl'](q, (self._nl,), None, tab.data,
+                                         x1.data, *self._fargs,
+                                         self._cur.data, np.uint32(self._nl),
                                          np.int32(shz), np.int32(shy),
                                          np.int32(shx))
             return
-        self._k['sten_prolong_add'](q, (self.n,), None, P.col.data,
-                                    x1.data, self._flat.data,
-                                    self._cur.data, np.uint32(self.n))
+        self._k['sten_prolong_add'](q, (self._nl,), None, P.col.data,
+                                    x1.data, *self._fargs,
+                                    self._cur.data, np.uint32(self._nl))
 
     def t_restrict(self, R, rt, y):
         """y = R r from the tile grid ``rt``; ``R`` is a remapped
@@ -747,9 +796,9 @@ class Stencil0(object):
     def t_unpack_sub(self, yp, out):
         """``out = yp - x`` straight from the tiles."""
         q = ocl_core.queue()
-        self._k['sten_unpack_sub'](q, (self.n,), None, self._cur.data,
-                                   self._flat.data, yp.data, out.data,
-                                   np.uint32(self.n))
+        self._k['sten_unpack_sub'](q, (self._nl,), None, self._cur.data,
+                                   *self._fargs, yp.data, out.data,
+                                   np.uint32(self._nl))
         return out
 
 

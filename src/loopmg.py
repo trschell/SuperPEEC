@@ -94,6 +94,80 @@ if os.environ.get('SPPEEC_STENCIL') != '0' and _CSRMV8:
         _STEN = {}
 
 
+def tile_order_engaged():
+    """Whether the plaquette columns should be put in tile order.
+
+    True on the OpenCL backend when the stencil kernels exist
+    (``SPPEEC_OCL_TILEORDER=0`` opts out). In tile order the device
+    stencil's plaquette-to-slot map is monotone and reduces to an
+    occupancy mask per tile (2026-09-27); on every other path the
+    order is left alone, so those paths stay bit-identical.
+    """
+    if not _STEN or os.environ.get('SPPEEC_OCL_TILEORDER', '1') == '0':
+        return False
+    try:
+        import backend
+        return backend.name() == 'opencl'
+    except Exception:
+        return False
+
+
+def tile_permutation(normal, base, TL=None):
+    """The permutation that puts plaquettes in the stencil's slot
+    order: tiles as ``_Stencil0.build`` numbers them (unique tile keys
+    ascending -- x, then y, then z coarsest to finest), then normal,
+    then z, y, x inside the tile. Returns None when the order is
+    already this one."""
+    TL = int(_Stencil0.TL if TL is None else TL)
+    base = np.asarray(base)
+    normal = np.asarray(normal)
+    keys = (base[:, 0] % TL, base[:, 1] % TL, base[:, 2] % TL, normal,
+            base[:, 2]//TL, base[:, 1]//TL, base[:, 0]//TL)
+    perm = np.lexsort(keys)
+    if np.array_equal(perm, np.arange(perm.size)):
+        return None
+    return perm
+
+
+def csc_permute_prefix(B, perm, chunk=1 << 22):
+    """``B`` (csc) with its first ``len(perm)`` columns reordered so
+    that new column j is old column ``perm[j]``; the columns after
+    them stay. Each column's entries keep their order (so every
+    product over a column is bit-unchanged). Built ``chunk`` columns
+    at a time into preallocated arrays: no full-length gather index."""
+    import scipy.sparse as _sp
+    B = B.tocsc()
+    nperm = int(len(perm))
+    ncol = B.shape[1]
+    full = np.concatenate([np.asarray(perm, np.int64),
+                           np.arange(nperm, ncol, dtype=np.int64)])
+    lens = np.diff(B.indptr).astype(np.int64)
+    new_lens = lens[full]
+    indptr = np.zeros(ncol + 1, dtype=B.indptr.dtype)
+    np.cumsum(new_lens, out=indptr[1:])
+    data = np.empty(B.data.shape[0], B.data.dtype)
+    indices = np.empty(B.indices.shape[0], B.indices.dtype)
+    src_start = B.indptr[:-1].astype(np.int64)
+    for c0 in range(0, ncol, chunk):
+        c1 = min(ncol, c0 + chunk)
+        cols = full[c0:c1]
+        ln = new_lens[c0:c1]
+        tot = int(ln.sum())
+        if tot == 0:
+            continue
+        # entry k of this chunk comes from src_start[col] + offset
+        rep = np.repeat(src_start[cols] - np.concatenate(
+            [[0], np.cumsum(ln[:-1])]), ln)
+        idx = rep + np.arange(tot, dtype=np.int64)
+        d0 = int(indptr[c0])
+        data[d0:d0 + tot] = B.data[idx]
+        indices[d0:d0 + tot] = B.indices[idx]
+        del rep, idx
+    out = _sp.csc_matrix((data, indices, indptr), shape=B.shape)
+    out.has_sorted_indices = bool(B.has_sorted_indices)
+    return out
+
+
 class _Stencil0:
     """Tiled-stencil form of the level-0 Gram (tier 2, 2026-08-26).
 

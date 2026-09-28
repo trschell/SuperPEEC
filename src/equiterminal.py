@@ -1059,6 +1059,18 @@ class EquiTerminalSolver:
                 nrm, bse = loopmg.plaquette_geometry(
                     csc_prefix(self.Y, efg, self.nplaq), self.fil_axis,
                     self.fil_cell, self.nplaq)
+                # tile order on the OpenCL path (2026-09-27; see
+                # wireassembly): the plaquette columns in the stencil's
+                # slot order, so the device map is an occupancy mask
+                if loopmg.tile_order_engaged():
+                    perm = loopmg.tile_permutation(nrm, bse)
+                    if perm is not None:
+                        self.Y = loopmg.csc_permute_prefix(self.Y, perm)
+                        self.YT = self.Y.T.tocsr()
+                        YT32 = self.YT.tocsc()
+                        YT32.data = np.float32(YT32.data)
+                        nrm, bse = nrm[perm], bse[perm]
+                        del perm
                 # The basis runs [plaquettes | holes + port cycles |
                 # redistribution modes]. Only the middle group belongs
                 # in the exact Schur block: the modes are an identity

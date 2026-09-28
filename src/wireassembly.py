@@ -1122,13 +1122,27 @@ class WireBondSolver:
             import loopmg
             from port_impedance import _GeoMGFactor
             from sksparse.cholmod import cholesky
+            nrm, bse = loopmg.plaquette_geometry(
+                csc_prefix(self.Bmat, self.efg, self.nplaq),
+                self.fil_axis, self.fil_cell, self.nplaq)
+            # tile order (2026-09-27): on the OpenCL path the plaquette
+            # columns are put in the stencil's slot order first, so the
+            # device map plaquette -> slot is monotone and reduces to
+            # an occupancy mask per tile. Same operator, permuted
+            # unknowns: every sum over a column is bit-unchanged, the
+            # sums over a filament's plaquettes and the Krylov dot
+            # products run in the new order (ulp-level).
+            if loopmg.tile_order_engaged():
+                perm = loopmg.tile_permutation(nrm, bse)
+                if perm is not None:
+                    self.Bmat = loopmg.csc_permute_prefix(self.Bmat, perm)
+                    nrm, bse = nrm[perm], bse[perm]
+                    self._Bop = None       # any cached basis is stale
+                    del perm
             idx_yt = np.r_[0:self.nplaq,
                            self.nplaq + self.nd:self.size]
             Byt = self.Bmat[:, idx_yt].T.tocsr().astype(np.float32)
             del idx_yt
-            nrm, bse = loopmg.plaquette_geometry(
-                csc_prefix(self.Bmat, self.efg, self.nplaq),
-                self.fil_axis, self.fil_cell, self.nplaq)
             geo = _GeoMGFactor(Byt, nrm, bse, self.nplaq,
                                cycles=self.amg_cycles)
             del Byt                # setup transient: the factor holds
