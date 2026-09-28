@@ -326,7 +326,9 @@ __kernel void sten_prolong_impl(__global const int *tab,
                                 __global real_t *xt,
                                 const unsigned int n,
                                 const int shz, const int shy,
-                                const int shx)
+                                const int shx,
+                                __global const int *c2s,
+                                const int remap)
 {
     FLAT_PROLOGUE(i, gid);
     DECOMPOSE(gid, t, on, a1, a2, a3);
@@ -334,22 +336,66 @@ __kernel void sten_prolong_impl(__global const int *tab,
     const int blk = (((int)a1 >> shz)*ny + ((int)a2 >> shy))*nx
                     + ((int)a3 >> shx);
     const int nb = NBLK(shz, shy, shx);
-    xt[gid] += x1[tab[((size_t)t*3 + on)*nb + blk]];
+    const int c = tab[((size_t)t*3 + on)*nb + blk];
+    /* the table holds the coarse INDEX (2026-09-28); when the coarse
+       level lives in tiles, c2s maps it to the slot -- one gather,
+       in place of a second copy of the table */
+    xt[gid] += x1[remap ? c2s[c] : c];
 }
+
+#ifdef IMPLICIT_FLAT
+/* The restriction launched per (tile, normal, block) instead of per
+   coarse row (2026-09-28): the block table names the coarse row, so
+   the per-row tile and block tables are not needed; the members are
+   the block's occupied slots in the fixed nesting (tile-ordered
+   plaquettes), read off the stencil's mask. */
+__kernel void sten_restrict_blk(__global const int *tab,
+                                __global const ulong *mask,
+                                __global const real_t *rt,
+                                __global real_t *y,
+                                const unsigned int nk,
+                                const int shz, const int shy,
+                                const int shx)
+{
+    const unsigned int k = get_global_id(0);
+    if (k >= nk) return;
+    const int c = tab[k];
+    if (c < 0) return;
+    const int ny = TL >> shy, nx = TL >> shx;
+    const int nb = NBLK(shz, shy, shx);
+    int blk = (int)(k % nb);
+    const unsigned int ton = k / nb;
+    const unsigned int on = ton % 3, t = ton / 3;
+    const int bx = blk % nx; blk /= nx;
+    const int by = blk % ny; blk /= ny;
+    const int bz = blk;
+    const size_t tb = (size_t)t*3*TL*TL*TL;
+    const size_t base = tb + (size_t)on*TL*TL*TL
+                        + (((size_t)(bz << shz))*TL + (by << shy))*TL
+                        + (bx << shx);
+    real_t acc = (real_t)0;
+    for (int kz = 0; kz < (1 << shz); ++kz)
+      for (int ky = 0; ky < (1 << shy); ++ky)
+        for (int kx = 0; kx < (1 << shx); ++kx) {
+            const size_t g = base + ((size_t)kz*TL + ky)*TL + kx;
+            const unsigned int l = (unsigned int)(g - tb);
+            if ((mask[(size_t)t*NWORD + (l >> 6)] >> (l & 63u)) & 1UL)
+                acc += rt[g];
+        }
+    y[c] = acc;
+}
+#endif
 
 /* The members of an aggregate are summed in the CSR's own order --
    ascending fine index -- which is NOT a fixed loop nesting (the
    plaquette numbering's axis priority varies by region), so each
    coarse row carries its members' offsets inside the block, 3 bits
    each in that order, and the count, in one uint. */
-#ifdef IMPLICIT_FLAT
-#define ORDER_ARG __global const ulong *order     /* the occupancy mask */
-#else
-#define ORDER_ARG __global const uint *order      /* per-row order codes */
-#endif
+/* the per-row form, for a plaquette order that is not slot order:
+   each coarse row carries its members' offsets in the CSR's order */
 __kernel void sten_restrict_impl(__global const int *inv_t,
                                  __global const int *inv_b,
-                                 ORDER_ARG,
+                                 __global const uint *order,
                                  __global const real_t *rt,
                                  __global real_t *y,
                                  const unsigned int nrow,
@@ -371,21 +417,6 @@ __kernel void sten_restrict_impl(__global const int *inv_t,
                         + (((size_t)(bz << shz))*TL + (by << shy))*TL
                         + (bx << shx);
     real_t acc = (real_t)0;
-#ifdef IMPLICIT_FLAT
-    /* tile-ordered plaquettes (2026-09-27): ascending fine index IS
-       slot order, so the members are the block's occupied slots in
-       the fixed z, y, x nesting -- the stencil's own mask says which,
-       and no per-row order code is stored */
-    const size_t tb = (size_t)t*3*TL*TL*TL;
-    for (int kz = 0; kz < (1 << shz); ++kz)
-      for (int ky = 0; ky < (1 << shy); ++ky)
-        for (int kx = 0; kx < (1 << shx); ++kx) {
-            const size_t g = base + ((size_t)kz*TL + ky)*TL + kx;
-            const unsigned int l = (unsigned int)(g - tb);
-            if ((order[(size_t)t*NWORD + (l >> 6)] >> (l & 63u)) & 1UL)
-                acc += rt[g];
-        }
-#else
     const uint code = order[c];
     const int cnt = (int)(code >> 24);
     for (int k = 0; k < cnt; ++k) {
@@ -393,7 +424,6 @@ __kernel void sten_restrict_impl(__global const int *inv_t,
         acc += rt[base + ((size_t)(off >> 2)*TL + ((off >> 1) & 1u))*TL
                   + (off & 1u)];
     }
-#endif
     y[c] = acc;
 }
 
@@ -644,7 +674,8 @@ class Stencil0(object):
                              'sten_jac_p', 'sten_jac_pw',
                              'sten_prolong_add', 'sten_prolong_impl',
                              'sten_restrict_impl', 'sten_unpack_sub',
-                             'sten_pack', 'sten_unpack')}
+                             'sten_pack', 'sten_unpack')
+                   + (('sten_restrict_blk',) if self.implicit else ())}
         # Two tile grids, and only two: the V-cycle keeps level 0 in
         # them (x and its Jacobi partner; the residual takes the free
         # one), the right-hand side stays flat in the caller's vector.
@@ -785,11 +816,14 @@ class Stencil0(object):
         tab = getattr(P, 'tab', None)
         if tab is not None:
             shz, shy, shx = P.shifts
+            c2s = getattr(P, 'c2s', None)
             self._k['sten_prolong_impl'](q, (self._nl,), None, tab.data,
                                          x1.data, *self._fargs,
                                          self._cur.data, np.uint32(self._nl),
                                          np.int32(shz), np.int32(shy),
-                                         np.int32(shx))
+                                         np.int32(shx),
+                                         (tab if c2s is None else c2s).data,
+                                         np.int32(0 if c2s is None else 1))
             return
         self._k['sten_prolong_add'](q, (self._nl,), None, P.col.data,
                                     x1.data, *self._fargs,
@@ -798,17 +832,24 @@ class Stencil0(object):
     def t_restrict(self, R, rt, y):
         """y = R r from the tile grid ``rt``; ``R`` is a remapped
         OnesRestrict (``.spmv``) or the implicit one (``.inv_t``)."""
-        inv_t = getattr(R, 'inv_t', None)
-        if inv_t is None:
+        tab = getattr(R, 'tab', None)
+        if tab is None:
             return R.spmv(rt, y)
         q = ocl_core.queue()
         shz, shy, shx = R.shifts
-        order = self._mask if self.implicit else R.order
-        if order is None:
-            raise RuntimeError("the aggregation has no order codes and "
-                               "the stencil is not in the implicit form")
-        self._k['sten_restrict_impl'](q, (R.nrow,), None, inv_t.data,
-                                      R.inv_b.data, order.data, rt.data,
+        if R.inv_t is None:
+            # per block, off the block table and the mask (implicit form)
+            if not self.implicit:
+                raise RuntimeError("the aggregation has no row tables and "
+                                   "the stencil is not in the implicit form")
+            nk = int(tab.shape[0])
+            self._k['sten_restrict_blk'](q, (nk,), None, tab.data,
+                                         self._mask.data, rt.data, y.data,
+                                         np.uint32(nk), np.int32(shz),
+                                         np.int32(shy), np.int32(shx))
+            return y
+        self._k['sten_restrict_impl'](q, (R.nrow,), None, R.inv_t.data,
+                                      R.inv_b.data, R.order.data, rt.data,
                                       y.data, np.uint32(R.nrow),
                                       np.int32(shz), np.int32(shy),
                                       np.int32(shx))
@@ -936,23 +977,31 @@ class ImplicitAggregation(object):
         self.nnz = int(M.nnz)
         self.shifts = (int(shz), int(shy), int(shx))
         self.tab = ocl_core.to_device(tab)
-        self.inv_t = ocl_core.to_device(inv_t)
-        self.inv_b = ocl_core.to_device(inv_b)
+        # the per-row tables and order codes serve the per-row
+        # restriction of a plaquette order that is not slot order; in
+        # the implicit form the restriction runs per block off `tab`
+        # and the stencil's mask (2026-09-28) and needs none of them
+        self.inv_t = None if implicit else ocl_core.to_device(inv_t)
+        self.inv_b = None if implicit else ocl_core.to_device(inv_b)
         self.order = (ocl_core.to_device(order) if order is not None
                       else None)
+        self.c2s = None
         self.src_dtype, self.ones_only, self.int8_ok = 'implicit', True, True
 
-    def retarget(self, slot_of_col):
-        """Point the prolongation table at coarse tile SLOTS instead of
-        coarse indices, for a level 1 that lives in tiles."""
-        tab = self.h_tab.copy()
-        ok = tab >= 0
-        tab[ok] = np.asarray(slot_of_col, np.int32)[tab[ok]]
-        self.tab = ocl_core.to_device(tab)
+    def retarget(self, slot_of_col, dev=None):
+        """Read the prolongation's coarse values from tile SLOTS, for a
+        level 1 that lives in tiles: the table keeps the coarse index
+        (the restriction names its row by it) and the prolongation
+        gathers the slot through ``c2s`` -- the level-1 stencil's own
+        device map when ``dev`` is given, else an upload of
+        ``slot_of_col``."""
+        self.c2s = (dev if dev is not None
+                    else ocl_core.to_device(np.asarray(slot_of_col, np.int32)))
 
     def device_bytes(self):
-        return int(self.tab.nbytes + self.inv_t.nbytes + self.inv_b.nbytes
-                   + (0 if self.order is None else self.order.nbytes))
+        return int(self.tab.nbytes
+                   + sum(0 if a is None else a.nbytes
+                         for a in (self.inv_t, self.inv_b, self.order)))
 
 
 class Stencil1(object):

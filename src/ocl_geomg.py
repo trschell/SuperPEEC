@@ -178,7 +178,7 @@ class GeoCore(object):
                 A1 = ocl_stencil.Stencil1(levels[1], self.P[0], sten,
                                           mg._wdi[1], dt, csr_dev=self.A[1])
                 self.A[1] = A1
-                self.P[0].retarget(A1.slot_of_col)
+                self.P[0].retarget(A1.slot_of_col, dev=A1._flat)
                 self.R[1] = ocl_sparse.OnesRestrict(mg.Ps[1], dt,
                                                     remap=A1.slot_of_col)
                 self.level1 = 'stencil (certified %.1e)' % A1.cert_err
