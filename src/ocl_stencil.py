@@ -342,9 +342,14 @@ __kernel void sten_prolong_impl(__global const int *tab,
    plaquette numbering's axis priority varies by region), so each
    coarse row carries its members' offsets inside the block, 3 bits
    each in that order, and the count, in one uint. */
+#ifdef IMPLICIT_FLAT
+#define ORDER_ARG __global const ulong *order     /* the occupancy mask */
+#else
+#define ORDER_ARG __global const uint *order      /* per-row order codes */
+#endif
 __kernel void sten_restrict_impl(__global const int *inv_t,
                                  __global const int *inv_b,
-                                 __global const uint *order,
+                                 ORDER_ARG,
                                  __global const real_t *rt,
                                  __global real_t *y,
                                  const unsigned int nrow,
@@ -365,14 +370,30 @@ __kernel void sten_restrict_impl(__global const int *inv_t,
     const size_t base = ((size_t)t*3 + on)*TL*TL*TL
                         + (((size_t)(bz << shz))*TL + (by << shy))*TL
                         + (bx << shx);
+    real_t acc = (real_t)0;
+#ifdef IMPLICIT_FLAT
+    /* tile-ordered plaquettes (2026-09-27): ascending fine index IS
+       slot order, so the members are the block's occupied slots in
+       the fixed z, y, x nesting -- the stencil's own mask says which,
+       and no per-row order code is stored */
+    const size_t tb = (size_t)t*3*TL*TL*TL;
+    for (int kz = 0; kz < (1 << shz); ++kz)
+      for (int ky = 0; ky < (1 << shy); ++ky)
+        for (int kx = 0; kx < (1 << shx); ++kx) {
+            const size_t g = base + ((size_t)kz*TL + ky)*TL + kx;
+            const unsigned int l = (unsigned int)(g - tb);
+            if ((order[(size_t)t*NWORD + (l >> 6)] >> (l & 63u)) & 1UL)
+                acc += rt[g];
+        }
+#else
     const uint code = order[c];
     const int cnt = (int)(code >> 24);
-    real_t acc = (real_t)0;
     for (int k = 0; k < cnt; ++k) {
         const uint off = (code >> (3*k)) & 7u;
         acc += rt[base + ((size_t)(off >> 2)*TL + ((off >> 1) & 1u))*TL
                   + (off & 1u)];
     }
+#endif
     y[c] = acc;
 }
 
@@ -782,8 +803,12 @@ class Stencil0(object):
             return R.spmv(rt, y)
         q = ocl_core.queue()
         shz, shy, shx = R.shifts
+        order = self._mask if self.implicit else R.order
+        if order is None:
+            raise RuntimeError("the aggregation has no order codes and "
+                               "the stencil is not in the implicit form")
         self._k['sten_restrict_impl'](q, (R.nrow,), None, inv_t.data,
-                                      R.inv_b.data, R.order.data, rt.data,
+                                      R.inv_b.data, order.data, rt.data,
                                       y.data, np.uint32(R.nrow),
                                       np.int32(shz), np.int32(shy),
                                       np.int32(shx))
@@ -816,7 +841,7 @@ class ImplicitAggregation(object):
     per (tile, normal, block) for the prolongation; per coarse row a
     tile, a packed (normal, block) and the packed order."""
 
-    def __init__(self, P0, flat, div, TL, nt):
+    def __init__(self, P0, flat, div, TL, nt, implicit=False):
         # Everything here is O(n0) on the host and runs inside the
         # preconditioner build, which sets the build's peak: int32
         # throughout, checks by scatter and round trip rather than
@@ -876,14 +901,19 @@ class ImplicitAggregation(object):
         ptr = np.zeros(nc + 1, np.int64)
         np.cumsum(cnt, out=ptr[1:])
         srt = np.argsort(col, kind='stable')          # members grouped by column, ascending index within
-        cols = col[srt]
-        k = (np.arange(n0, dtype=np.int64) - ptr[cols]).astype(np.uint32)
-        del cols
-        shifted = off[srt].astype(np.uint32) << (3*k)
-        del k
-        order = np.bitwise_or.reduceat(shifted, ptr[:-1]).astype(np.uint32)
-        del shifted
-        order |= (cnt.astype(np.uint32) << 24)
+        order = None
+        if not implicit:
+            # the per-row order codes: needed only when the fine order
+            # is not slot order (with tile-ordered plaquettes the device
+            # sums the block's occupied slots in the fixed nesting)
+            cols = col[srt]
+            k = (np.arange(n0, dtype=np.int64) - ptr[cols]).astype(np.uint32)
+            del cols
+            shifted = off[srt].astype(np.uint32) << (3*k)
+            del k
+            order = np.bitwise_or.reduceat(shifted, ptr[:-1]).astype(np.uint32)
+            del shifted
+            order |= (cnt.astype(np.uint32) << 24)
         # the occupancy pattern of each aggregate (a bit per block
         # position): level 1's coefficients are a function of the two
         # patterns, the normals and the coarse offset
@@ -908,7 +938,8 @@ class ImplicitAggregation(object):
         self.tab = ocl_core.to_device(tab)
         self.inv_t = ocl_core.to_device(inv_t)
         self.inv_b = ocl_core.to_device(inv_b)
-        self.order = ocl_core.to_device(order)
+        self.order = (ocl_core.to_device(order) if order is not None
+                      else None)
         self.src_dtype, self.ones_only, self.int8_ok = 'implicit', True, True
 
     def retarget(self, slot_of_col):
@@ -921,7 +952,7 @@ class ImplicitAggregation(object):
 
     def device_bytes(self):
         return int(self.tab.nbytes + self.inv_t.nbytes + self.inv_b.nbytes
-                   + self.order.nbytes)
+                   + (0 if self.order is None else self.order.nbytes))
 
 
 class Stencil1(object):

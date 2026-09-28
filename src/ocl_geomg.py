@@ -144,7 +144,8 @@ class GeoCore(object):
                 try:
                     import ocl_stencil
                     agg = ocl_stencil.ImplicitAggregation(
-                        Pm, sten.flat, mg.divs[0], A0.TL, A0.nt)
+                        Pm, sten.flat, mg.divs[0], A0.TL, A0.nt,
+                        implicit=bool(getattr(A0, 'implicit', False)))
                     self.P.append(agg)
                     self.R.append(agg)
                     self.aggregation0 = 'implicit'
