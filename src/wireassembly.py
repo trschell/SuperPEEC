@@ -1139,6 +1139,7 @@ class WireBondSolver:
                     nrm, bse = nrm[perm], bse[perm]
                     self._Bop = None       # any cached basis is stale
                     del perm
+                self._tile_ordered = True
             idx_yt = np.r_[0:self.nplaq,
                            self.nplaq + self.nd:self.size]
             Byt = self.Bmat[:, idx_yt].T.tocsr().astype(np.float32)
@@ -1779,6 +1780,30 @@ class WireBondSolver:
             env = os.environ.get('SPPEEC_PALETTE')
             wanted = (env == '1' if env in ('0', '1')
                       else bool(getattr(self, '_palette_default', False)))
+            # the lattice basis (2026-09-28): with the plaquettes in
+            # tile order (the OpenCL path) the plaquette block needs no
+            # stored indices at all -- both products are gathers from
+            # coordinates, bit-identical to the stored form. Takes the
+            # place of the palette when it can be built;
+            # SPPEEC_LATTICE_BASIS=0 opts out.
+            lat = None
+            if getattr(self, '_tile_ordered', False) \
+                    and os.environ.get('SPPEEC_LATTICE_BASIS', '1') != '0':
+                try:
+                    import loopmg
+                    import lattice_basis
+                    if lattice_basis.available():
+                        lat = lattice_basis.LatticeBasis(
+                            self.Bmat, self.M, self.efg, self.nplaq,
+                            self.fil_axis, self.fil_cell,
+                            loopmg._Stencil0.TL)
+                except (ImportError, ValueError) as exc:
+                    warnings.warn("lattice basis unavailable (%s: %s)"
+                                  % (type(exc).__name__, exc))
+                    lat = None
+            if lat is not None:
+                op = self.Bmat = lat        # the stored arrays go
+                wanted = False
             if wanted:
                 try:
                     import palette

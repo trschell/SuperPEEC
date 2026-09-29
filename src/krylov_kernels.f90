@@ -121,3 +121,162 @@ subroutine forest_walk(nn, m, nroots, ptr, nbr, eid, sgn, roots, &
   end do
   deallocate(stack)
 end subroutine forest_walk
+
+
+! ---- the plaquette basis from the lattice (2026-09-28) ---------------
+! The plaquette block of the loop basis needs no stored indices. A
+! plaquette is (normal, base cell); its four filaments are the face's
+! edges in ONE fixed entry pattern per normal (checked on the built
+! basis: scratch/basis_structure.py); and both numberings are lattice
+! formulas -- plaquettes in tile order (tile, normal, z, y, x) over
+! the stencil's occupancy mask, filaments per orientation block by
+! leaf group (x, y, z order) then local lattice index (x, y, z) with a
+! per-group occupancy mask. Both products are gathers over their
+! output index, threaded, adding in the order the stored CSC/CSR form
+! adds (columns ascending; entries in ascending filament index), so
+! the bits are the same.
+!
+! filament of (axis a, cell c), 1-based:
+!   g = ggrid(c/n + 1, a + 1); l = ((cx mod n0)*n1 + cy mod n1)*n2 + cz mod n2
+!   f = gbase(g + 1) + popcount(gmask bits below l) + 1
+! plaquette of (normal on, base b), 1-based:
+!   t = tgrid(b/TL + 1); l = ((on*TL + bz mod TL)*TL + by mod TL)*TL + bx mod TL
+!   j = tpre(t + 1) + popcount(tmask bits below l) + 1
+
+subroutine lattice_bt(nt, nwt, tmask, tpre, tcoord, tl, n0, n1, n2, &
+                      gx, gy, gz, ggrid, ng, nwg, gbase, gmask, pat, &
+                      nf, xr, xi, npl, yr, yi)
+  ! y(j) = sum_k s_k x(f_k(j)) for every plaquette j (two vectors)
+  implicit none
+  integer, intent(in) :: nt, nwt, tl, n0, n1, n2, gx, gy, gz, ng, nwg, nf, npl
+  integer(8), intent(in) :: tmask(nwt, nt), gmask(nwg, ng)
+  integer(8), intent(in) :: tpre(nt), gbase(ng)
+  integer, intent(in) :: tcoord(3, nt), ggrid(gx, gy, gz, 3), pat(5, 4, 3)
+  real(8), intent(in) :: xr(nf), xi(nf)
+  real(8), intent(out) :: yr(npl), yi(npl)
+  integer :: t, l, w, b, on, rem, lx, ly, lz, k, a, cx, cy, cz
+  integer :: gi, gj, gk, q, l2, w2, b2, ww, cube
+  integer(8) :: j, f
+  real(8) :: sr, si, sg
+  cube = tl*tl*tl
+  !$omp parallel do schedule(dynamic, 64) default(shared) &
+  !$omp private(t, l, w, b, on, rem, lx, ly, lz, k, a, cx, cy, cz, &
+  !$omp         gi, gj, gk, q, l2, w2, b2, ww, j, f, sr, si, sg)
+  do t = 1, nt
+    j = tpre(t)
+    do l = 0, 3*cube - 1
+      w = l/64 + 1
+      b = l - 64*(w - 1)
+      if (.not. btest(tmask(w, t), b)) cycle
+      j = j + 1
+      on = l/cube
+      rem = l - on*cube
+      lz = rem/(tl*tl)
+      ly = (rem - lz*tl*tl)/tl
+      lx = rem - lz*tl*tl - ly*tl
+      sr = 0d0
+      si = 0d0
+      do k = 1, 4
+        a  = pat(1, k, on + 1)
+        cx = tcoord(1, t)*tl + lx + pat(2, k, on + 1)
+        cy = tcoord(2, t)*tl + ly + pat(3, k, on + 1)
+        cz = tcoord(3, t)*tl + lz + pat(4, k, on + 1)
+        sg = dble(pat(5, k, on + 1))
+        gi = cx/n0
+        gj = cy/n1
+        gk = cz/n2
+        q = ggrid(gi + 1, gj + 1, gk + 1, a + 1)
+        l2 = ((cx - gi*n0)*n1 + (cy - gj*n1))*n2 + (cz - gk*n2)
+        w2 = l2/64 + 1
+        b2 = l2 - 64*(w2 - 1)
+        f = gbase(q + 1) + 1
+        do ww = 1, w2 - 1
+          f = f + popcnt(gmask(ww, q + 1))
+        end do
+        f = f + popcnt(iand(gmask(w2, q + 1), not(ishft(-1_8, b2))))
+        sr = sr + sg*xr(f)
+        si = si + sg*xi(f)
+      end do
+      yr(j) = sr
+      yi(j) = si
+    end do
+  end do
+end subroutine lattice_bt
+
+
+subroutine lattice_b(nt, nwt, tmask, tpre, tx, ty, tz, tgrid, tl, sgn, &
+                     nf, fa, fc, npl, xr, xi, yr, yi)
+  ! y(f) = sum over the plaquettes containing filament f, in ascending
+  ! plaquette index, of s x(j) (two vectors); zero where none does
+  implicit none
+  integer, intent(in) :: nt, nwt, tx, ty, tz, tl, nf, npl
+  integer(8), intent(in) :: tmask(nwt, nt), tpre(nt)
+  integer, intent(in) :: tgrid(tx, ty, tz), sgn(2, 3, 3)
+  integer(1), intent(in) :: fa(nf)
+  integer(2), intent(in) :: fc(3, nf)
+  real(8), intent(in) :: xr(npl), xi(npl)
+  real(8), intent(out) :: yr(nf), yi(nf)
+  integer :: f, a, on, tt, d, gi, gj, gk, t, l, w, b, ww, m, k, kk
+  integer :: c(3), bb(3)
+  integer(8) :: j, jj(4), jt
+  real(8) :: ss(4), st, sr, si
+  !$omp parallel do schedule(static) default(shared) &
+  !$omp private(f, a, on, tt, d, gi, gj, gk, t, l, w, b, ww, m, k, kk, &
+  !$omp         c, bb, j, jj, jt, ss, st, sr, si)
+  do f = 1, nf
+    a = fa(f)
+    c(1) = fc(1, f)
+    c(2) = fc(2, f)
+    c(3) = fc(3, f)
+    m = 0
+    do on = 0, 2
+      if (on == a) cycle
+      tt = 3 - a - on
+      do d = 0, 1
+        bb = c
+        bb(tt + 1) = bb(tt + 1) - d
+        if (bb(1) < 0 .or. bb(2) < 0 .or. bb(3) < 0) cycle
+        gi = bb(1)/tl
+        gj = bb(2)/tl
+        gk = bb(3)/tl
+        if (gi >= tx .or. gj >= ty .or. gk >= tz) cycle
+        t = tgrid(gi + 1, gj + 1, gk + 1)
+        if (t < 0) cycle
+        l = ((on*tl + (bb(3) - gk*tl))*tl + (bb(2) - gj*tl))*tl + (bb(1) - gi*tl)
+        w = l/64 + 1
+        b = l - 64*(w - 1)
+        if (.not. btest(tmask(w, t + 1), b)) cycle
+        j = tpre(t + 1) + 1
+        do ww = 1, w - 1
+          j = j + popcnt(tmask(ww, t + 1))
+        end do
+        j = j + popcnt(iand(tmask(w, t + 1), not(ishft(-1_8, b))))
+        m = m + 1
+        jj(m) = j
+        ss(m) = dble(sgn(d + 1, a + 1, on + 1))
+      end do
+    end do
+    ! ascending plaquette index: the CSC scatter's column order
+    do k = 2, m
+      jt = jj(k)
+      st = ss(k)
+      kk = k - 1
+      do while (kk >= 1)
+        if (jj(kk) <= jt) exit
+        jj(kk + 1) = jj(kk)
+        ss(kk + 1) = ss(kk)
+        kk = kk - 1
+      end do
+      jj(kk + 1) = jt
+      ss(kk + 1) = st
+    end do
+    sr = 0d0
+    si = 0d0
+    do k = 1, m
+      sr = sr + ss(k)*xr(jj(k))
+      si = si + ss(k)*xi(jj(k))
+    end do
+    yr(f) = sr
+    yi(f) = si
+  end do
+end subroutine lattice_b
