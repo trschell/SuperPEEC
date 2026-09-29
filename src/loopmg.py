@@ -635,11 +635,29 @@ class GeoMG:
             self.dtype = basis.dtype
             n0 = basis.shape[0]
             self.levels.append(None)     # level 0 lives in the stencil
-            P0 = P0.tocsr().astype(self.dtype)
+            # the level-0 prolongator in three forms sharing arrays
+            # (2026-09-29): the CSR straight from the aggregate map
+            # (no transpose sort), its transpose as the CSC's own arrays
+            # read the other way, and ONE all-ones data array for all
+            # -- where tocsr() and P.T.tocsr() made four copies of
+            # ~600 MB each at R5 inside the build's peak
+            ones = P0.data if P0.data.dtype == self.dtype \
+                else P0.data.astype(self.dtype)
+            P0T = sp.csr_matrix((ones, P0.indices, P0.indptr),
+                                shape=(P0.shape[1], P0.shape[0]))
+            P0T.has_sorted_indices = True
+            P0c = sp.csr_matrix((ones, self._last_inv,
+                                 np.arange(n0 + 1, dtype=np.int32)),
+                                shape=P0.shape)
+            P0c.has_sorted_indices = True
+            del P0
+            self._last_inv = None
+            P0 = P0c
             self.Ps.append(P0)
+            self._PT0 = P0T
             A = (sp.csr_matrix(coarse0(P0)).astype(self.dtype)
                  if coarse0 is not None
-                 else self._probe_coarse(P0, nrm1, bs1))
+                 else self._probe_coarse(P0, nrm1, bs1, P0T))
             nrm, bs = nrm1, bs1
             # level-0 nnz never counted exactly (no matrix); ~10.7
             # entries/row measured across the geometry family --
@@ -654,6 +672,7 @@ class GeoMG:
             if A.shape[0] <= max_coarse:
                 break
             P, nrm, bs = self._aggregate(nrm, bs)
+            self._last_inv = None
             if P.shape[1] >= A.shape[0]:
                 break                      # coarsening stalled
             P = P.tocsr().astype(self.dtype)
@@ -669,7 +688,10 @@ class GeoMG:
         # (a CSC transpose apply scatters and cannot thread
         # deterministically). P is 1-nnz-per-row aggregation, so the
         # extra storage is negligible.
-        self.PTs = [P.T.tocsr() for P in self.Ps]
+        self.PTs = [(self._PT0 if (i == 0 and getattr(self, '_PT0', None)
+                                   is not None) else P.T.tocsr())
+                    for i, P in enumerate(self.Ps)]
+        self._PT0 = None
         # wdi = omega*dinv precomputed per level for the fused Jacobi
         # kernel; numerically identical to evaluating omega*di inside
         # the sweep (same multiply, same values)
@@ -739,7 +761,7 @@ class GeoMG:
             # loudly rather than silently slowly.
             self.levels[0] = None
 
-    def _probe_coarse(self, P0, nrm1, bs1):
+    def _probe_coarse(self, P0, nrm1, bs1, P0T=None):
         """A1 = P0^T A P0 by COLOUR PROBING through the level-0
         stencil -- no Gram-sized SpGEMM anywhere (the W1 = Yp^T P0
         route measured a peak-neutral 1.8 GB at R4, replacing the
@@ -776,7 +798,8 @@ class GeoMG:
                  + bs1[:, 0])*m1 + bs1[:, 1])*m2 + bs1[:, 2]
         order = np.argsort(ckey, kind='stable')
         skey = ckey[order]
-        P0T = P0.T.tocsr()
+        if P0T is None:
+            P0T = P0.T.tocsr()
         # ~10.7 entries per coarse row measured across the geometry
         # family; grown in place on the rare overrun
         cap = 12*nc + 1024
@@ -842,12 +865,87 @@ class GeoMG:
             raise ValueError("coarse operator past int32 indexing")
         return _triplets_to_csr(rows[:fill], cols[:fill], vals[:fill], nc)
 
-    def _aggregate(self, normal, base):
-        """2x2x2 geometric agglomeration, per face orientation."""
+    def _aggregate(self, normal, base, chunk=1 << 22):
+        """2x2x2 geometric agglomeration, per face orientation.
+
+        Sort-free (2026-09-29): the aggregate of a face is the rank of
+        its (normal, coarse cell) among the occupied ones, in the
+        order ``np.unique`` numbered them -- normal, then x, y, z --
+        so the numbering is read off a prefix sum over an occupancy
+        grid of the coarse lattice, a chunk of faces at a time, and
+        the member list of each aggregate (ascending fine index) comes
+        from a chunked stable counting sort. The same P, normals and
+        cells as the sort form (`_aggregate_sorted`, bitwise: checked
+        on random geometry and the R5 plaquettes), without its int64
+        temporaries -- key, sort permutation, inverse, argsort: ~1.6
+        GB at R5 at level 0, inside the build's peak.
+        """
         span = base.max(axis=0) - base.min(axis=0) + 1
         div = np.where(span > 2, 2, 1)            # semi-coarsening
         # recorded for the device, which rebuilds the level-0
         # aggregation from tile geometry (bookkeeping, no numerics)
+        self.divs.append(np.asarray(div, np.int64))
+        n = int(normal.shape[0])
+        r = [int(base[:, k].max()//div[k]) + 1 for k in range(3)]
+        ncell = r[0]*r[1]*r[2]
+        occ = np.zeros(3*ncell, dtype=bool)
+
+        def keys(a0, a1):
+            cbk = base[a0:a1]//div[None, :]
+            return (((normal[a0:a1].astype(np.int64)*r[0] + cbk[:, 0])*r[1]
+                     + cbk[:, 1])*r[2] + cbk[:, 2])
+
+        for a0 in range(0, n, chunk):
+            occ[keys(a0, min(n, a0 + chunk))] = True
+        nc = int(np.count_nonzero(occ))
+        rank = np.cumsum(occ, dtype=np.int64)
+        rank -= 1
+        rank = rank.astype(np.int32)
+        del occ
+        # pass 2: aggregate of each face, its first member, the counts
+        inv = np.empty(n, dtype=np.int32)
+        first = np.full(nc, n, dtype=np.int64)
+        counts = np.zeros(nc, dtype=np.int64)
+        for a0 in range(0, n, chunk):
+            a1 = min(n, a0 + chunk)
+            iv = rank[keys(a0, a1)]
+            inv[a0:a1] = iv
+            u, fi, cn = np.unique(iv, return_index=True,
+                                  return_counts=True)
+            first[u] = np.minimum(first[u], a0 + fi)
+            counts[u] += cn
+            del iv, u, fi, cn
+        del rank
+        indptr = np.zeros(nc + 1, dtype=np.int64)
+        np.cumsum(counts, out=indptr[1:])
+        # pass 3: members grouped by aggregate, ascending inside each:
+        # a stable counting sort, chunk by chunk in fine order
+        order = np.empty(n, dtype=np.int32)
+        fill = indptr[:-1].copy()
+        for a0 in range(0, n, chunk):
+            a1 = min(n, a0 + chunk)
+            m = a1 - a0
+            iv = inv[a0:a1]
+            srt = np.argsort(iv, kind='stable')
+            ivs = iv[srt]
+            st = np.flatnonzero(np.r_[True, ivs[1:] != ivs[:-1]])
+            u = ivs[st]
+            ln = np.diff(np.r_[st, m])
+            within = np.arange(m, dtype=np.int64) - np.repeat(st, ln)
+            pos = np.repeat(fill[u], ln) + within
+            order[pos] = (a0 + srt).astype(np.int32)
+            fill[u] += ln
+            del iv, srt, ivs, st, u, ln, within, pos
+        del fill, counts
+        P = sp.csc_matrix((np.ones(n, dtype=np.float32), order, indptr),
+                          shape=(n, nc))
+        self._last_inv = inv           # fine -> aggregate, for the CSR form
+        return P, normal[first], (base[first]//div[None, :])
+
+    def _aggregate_sorted(self, normal, base):
+        """The sort form of :meth:`_aggregate`, kept for its A/B."""
+        span = base.max(axis=0) - base.min(axis=0) + 1
+        div = np.where(span > 2, 2, 1)            # semi-coarsening
         self.divs.append(np.asarray(div, np.int64))
         cb = base//div[None, :]
         r0 = np.int64(cb[:, 0].max()) + 1

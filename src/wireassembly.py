@@ -1140,13 +1140,36 @@ class WireBondSolver:
                     self._Bop = None       # any cached basis is stale
                     del perm
                 self._tile_ordered = True
-            idx_yt = np.r_[0:self.nplaq,
-                           self.nplaq + self.nd:self.size]
-            Byt = self.Bmat[:, idx_yt].T.tocsr().astype(np.float32)
-            del idx_yt
-            geo = _GeoMGFactor(Byt, nrm, bse, self.nplaq,
-                               cycles=self.amg_cycles)
-            del Byt                # setup transient: the factor holds
+            # the factor's plaquette rows as a VIEW of the basis
+            # (2026-09-29): the CSC's column prefix IS the CSR of its
+            # transpose, once the data is the float32 the factor wants
+            # (the exact shrink, moved up from after the build -- the
+            # same values, so every product is bit-unchanged); the
+            # chord rows are six small columns. The transposed float32
+            # copy of the whole basis this replaces stood 1.7 GB at R5
+            # through the hierarchy build, inside the run's peak.
+            from port_impedance import shrink_exact_f32
+            from scipy.sparse import csr_matrix
+            shrink_exact_f32(self.Bmat)
+            pl = int(self.Bmat.indptr[self.nplaq])
+            # the shrink is refused where the chord columns carry a
+            # value float32 cannot hold (0.04 on the DBC), and the CSC
+            # has one data array for all its columns: then only the
+            # plaquette prefix's DATA is copied to float32 (exact, +-1)
+            # and the indices and pointer stay views -- one third of
+            # the copy the factor would otherwise make of all three
+            d32 = self.Bmat.data[:pl]
+            if d32.dtype != np.float32:
+                d32 = d32.astype(np.float32)
+            Yp = csr_matrix((d32, self.Bmat.indices[:pl],
+                             self.Bmat.indptr[:self.nplaq + 1]),
+                            shape=(self.nplaq, self.Bmat.shape[0]))
+            del d32
+            Yp.has_sorted_indices = bool(self.Bmat.has_sorted_indices)
+            Ym = self.Bmat[:, self.nplaq + self.nd:].T.tocsr()
+            geo = _GeoMGFactor(None, nrm, bse, self.nplaq,
+                               cycles=self.amg_cycles, parts=(Yp, Ym))
+            del Yp, Ym             # setup views: the factor holds
             del nrm, bse           # everything it needs
             if verbose:
                 print("GeoMG precond apply: %s" % geo.gpu_state,
@@ -1680,9 +1703,25 @@ class WireBondSolver:
                                % np.abs(div - want).max())
         # plaquettes/zero-sum columns are structurally safe; spot-check
         # the whole basis anyway
-        X = self.Bmat[:self.efg, :]
-        W = self.Bmat[self.efg:, :]
-        div = np.abs(BT @ X + self.Bw @ (self.Afoot @ W)).max()
+        # over column blocks (2026-09-29): the row slices of the whole
+        # basis and the one sparse product stood ~3 GB at R5 for a
+        # check whose answer is a maximum -- a column block of a CSC is
+        # a view of its arrays, and the block's row split is small
+        B = self.Bmat.tocsc()
+        ncol = int(B.shape[1])
+        step = max(1, min(ncol, (1 << 22)))
+        div = 0.0
+        for c0 in range(0, ncol, step):
+            c1 = min(ncol, c0 + step)
+            p0, p1 = int(B.indptr[c0]), int(B.indptr[c1])
+            blk = sp.csc_matrix((B.data[p0:p1], B.indices[p0:p1],
+                                 B.indptr[c0:c1 + 1] - p0),
+                                shape=(B.shape[0], c1 - c0))
+            X = blk[:self.efg, :]
+            W = blk[self.efg:, :]
+            d = np.abs(BT @ X + self.Bw @ (self.Afoot @ W)).max()
+            div = max(div, float(d))
+            del blk, X, W, d
         if div > 1e-9:
             raise RuntimeError("stacked basis violates KCL (max %g)"
                                % div)

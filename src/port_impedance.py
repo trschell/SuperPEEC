@@ -767,7 +767,8 @@ class _GeoMGFactor:
     """
 
     def __init__(self, YT, geom_normal, geom_base, nplaq, cycles=2,
-                 nu=2, omega=2.0/3.0, max_coarse=400, macro_idx=None):
+                 nu=2, omega=2.0/3.0, max_coarse=400, macro_idx=None,
+                 parts=None):
         from scipy.linalg import lu_factor, lu_solve
         import loopmg
         self._lu_solve = lu_solve
@@ -809,7 +810,19 @@ class _GeoMGFactor:
         # identity, for a caller that preconditions them itself).
         # macro_idx=None keeps the historical positional split exactly,
         # including its contiguous slices.
-        n = YT.shape[0]
+        # ``parts=(Yp, Ym)`` (2026-09-29): the plaquette rows and the
+        # macro rows handed in separately, so the caller can pass the
+        # plaquette rows as a VIEW of its own basis arrays (a CSC's
+        # column prefix read as the CSR of its transpose) instead of a
+        # transposed float32 copy of the whole basis -- 1.7 GB at R5,
+        # alive through the whole hierarchy build, inside its peak
+        if parts is not None:
+            if macro_idx is not None:
+                raise ValueError("parts= is the contiguous split")
+            YT = None
+            n = int(parts[0].shape[0]) + int(parts[1].shape[0])
+        else:
+            n = YT.shape[0]
         # int32: the device block uploads it as int32 regardless, and
         # as int64 the range alone was 400 MB at R5, resident through
         # the solve for a `.size` and the host apply
@@ -826,14 +839,25 @@ class _GeoMGFactor:
             self.rest = np.flatnonzero(~keep)
             contiguous = False
         self.nmac = self.mac.size
-        if YT.format == 'csr':
-            if YT.dtype != _PRECOND_DT:
-                YT = YT.astype(_PRECOND_DT)
-            self._dt = YT.dtype
+        if parts is not None or YT.format == 'csr':
+            if parts is not None:
+                Yp, Ym = parts
+                parts = None
+                if Yp.dtype != _PRECOND_DT:
+                    Yp = Yp.astype(_PRECOND_DT)
+                if Ym.dtype != _PRECOND_DT:
+                    Ym = Ym.astype(_PRECOND_DT)
+                self._dt = Yp.dtype
+            else:
+                if YT.dtype != _PRECOND_DT:
+                    YT = YT.astype(_PRECOND_DT)
+                self._dt = YT.dtype
             # slices where the split is the historical contiguous one
             # (the comment above about csr index order applies to those);
             # row-gather only when a caller supplied its own macro set
-            if contiguous:
+            if YT is None:
+                pass                        # Yp, Ym already in hand
+            elif contiguous:
                 # the leading rows of a csr are a PREFIX of its
                 # arrays: share them rather than slice-copy 1.8 GB at
                 # R5 while the caller still holds the whole matrix
