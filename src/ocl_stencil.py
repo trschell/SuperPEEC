@@ -336,11 +336,17 @@ __kernel void sten_prolong_impl(__global const int *tab,
     const int blk = (((int)a1 >> shz)*ny + ((int)a2 >> shy))*nx
                     + ((int)a3 >> shx);
     const int nb = NBLK(shz, shy, shx);
-    const int c = tab[((size_t)t*3 + on)*nb + blk];
-    /* the table holds the coarse INDEX (2026-09-28); when the coarse
-       level lives in tiles, c2s maps it to the slot -- one gather,
-       in place of a second copy of the table */
-    xt[gid] += x1[remap ? c2s[c] : c];
+    const size_t k = ((size_t)t*3 + on)*nb + blk;
+    /* remap 2 (2026-09-28): the coarse level lives in tiles on the
+       SAME tiles, two cells per axis, so the block key IS the coarse
+       slot and no table is read. remap 0: the table holds the coarse
+       index of a flat coarse vector; remap 1: that index through c2s. */
+    if (remap == 2) {
+        xt[gid] += x1[k];
+    } else {
+        const int c = tab[k];
+        xt[gid] += x1[remap ? c2s[c] : c];
+    }
 }
 
 #ifdef IMPLICIT_FLAT
@@ -355,11 +361,15 @@ __kernel void sten_restrict_blk(__global const int *tab,
                                 __global real_t *y,
                                 const unsigned int nk,
                                 const int shz, const int shy,
-                                const int shx)
+                                const int shx,
+                                const int tiled)
 {
     const unsigned int k = get_global_id(0);
     if (k >= nk) return;
-    const int c = tab[k];
+    /* tiled: the coarse rhs is a grid on these tiles and the block
+       key is its slot -- no table; an empty block writes an exact
+       zero to a slot nothing reads */
+    const int c = tiled ? (int)k : tab[k];
     if (c < 0) return;
     const int ny = TL >> shy, nx = TL >> shx;
     const int nb = NBLK(shz, shy, shx);
@@ -551,6 +561,51 @@ __kernel void sten1_jac_p(__global const real_t *xt,
     const real_t ax = sten1_acc(xt, patg, nbt, nsrc, of, ctab, sptr, t, on,
                                 (int)a1, (int)a2, (int)a3, pc);
     yt[gid] = xt[gid] + wtab[on*256 + pc]*(b[i] - ax);
+}
+
+/* The same two on a rhs kept in the coarse tile grid, one work item
+   per SLOT (2026-09-28): an empty coarse slot has pattern 0 and
+   returns, so level 1 needs no map of its own. */
+__kernel void sten1_res_g(__global const real_t *xt,
+                          __global const real_t *bt,
+                          __global const uchar *patg,
+                          __global const int *nbt,
+                          __global const int *nsrc,
+                          __global const int *of,
+                          __global const char *ctab,
+                          __global const int *sptr,
+                          __global real_t *rt,
+                          const unsigned int ntot)
+{
+    const size_t gid = get_global_id(0);
+    if (gid >= (size_t)ntot) return;
+    const uint pc = patg[gid];
+    if (pc == 0) return;
+    DECOMPOSEC(gid, t, on, a1, a2, a3);
+    rt[gid] = bt[gid] - sten1_acc(xt, patg, nbt, nsrc, of, ctab, sptr, t, on,
+                                  (int)a1, (int)a2, (int)a3, pc);
+}
+
+__kernel void sten1_jac_g(__global const real_t *xt,
+                          __global const real_t *bt,
+                          __global const uchar *patg,
+                          __global const real_t *wtab,
+                          __global const int *nbt,
+                          __global const int *nsrc,
+                          __global const int *of,
+                          __global const char *ctab,
+                          __global const int *sptr,
+                          __global real_t *yt,
+                          const unsigned int ntot)
+{
+    const size_t gid = get_global_id(0);
+    if (gid >= (size_t)ntot) return;
+    const uint pc = patg[gid];
+    if (pc == 0) return;
+    DECOMPOSEC(gid, t, on, a1, a2, a3);
+    const real_t ax = sten1_acc(xt, patg, nbt, nsrc, of, ctab, sptr, t, on,
+                                (int)a1, (int)a2, (int)a3, pc);
+    yt[gid] = xt[gid] + wtab[on*256 + pc]*(bt[gid] - ax);
 }
 #endif
 
@@ -814,16 +869,18 @@ class Stencil0(object):
         (``.col``) or the implicit one from tile geometry (``.tab``)."""
         q = ocl_core.queue()
         tab = getattr(P, 'tab', None)
-        if tab is not None:
+        if tab is not None or getattr(P, 'tiled_coarse', False):
             shz, shy, shx = P.shifts
             c2s = getattr(P, 'c2s', None)
-            self._k['sten_prolong_impl'](q, (self._nl,), None, tab.data,
+            mode = 2 if P.tiled_coarse else (0 if c2s is None else 1)
+            buf = self._mask if tab is None else tab     # a dummy when unread
+            self._k['sten_prolong_impl'](q, (self._nl,), None, buf.data,
                                          x1.data, *self._fargs,
                                          self._cur.data, np.uint32(self._nl),
                                          np.int32(shz), np.int32(shy),
                                          np.int32(shx),
-                                         (tab if c2s is None else c2s).data,
-                                         np.int32(0 if c2s is None else 1))
+                                         (buf if c2s is None else c2s).data,
+                                         np.int32(mode))
             return
         self._k['sten_prolong_add'](q, (self._nl,), None, P.col.data,
                                     x1.data, *self._fargs,
@@ -833,20 +890,24 @@ class Stencil0(object):
         """y = R r from the tile grid ``rt``; ``R`` is a remapped
         OnesRestrict (``.spmv``) or the implicit one (``.inv_t``)."""
         tab = getattr(R, 'tab', None)
-        if tab is None:
+        tiled = getattr(R, 'tiled_coarse', False)
+        if tab is None and not tiled:
             return R.spmv(rt, y)
         q = ocl_core.queue()
         shz, shy, shx = R.shifts
         if R.inv_t is None:
-            # per block, off the block table and the mask (implicit form)
+            # per block, off the block table (or none, when the coarse
+            # rhs is a grid on these tiles) and the mask
             if not self.implicit:
                 raise RuntimeError("the aggregation has no row tables and "
                                    "the stencil is not in the implicit form")
-            nk = int(tab.shape[0])
-            self._k['sten_restrict_blk'](q, (nk,), None, tab.data,
+            nk = int(R.nk)
+            buf = self._mask if tab is None else tab
+            self._k['sten_restrict_blk'](q, (nk,), None, buf.data,
                                          self._mask.data, rt.data, y.data,
                                          np.uint32(nk), np.int32(shz),
-                                         np.int32(shy), np.int32(shx))
+                                         np.int32(shy), np.int32(shx),
+                                         np.int32(1 if tiled else 0))
             return y
         self._k['sten_restrict_impl'](q, (R.nrow,), None, R.inv_t.data,
                                       R.inv_b.data, R.order.data, rt.data,
@@ -986,6 +1047,8 @@ class ImplicitAggregation(object):
         self.order = (ocl_core.to_device(order) if order is not None
                       else None)
         self.c2s = None
+        self.nk = int(nt)*3*int(nb)
+        self.tiled_coarse = False
         self.src_dtype, self.ones_only, self.int8_ok = 'implicit', True, True
 
     def retarget(self, slot_of_col, dev=None):
@@ -998,10 +1061,19 @@ class ImplicitAggregation(object):
         self.c2s = (dev if dev is not None
                     else ocl_core.to_device(np.asarray(slot_of_col, np.int32)))
 
+    def drop_table(self):
+        """The coarse level lives in a grid on these tiles (two cells
+        per axis, so the block key is the coarse slot): the block table
+        is not read in either direction and is released (2026-09-28).
+        """
+        self.tab = None
+        self.c2s = None
+        self.tiled_coarse = True
+
     def device_bytes(self):
-        return int(self.tab.nbytes
-                   + sum(0 if a is None else a.nbytes
-                         for a in (self.inv_t, self.inv_b, self.order)))
+        return int(sum(0 if a is None else a.nbytes
+                       for a in (self.tab, self.inv_t, self.inv_b,
+                                 self.order)))
 
 
 class Stencil1(object):
@@ -1145,6 +1217,7 @@ class Stencil1(object):
                                     key='ocl_stencil1')
         self._k = {n: ocl_core.kernel(self.prg, n)
                    for n in ('sten1_mv_p', 'sten1_res_t', 'sten1_jac_p',
+                             'sten1_res_g', 'sten1_jac_g',
                              'sten_prolong_add', 'sten_pack', 'sten_unpack')}
         self._xt = ocl_core.zeros((self.ntot,), dt)
         self._yt = ocl_core.zeros((self.ntot,), dt)
@@ -1168,19 +1241,25 @@ class Stencil1(object):
                 raise ValueError("level-1 stencil disagrees with the CSR "
                                  "(rel %.2e)" % err)
             del xd, y_ref, y_got
+        # the V-cycle keeps level 1 entirely in grids (its rhs included,
+        # 2026-09-28), so the coarse-index -> slot map serves only the
+        # flat API; it is released here and re-uploaded on demand
+        self._flat = None
 
     def _tiles(self):
         return (self._patg.data, self._nbt.data, self._nsrc.data,
                 self._of.data, self._ctab.data, self._sptr.data)
 
     def device_bytes(self):
-        return int(self._flat.nbytes + self._patg.nbytes + self._nbt.nbytes
+        return int((0 if self._flat is None else self._flat.nbytes)
+                   + self._patg.nbytes + self._nbt.nbytes
                    + self._nsrc.nbytes + self._of.nbytes + self._ctab.nbytes
                    + self._sptr.nbytes + self._wtab.nbytes
                    + self._xt.nbytes + self._yt.nbytes)
 
     def parts(self):
-        return dict(flat_index=int(self._flat.nbytes),
+        return dict(flat_index=int(0 if self._flat is None
+                                   else self._flat.nbytes),
                     pattern_grid=int(self._patg.nbytes),
                     tables=int(self._ctab.nbytes + self._nbt.nbytes
                                + self._of.nbytes + self._wtab.nbytes),
@@ -1188,13 +1267,19 @@ class Stencil1(object):
                     slots=int(self.ntot), cells=int(self.n))
 
     # ---- flat API (certification)
+    def _map(self):
+        if self._flat is None:
+            self._flat = ocl_core.to_device(self.slot_of_col)
+        return self._flat
+
     def spmv(self, x, y):
         q = ocl_core.queue()
+        flat = self._map()
         self._xt.fill(self.dtype.type(0), queue=q)
-        self._k['sten_pack'](q, (self.n,), None, x.data, self._flat.data,
+        self._k['sten_pack'](q, (self.n,), None, x.data, flat.data,
                              self._xt.data, np.uint32(self.n))
         self._k['sten1_mv_p'](q, (self.n,), None, self._xt.data,
-                              self._flat.data, *self._tiles(), y.data,
+                              flat.data, *self._tiles(), y.data,
                               np.uint32(self.n))
         return y
 
@@ -1211,31 +1296,39 @@ class Stencil1(object):
     def grid(self):
         return self._cur
 
-    def t_sweeps(self, b, nu):
+    def t_sweeps(self, bt, nu):
+        """``nu`` sweeps on the tiled x; ``bt`` is the rhs GRID."""
         q = ocl_core.queue()
         cur, alt = self._cur, self.t_free()
         for _ in range(int(nu)):
-            self._k['sten1_jac_p'](q, (self.n,), None, cur.data, b.data,
-                                   self._flat.data, self._patg.data,
-                                   self._wtab.data, self._nbt.data,
-                                   self._nsrc.data, self._of.data,
-                                   self._ctab.data, self._sptr.data,
-                                   alt.data, np.uint32(self.n))
+            self._k['sten1_jac_g'](q, (self.ntot,), None, cur.data, bt.data,
+                                   self._patg.data, self._wtab.data,
+                                   self._nbt.data, self._nsrc.data,
+                                   self._of.data, self._ctab.data,
+                                   self._sptr.data, alt.data,
+                                   np.uint32(self.ntot))
             cur, alt = alt, cur
         self._cur = cur
 
-    def t_residual(self, b):
+    def t_residual(self, bt):
         q = ocl_core.queue()
         rt = self.t_free()
-        self._k['sten1_res_t'](q, (self.n,), None, self._cur.data, b.data,
-                               self._flat.data, *self._tiles(), rt.data,
-                               np.uint32(self.n))
+        self._k['sten1_res_g'](q, (self.ntot,), None, self._cur.data,
+                               bt.data, *self._tiles(), rt.data,
+                               np.uint32(self.ntot))
         return rt
 
     def t_prolong_add(self, P, x2):
+        """x += P x2 on the grid: through the restriction's own member
+        lists (slots) when ``P`` is that object, else the explicit
+        one-per-row prolongator through the map."""
+        add = getattr(P, 'prolong_add_tiled', None)
+        if add is not None:
+            add(x2, self._cur)
+            return
         q = ocl_core.queue()
         self._k['sten_prolong_add'](q, (self.n,), None, P.col.data, x2.data,
-                                    self._flat.data, self._cur.data,
+                                    self._map().data, self._cur.data,
                                     np.uint32(self.n))
 
     def t_restrict(self, R, rt, y):

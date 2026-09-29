@@ -178,9 +178,17 @@ class GeoCore(object):
                 A1 = ocl_stencil.Stencil1(levels[1], self.P[0], sten,
                                           mg._wdi[1], dt, csr_dev=self.A[1])
                 self.A[1] = A1
-                self.P[0].retarget(A1.slot_of_col, dev=A1._flat)
                 self.R[1] = ocl_sparse.OnesRestrict(mg.Ps[1], dt,
                                                     remap=A1.slot_of_col)
+                # level 1 entirely in grids (2026-09-28): its rhs is a
+                # grid on the same tiles, so the level-0 aggregation
+                # needs no block table in either direction, and the
+                # level-2 prolongation runs through the restriction's
+                # own member lists (slots) -- no one-per-row column
+                # array and no level-1 map
+                self.P[1] = self.R[1]
+                if hasattr(self.P[0], 'drop_table'):
+                    self.P[0].drop_table()
                 self.level1 = 'stencil (certified %.1e)' % A1.cert_err
             except (ValueError, OverflowError) as exc:
                 self.level1 = 'csr (%s)' % exc
@@ -204,8 +212,9 @@ class GeoCore(object):
         # MB each at R5) do not exist either
         self._x = [None if self.tiled[i] else ocl_core.zeros((n,), dt)
                    for i, n in enumerate(self.sizes)]
-        self._b = [None] + [ocl_core.zeros((n,), dt)
-                            for n in self.sizes[1:]]
+        self._b = [None] + [ocl_core.zeros((self.A[i].ntot if self.tiled[i]
+                                            else n,), dt)
+                            for i, n in enumerate(self.sizes) if i > 0]
         self._r = [None if self.tiled[i] else ocl_core.zeros((n,), dt)
                    for i, n in enumerate(self.sizes)]
         self._t = [None if (self.tiled[i] or (i == 0 and sweeps0))

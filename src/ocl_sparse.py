@@ -235,6 +235,22 @@ __kernel void ones_rowsum(__global const int *ptr,
     y[r] = acc;
 }
 
+/* The prolongation through the same member lists (2026-09-28): each
+   fine slot belongs to one aggregate, so one work item per row adds
+   its value into its members with no collision. */
+__kernel void ones_scatter_add(__global const int *ptr,
+                               __global const int *ind,
+                               __global const real_t *x,
+                               __global real_t *y,
+                               const unsigned int nrow)
+{
+    const unsigned int r = get_global_id(0);
+    if (r >= nrow) return;
+    const real_t v = x[r];
+    for (int k = ptr[r]; k < ptr[r + 1]; ++k)
+        y[ind[k]] += v;
+}
+
 __kernel void gather_idx(__global const real_t *src,
                          __global const int *idx,
                          __global real_t *dst,
@@ -862,6 +878,15 @@ class OnesRestrict(object):
         self._k(ocl_core.queue(), (n,), None, self.indptr.data,
                 self.indices.data, x.data, y.data, np.uint32(n))
         return y
+
+    def prolong_add_tiled(self, x2, xt):
+        """``xt += P x2`` through the same member lists: with ``remap``
+        the members are slots of the fine grid ``xt`` (2026-09-28)."""
+        n = int(self.shape[0])
+        k = ocl_core.kernel(program(self.dtype, CSR.WG), 'ones_scatter_add')
+        k(ocl_core.queue(), (n,), None, self.indptr.data,
+          self.indices.data, x2.data, xt.data, np.uint32(n))
+        return xt
 
 
 def program(dtype=np.float32, wg=64, data8=False):
