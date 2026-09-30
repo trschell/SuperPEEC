@@ -437,8 +437,17 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
             # cannot be opened.
             from krylov_stream import gmres_stream
             _restart = os.environ.get('SPPEEC_STREAM_RESTART')
-            _on_res = (_status.krylov_residual if _status.enabled()
-                       else None)
+            # progress by the residual (2026-09-29): the per-step
+            # prediction and the true value at each check, so the
+            # percent is orders of magnitude toward rtol, not the budget
+            if _status.enabled():
+                def _on_res(r):
+                    _status.krylov_progress(est=r)
+
+                def _on_chk(r):
+                    _status.krylov_progress(true=r)
+            else:
+                _on_res = _on_chk = None
             # the solver's arithmetic is complex128 whatever the
             # basis dtype: hand it the unwrapped operators (counted)
             _A = Aop_d
@@ -456,6 +465,7 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
                     restart=int(_restart) if _restart else None,
                     x0=_cast_x0(x0, _b),
                     callback=_snoop, on_residual=_on_res,
+                    on_check=_on_chk,
                     basis_dtype=np.complex64 if single else np.complex128)
             except OSError as exc:
                 warnings.warn("streamed Krylov basis unavailable (%s); "

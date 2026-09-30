@@ -75,6 +75,7 @@ import wirekernel as wk
 from equiterminal import (CellIndex, sparse_incidence, filament_cells,
                           node_cells)
 from wirecoupler import WireCoupler
+import sppeec_status as _status
 
 MU0 = 4e-7*np.pi
 
@@ -847,7 +848,18 @@ class WireBondSolver:
     refinement.
     """
 
-    def __init__(self, model, M, wires, port_p, port_n, foot_r0=None,
+    def __init__(self, *args, **kwargs):
+        # the build in named stages for the status API (2026-09-29):
+        # it was one unmeasured bracket -- 140 s at R4, ~50 min at R6,
+        # and the run's memory peak inside it
+        with _status.stages() as st:
+            self._stage = st
+            try:
+                self._init(*args, **kwargs)
+            finally:
+                self._stage = None
+
+    def _init(self, model, M, wires, port_p, port_n, foot_r0=None,
                  nq=4, ng=16, root0=0, foot_model='patch',
                  basis='auto', amg_cycles=4, gram_solver='geo',
                  verbose=False):
@@ -888,6 +900,7 @@ class WireBondSolver:
         self.wire_of_seg = np.concatenate(
             [np.full(len(w.segments), j) for j, w in enumerate(wires)])
         self.nseg_of_wire = np.array([len(w.segments) for w in wires])
+        self._stage('wire coupler')
         self.wc = WireCoupler(M, segments, nq=nq, ng=ng)
         wcs = self.wc
         self.nwel = wcs.nwel
@@ -899,6 +912,7 @@ class WireBondSolver:
         if self.whole is None or self.whole.size != self.efg + self.nnode:
             raise RuntimeError("tree buffer not allocated -- call "
                                "model.prepare(M, freq) first")
+        self._stage('incidence + spanning forest')
         self.B, ncell = sparse_incidence(M, self.whole, self.efg,
                                          self.nnode)
         self.node_of_cell = CellIndex(ncell)
@@ -920,6 +934,7 @@ class WireBondSolver:
         # surface, with the deficit resistance from footcal. The
         # 'point' model is the same machinery degenerated to a
         # one-cell patch with the legacy analytic-disc series R.
+        self._stage('foot patches')
         struc = model.struc()
         l = wcs.l
         if foot_model == 'patch' and not np.allclose(l, l[0]):
@@ -985,12 +1000,14 @@ class WireBondSolver:
         self.port_n = [self.node_of_cell[tuple(c)] for c in port_n]
         # coarse circuit graph -> driven route + sharing chords
         self._bundles = {}
+        self._stage('wire sharing cycles')
         self._build_cycles()
         # voxel plaquettes + per-segment zero-sum, as stage A1
         import scipy.sparse.csgraph as csg
         ncomp = csg.connected_components(self.B.T @ self.B,
                                          directed=False,
                                          return_labels=False)
+        self._stage('loop basis')
         want = self.efg - self.nnode + ncomp
         if basis == 'auto':
             # Threshold SET BY THE USER 2026-08-12 at 1e6 CELLS, on
@@ -1096,6 +1113,7 @@ class WireBondSolver:
             Tf.shape[1]
         del Y                      # bmat copied it; 2.6 GB at R5
         # KCL asserts with teeth
+        self._stage('KCL check')
         self._assert_kcl()
         # The incidence matrix, the spanning forest and the cell index
         # have no reader past the KCL check (audited 2026-09-23: the
@@ -1109,6 +1127,7 @@ class WireBondSolver:
         self.release_incidence()
         self.parent = self.pedge = self.psign = self.comp = None
         self.node_of_cell = None
+        self._stage('preconditioner')
         if basis == 'overcomplete' and self.gram_solver == 'geo':
             # GEOMETRIC MG on the plaquettes, exact Schur over the
             # CHORDS ONLY, and the distribution block on its own tiny
@@ -1248,6 +1267,7 @@ class WireBondSolver:
         from port_impedance import shrink_exact_f32
         shrink_exact_f32(self.Bmat)
         self.matvecs = 0
+        self._stage.end()
         self.t_setup = time.perf_counter() - t0
         if verbose:
             print("  %d wire elements / %d wires, %d plaquettes, %d "
@@ -1832,10 +1852,11 @@ class WireBondSolver:
                     import loopmg
                     import lattice_basis
                     if lattice_basis.available():
-                        lat = lattice_basis.LatticeBasis(
-                            self.Bmat, self.M, self.efg, self.nplaq,
-                            self.fil_axis, self.fil_cell,
-                            loopmg._Stencil0.TL)
+                        with _status.task('lattice basis'):
+                            lat = lattice_basis.LatticeBasis(
+                                self.Bmat, self.M, self.efg, self.nplaq,
+                                self.fil_axis, self.fil_cell,
+                                loopmg._Stencil0.TL)
                 except (ImportError, ValueError) as exc:
                     warnings.warn("lattice basis unavailable (%s: %s)"
                                   % (type(exc).__name__, exc))
@@ -1991,13 +2012,14 @@ class WireBondSolver:
         x, flag = krylov_solve(Aop, rhs, Pop, method=method, rtol=rtol,
                                maxiter=maxiter, inner_m=inner_m,
                                precision=precision)
-        resid = _true_residual(rhs, Aop, x, nrhs)
-        i = spmv_c(self._basis(), x)
-        i_f = self.ihat_f*current + i[:self.efg]
-        i_w = self.ihat_w*current + i[self.efg:]
-        v_f, v_w = self._coupled(i_f, i_w)
-        V = complex(self.ihat_f @ v_f + self.ihat_w @ v_w)
-        share = (self.Afoot @ i_w)/current
+        with _status.task('readout'):
+            resid = _true_residual(rhs, Aop, x, nrhs)
+            i = spmv_c(self._basis(), x)
+            i_f = self.ihat_f*current + i[:self.efg]
+            i_w = self.ihat_w*current + i[self.efg:]
+            v_f, v_w = self._coupled(i_f, i_w)
+            V = complex(self.ihat_f @ v_f + self.ihat_w @ v_w)
+            share = (self.Afoot @ i_w)/current
         info = dict(matvecs=self.matvecs - n0, flag=flag,
                     residual=resid, share=share,
                     time=time.perf_counter() - t0, i_f=i_f, i_w=i_w)

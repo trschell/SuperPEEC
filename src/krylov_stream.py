@@ -373,7 +373,8 @@ def _combine(V, y, n, blk, dtype=np.complex128):
 
 
 def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
-                 callback=None, on_residual=None, workdir=None,
+                 callback=None, on_residual=None, on_check=None,
+                 workdir=None,
                  basis_dtype=np.complex64):
     """Left-preconditioned restarted GMRES, basis on disk.
 
@@ -574,6 +575,8 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                 nmv += 1
                 nchecks += 1
                 true = float(np.linalg.norm(r))
+                if on_check is not None:
+                    on_check(true/bnorm)
                 if true < best_true*(1.0 - STALL_TOL):
                     best_true = true
                     stalled_checks = 0

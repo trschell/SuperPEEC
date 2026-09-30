@@ -423,6 +423,36 @@ def task(name, ticks=None, kind='', **detail):
         _S.publish(force=True)
 
 
+class _Stages(object):
+    """Sequential named sub-tasks without re-indenting the code they
+    bracket: ``st('name')`` ends the previous stage and starts the
+    next. Made by :func:`stages`, which ends the last one."""
+
+    def __init__(self):
+        self._cm = None
+
+    def __call__(self, name, **detail):
+        self.end()
+        self._cm = task(name, **detail)
+        self._cm.__enter__()
+
+    def end(self):
+        cm, self._cm = self._cm, None
+        if cm is not None:
+            cm.__exit__(None, None, None)
+
+
+@contextlib.contextmanager
+def stages():
+    """A :class:`_Stages` whose last stage always ends, exception or
+    not; inert (but callable) when status is off."""
+    st = _Stages()
+    try:
+        yield st
+    finally:
+        st.end()
+
+
 @contextlib.contextmanager
 def freq_task(freq):
     """The per-frequency task. Nesting-safe: if a freq task is already
@@ -474,7 +504,9 @@ def krylov_task(**detail):
 
 def tick_matvec(n=1):
     """One operator application. Cheap: an int, and a throttled
-    publish."""
+    publish. The percent is matvecs over the budget, except where the
+    solver reports log-residual progress (:func:`krylov_progress`),
+    which then owns it."""
     if _S is None:
         return
     with _LOCK:
@@ -483,9 +515,50 @@ def tick_matvec(n=1):
             if 'budget' in t.detail:
                 t.detail['matvecs'] = t.detail.get('matvecs', 0) + n
                 b = t.detail['budget']
-                if b:
+                if b and t.detail.get('progress') != 'log_residual':
                     t.pct = min(99.0, 100.0 * t.detail['matvecs'] / b)
                 break
+    _S.publish()
+
+
+def krylov_progress(est=None, true=None):
+    """Convergence progress of a Krylov solve that knows its residual
+    (the streamed GMRES, 2026-09-29). ``est`` is the per-step predicted
+    relative residual, ``true`` a measured one (at a convergence
+    check). The task's percent becomes LOG-RESIDUAL PROGRESS -- orders
+    of magnitude travelled from the start toward ``rtol`` -- and moves
+    ONLY on the true residual: the prediction runs ahead of it (10x
+    before the first check, and past the tolerance 30 matvecs early at
+    R4), so it is shown, as ``residual_est``, and not counted.
+    ``residual`` is the latest true value, ``checks`` the number of
+    true measurements, ``s_per_matvec`` the measured time per operator
+    application in this solve. There is deliberately no ETA: GMRES
+    decelerates, and every residual-rate estimate replayed on the R4
+    history was off by 2-5x in one direction or the other.
+    """
+    if _S is None:
+        return
+    import math
+    with _LOCK:
+        for t in reversed(_S.stack):
+            if 'budget' not in t.detail:
+                continue
+            d = t.detail
+            d['progress'] = 'log_residual'
+            if est is not None:
+                d['residual_est'] = float(est)
+            if true is not None:
+                d['residual'] = float(true)
+                d['checks'] = d.get('checks', 0) + 1
+                tol = float(d.get('rtol') or 0.0)
+                if true > 0.0 and 0.0 < tol < 1.0:
+                    f = math.log10(1.0/float(true))/math.log10(1.0/tol)
+                    f = min(0.99, max(0.0, f))
+                    t.pct = max(t.pct or 0.0, 100.0*f)
+            mv = d.get('matvecs', 0)
+            if mv:
+                d['s_per_matvec'] = (time.time() - t.t0)/mv
+            break
     _S.publish()
 
 

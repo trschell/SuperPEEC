@@ -92,6 +92,46 @@ def unit():
                   d['sweep']['current_freq'] == 1e6
                   and d['sweep']['index'] == 0
                   and d['sweep']['n'] == 2)
+        # the streamed solver's log-residual progress (2026-09-29):
+        # orders of magnitude toward rtol, ratcheted against an upward
+        # recalibrated prediction, the TRUE residual kept apart from the
+        # estimate, the matvec tick not overriding it, an ETA present
+        with st.task('krylov', budget=100, matvecs=0, rtol=1e-4):
+            st.krylov_progress(est=1e-1)          # a prediction: shown only
+            st.tick_matvec()
+            d = json.load(open(path))
+            p0 = d['task']['pct']
+            st.krylov_progress(true=1e-2)         # 2 of 4 decades
+            d = json.load(open(path))
+            p1 = d['task']['pct']
+            st.krylov_progress(est=1e-5)          # past rtol: not counted
+            st.krylov_progress(true=2e-2)         # a worse check: held
+            d = json.load(open(path))
+            p2 = d['task']['pct']
+            st.krylov_progress(true=1e-3)         # 3 of 4 decades
+            d = json.load(open(path))
+            dt_ = d['task']['detail']
+            check('streamed progress: log-residual percent from the TRUE '
+                  'residual only, ratcheted, estimate shown apart',
+                  (p0 or 0.0) == 0.0 and abs(p1 - 50.0) < 1e-6
+                  and abs(p2 - 50.0) < 1e-6
+                  and abs(d['task']['pct'] - 75.0) < 1e-6
+                  and dt_['residual'] == 1e-3
+                  and dt_['residual_est'] == 1e-5
+                  and dt_['checks'] == 3 and dt_['matvecs'] == 1
+                  and dt_['progress'] == 'log_residual'
+                  and 's_per_matvec' in dt_ and 'eta_s' not in dt_)
+        with st.stages() as sg:                     # named stages
+            sg('stage a')
+            d1 = json.load(open(path))
+            sg('stage b')
+            d2 = json.load(open(path))
+        d3 = json.load(open(path))
+        check('stages: one at a time, the last ended on exit',
+              d1['task']['current'] == 'stage a'
+              and d2['task']['current'] == 'stage b'
+              and 'stage a' not in d2['task']['stack']
+              and 'stage b' not in d3['task']['stack'])
     st.record_result(1e6, R=0.5, matvecs=5, time_s=0.01)
     d = json.load(open(path))
     seqs.append(d['seq'])

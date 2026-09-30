@@ -104,7 +104,7 @@ Field notes, in reading order:
 Two kinds of task percent exist, and they are honest in different
 ways:
 
-* **`krylov`** (lgmres/bicgstab/gmres_stream — every LpR-family outer solve):
+* **`krylov`** on **lgmres / bicgstab**:
   `pct = matvecs / budget` where the budget is the hard iteration cap
   (`maxiter × inner_m`). It never overshoots; a converging solve
   simply finishes early. On **lgmres** the detail also carries a true
@@ -113,17 +113,35 @@ ways:
   just reported, and the counting wrapper recognises that call and
   reads `‖rhs − A·x‖` off work already being paid for. bicgstab's
   matvecs never touch the iterate, so it reports budget percent only.
-* **`fgmres`** (the LpPR path): true residual norms are available per
-  iteration for free, so `pct` is **log-residual progress** — orders
-  of magnitude travelled from the initial residual toward the
-  stopping test `‖r‖ < tol·‖b‖` — with the current relative
-  `residual` in the detail.
+* **`krylov`** on **gmres_stream** (since 2026-09-29): the solver knows
+  its residual, so `pct` is **log-residual progress** as on the LpPR
+  path — orders of magnitude travelled from the start toward `rtol` —
+  and it moves only when the TRUE residual is measured, at each
+  convergence check (every ten matvecs, and on convergence), ratcheted
+  so it never decreases. The detail adds `progress: "log_residual"`;
+  `residual`, that true relative residual; `residual_est`, the solver's
+  per-step prediction, shown for liveness but not counted (it runs
+  ahead of the true value, ~10x before the first check and past the
+  tolerance well before convergence); `checks`, the number of true
+  measurements; and `s_per_matvec`, the measured seconds per operator
+  application in this solve. There is deliberately **no ETA** inside a
+  solve: GMRES decelerates, and every residual-rate estimate replayed
+  on an R4 history was off by 2-5x. `matvecs` and `budget` stay as
+  before; `matvecs × s_per_matvec` against a known iteration count is
+  the honest way to guess the rest.
 
 Setup tasks (`build tree`, `prepare`, `terminal coupler`,
 `skin engine k=N`, `mode tables`, `assemble + preconditioner`,
 `build wire solver`, `export fields`, `drive port j/n`) either tick a
 known chunk count (`mode tables`, `export fields`) or are unmeasured
 brackets that exist so the stack always says *what* is running.
+On the wire-bond path `build wire solver` is broken into its stages
+(2026-09-29): `wire coupler`, `incidence + spanning forest`,
+`foot patches`, `wire sharing cycles`, `loop basis`, `KCL check`,
+`preconditioner`; the first product adds `lattice basis` inside
+`krylov`, and the solve ends with `readout`. The build's memory
+high-water mark usually falls in `preconditioner`, which `mem.hwm_mb`
+shows as it happens.
 
 ## The event log
 
