@@ -391,7 +391,9 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
                 if pair is not None and _nrhs > 0 and \
                         np.shape(pair[0]) == np.shape(xk) and \
                         np.array_equal(pair[0], xk):
-                    if _parked:
+                    # (tested at call time: the fallbacks below
+                    # rebind ``rhs`` to its dense form)
+                    if hasattr(rhs, 'sub_from'):
                         d = np.array(pair[1], np.complex128, copy=True)
                         rhs.sub_from(d)          # |b - A x| = |A x - b|
                     else:
@@ -436,6 +438,7 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
             # krylov_stream. Falls back to lgmres if the basis file
             # cannot be opened.
             from krylov_stream import gmres_stream
+            import krylov_stream as _stream
             _restart = os.environ.get('SPPEEC_STREAM_RESTART')
             # progress by the residual (2026-09-29): the per-step
             # prediction and the true value at each check, so the
@@ -479,13 +482,28 @@ def krylov_solve(Aop, rhs, Pop, method='lgmres', rtol=1e-10,
                 # the true residual stalled under the streamed cycle
                 # (krylov_stream's stall guard): lgmres finishes from
                 # the streamed iterate, ten-step cycles from the true
-                # residual
-                warnings.warn("streamed Krylov basis: true residual "
-                              "stalled; lgmres finishes from its iterate")
-                rhs = _dense(rhs)
-                x, flag = lgmres(Aop, rhs, M=Pop, rtol=rtol,
-                                 maxiter=maxiter, inner_m=inner_m,
-                                 x0=_cast_x0(x, rhs), callback=_snoop)
+                # residual -- WHEN ITS BASIS FITS (2026-09-30: at R6
+                # the hand-over allocated toward 40 GB on a 56 GiB
+                # scope; the streamed iterate, converged in |M r| to
+                # the basis precision's floor, is the answer there)
+                need = (int(inner_m) + 2*3 + 4)*Aop.shape[0] \
+                    * np.dtype(np.complex64 if single else np.complex128).itemsize
+                avail = _stream._mem_available()
+                if (os.environ.get('SPPEEC_STREAM_NO_FALLBACK') == '1'
+                        or (avail is not None and need > 0.8*avail)):
+                    warnings.warn("streamed Krylov basis: true residual "
+                                  "stalled; lgmres would need %.1f GB "
+                                  "against %.1f GB available -- keeping "
+                                  "the streamed iterate (flag 2)"
+                                  % (need/1e9, (avail or 0)/1e9))
+                else:
+                    warnings.warn("streamed Krylov basis: true residual "
+                                  "stalled; lgmres finishes from its "
+                                  "iterate")
+                    rhs = _dense(rhs)
+                    x, flag = lgmres(Aop, rhs, M=Pop, rtol=rtol,
+                                     maxiter=maxiter, inner_m=inner_m,
+                                     x0=_cast_x0(x, rhs), callback=_snoop)
             return _finish(x, flag)
         cap = max(1, (int(maxiter)*int(inner_m))//2)
         x, flag = bicgstab(Aop, rhs, M=Pop, rtol=rtol, maxiter=cap,

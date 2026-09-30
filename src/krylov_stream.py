@@ -28,10 +28,24 @@ basis to form the iterate, whenever the running ratio of the two
 norms predicts convergence. One basis is stored either way.
 
 The default restart length is the whole matvec budget, i.e. FULL
-GMRES within budget: with the basis on disk there is no memory reason
-to restart, and restarting only costs matvecs. The reads grow as
-k^2/2 vectors over a cycle; ``SPPEEC_STREAM_RESTART`` bounds that for
-experiments.
+GMRES within budget, bounded by memory (half of what is available,
+floor 20); ``SPPEEC_STREAM_RESTART`` sets it outright. The reads
+grow as k^2/2 vectors over a cycle.
+
+AUGMENTATION (LGMRES, 2026-09-30): a short cycle on its own does not
+converge. On the DBC R6 the memory floor gave 20-step cycles, and
+the true residual ROSE across restarts (0.225 -> 0.30 -> 0.36 over
+three cycles while |M r| fell within each): every restart minimises
+|M r| over a fresh space and pours the true residual back into the
+directions M damps. lgmres converges flat at R3/R4/R5 with TEN-step
+cycles (inner_m=10) because each cycle also spans the previous
+cycles' corrections: after a cycle it keeps the pair (dx/|dx|,
+M A dx/|dx|) -- the product costs no matvec, it is a combination of
+the cycle's own Arnoldi vectors -- and the next cycle orthogonalises
+those products into its basis after the Krylov steps (Baker, Jessup
+& Manteuffel 2005; scipy's ``prepend_outer_v=False``). Up to
+``SPPEEC_STREAM_AUG`` pairs (default 3, scipy's outer_k) live in a
+second file on the stream directory; 0 gives plain restarted GMRES.
 
 Where the file goes: ``SPPEEC_STREAM_DIR``, else ``~/.cache/sppeec/
 krylov``. NOT the system temp directory: on this box /tmp is a
@@ -75,7 +89,14 @@ CHECK_EVERY = int(os.environ.get('SPPEEC_STREAM_CHECK_EVERY', '10'))
 CHECK_MARGIN = float(os.environ.get('SPPEEC_STREAM_CHECK_MARGIN', '0.8'))
 STALL_CHECKS = int(os.environ.get('SPPEEC_STREAM_STALL_CHECKS', '3'))
 STALL_TOL = float(os.environ.get('SPPEEC_STREAM_STALL_TOL', '0.02'))
+AUG_K = int(os.environ.get('SPPEEC_STREAM_AUG', '3'))   # LGMRES pairs kept
 _VERBOSE = os.environ.get('SPPEEC_STREAM_VERBOSE') == '1'
+# diagnostic (2026-09-30): at a mid-cycle check the true residual r is
+# discarded afterwards, so M can be applied to it in place and the
+# ACTUAL |M r| printed beside the recurrence's estimate -- if the two
+# part company the Arnoldi relation no longer holds for the operator
+# as computed (fp32 noise), and the estimate is fiction
+_CHECK_MR = os.environ.get('SPPEEC_STREAM_CHECK_MR') == '1'
 
 
 def stream_dir():
@@ -169,6 +190,17 @@ class BasisFile(object):
         self.count += 1
         return v
 
+    def write(self, j, v, scale=1.0, chunk=1 << 22):
+        """Slot ``j`` := ``scale * v``, converted to the stored dtype
+        ``chunk`` entries at a time (no whole-vector copy)."""
+        base = j*self.nbytes
+        itm = self.dtype.itemsize
+        for a in range(0, self.n, chunk):
+            m = min(chunk, self.n - a)
+            _pwrite_all(self.fd, (v[a:a + m]*scale).astype(self.dtype),
+                        base + a*itm)
+        self.count = max(self.count, j + 1)
+
     def read(self, j, out=None):
         if out is None:
             if self.buf is None:
@@ -179,9 +211,9 @@ class BasisFile(object):
         self.t_read += time.time() - t
         return out
 
-    def add_into(self, j, out, chunk=1 << 22):
-        """``out += v_j``, read from the file ``chunk`` entries at a time
-        -- the vector never exists whole in memory."""
+    def add_into(self, j, out, scale=1.0, chunk=1 << 22):
+        """``out += scale * v_j``, read from the file ``chunk`` entries
+        at a time -- the vector never exists whole in memory."""
         t = time.time()
         buf = np.empty(min(chunk, self.n), self.dtype)
         base = j*self.nbytes
@@ -189,7 +221,10 @@ class BasisFile(object):
         for a in range(0, self.n, chunk):
             m = min(chunk, self.n - a)
             _pread_all(self.fd, buf[:m], base + a*itm)
-            out[a:a + m] += buf[:m]
+            if scale == 1.0:
+                out[a:a + m] += buf[:m]
+            else:
+                out[a:a + m] += scale*buf[:m]
         self.t_read += time.time() - t
         return out
 
@@ -361,27 +396,34 @@ def _apply_M(M, v):
     return np.asarray(M.matvec(v), np.complex128)
 
 
-def _combine(V, y, n, blk, dtype=np.complex128):
-    """u = sum_j y[j] v_j over the file, in blocks."""
-    u = np.zeros(n, dtype)
+def _combine(V, ys, n, blk, dtype=np.complex128):
+    """``[sum_j y[j] v_j for y in ys]`` over the file, each block read
+    once for all the coefficient vectors."""
+    outs = [np.zeros(n, dtype) for _ in ys]
     nb = blk.shape[0]
-    for j0 in range(0, len(y), nb):
-        m = min(nb, len(y) - j0)
+    for j0 in range(0, max(len(y) for y in ys), nb):
+        m = min(nb, max(len(y) for y in ys) - j0)
         V.read_block(j0, m, blk)
-        _block_update(blk[:m], -y[j0:j0 + m], u)
-    return u
+        for y, u in zip(ys, outs):
+            mi = min(m, len(y) - j0)
+            if mi > 0:
+                _block_update(blk[:mi], -y[j0:j0 + mi], u)
+    return outs
 
 
 def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                  callback=None, on_residual=None, on_check=None,
                  workdir=None,
                  basis_dtype=np.complex64):
-    """Left-preconditioned restarted GMRES, basis on disk.
+    """Left-preconditioned restarted GMRES, basis on disk, each cycle
+    augmented with the previous cycles' corrections (LGMRES, module
+    header; ``SPPEEC_STREAM_AUG`` pairs, 0 = plain restarts).
 
     ``A``/``M`` expose ``matvec`` (in complex128); ``budget`` is the
     total number of operator applies allowed (the same quantity as
-    lgmres's maxiter*inner_m); ``restart`` is the cycle length
-    (default: the budget, i.e. full GMRES). ``callback(x)`` is called
+    lgmres's maxiter*inner_m); ``restart`` is the cycle length in
+    Krylov steps (default: the budget, i.e. full GMRES, bounded by
+    memory); the augmentation steps cost no applies. ``callback(x)`` is called
     with each cycle's iterate, ``on_residual(relres)`` after every
     Arnoldi step with the predicted true relative residual. Returns
     ``(x, flag, nmv)`` with flag 0 = converged, 1 = budget exhausted,
@@ -468,16 +510,25 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
     best_true = beta_true = float(np.linalg.norm(r))
     stalled_checks = 0
     restarted_after_stall = False
-    H = np.zeros((restart + 1, restart), np.complex128)
-    cs = np.zeros(restart, np.float64)
-    sn = np.zeros(restart, np.complex128)
-    g = np.zeros(restart + 1, np.complex128)
+    # LGMRES augmentation (module header): up to K pairs (z, M A z)
+    # from earlier cycles, z = dx/|dx|, in the slots of ZF; a cycle
+    # runs `restart` Krylov steps and then orthogonalises the K
+    # products into its basis, so H has restart + K columns
+    K = max(0, AUG_K)
+    aug = []                       # (z slot, product slot), oldest first
+    width = restart + K
+    H = np.zeros((width + 1, width), np.complex128)
+    H0 = np.zeros_like(H)          # the columns before the rotations
+    cs = np.zeros(width, np.float64)
+    sn = np.zeros(width, np.complex128)
+    g = np.zeros(width + 1, np.complex128)
     t_start = time.time()
     t_ops = 0.0                    # seconds inside A and M applies
     nchecks = 0
     _T_KERNEL[0] = 0.0
     with BasisFile(n, basis_dtype, workdir) as V, \
-            BasisFile(n, dt, workdir) as XF:
+            BasisFile(n, dt, workdir) as XF, \
+            BasisFile(n, basis_dtype, workdir) as ZF:
         # XF parks the iterate x during a convergence check (2026-09-26):
         # the check forms u = x + V y and applies the operator to it,
         # and x -- untouched by the check -- was one full vector
@@ -509,18 +560,27 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
             k = 0
             k_checked = 0
             done = False
+            naug = len(aug)          # the pairs this cycle spans
             while True:
-                t = time.time()
-                # vk goes to the operator as stored (complex64): its
-                # products are exact on float32 halves, and the
-                # complex128 copy that used to be made here was one
-                # full vector at the solve's peak. The preconditioner
-                # takes the operator's result in place when it can
-                # (the vector is ours and fresh), one vector more.
-                w = np.asarray(A.matvec(vk), dt)
-                w = _apply_M(M, w)
-                t_ops += time.time() - t
-                nmv += 1
+                if k < restart:
+                    t = time.time()
+                    # vk goes to the operator as stored (complex64):
+                    # its products are exact on float32 halves, and
+                    # the complex128 copy that used to be made here
+                    # was one full vector at the solve's peak. The
+                    # preconditioner takes the operator's result in
+                    # place when it can (the vector is ours and
+                    # fresh), one vector more.
+                    w = np.asarray(A.matvec(vk), dt)
+                    w = _apply_M(M, w)
+                    t_ops += time.time() - t
+                    nmv += 1
+                else:
+                    # an augmentation column: its product M A z is on
+                    # file already, no operator apply; the read lands
+                    # in the block buffer, idle between steps
+                    ZF.read(aug[k - restart][1], out=blk[0])
+                    w = blk[0].astype(dt)
                 # modified Gram-Schmidt against the streamed basis in
                 # blocks (classical within a block of orthonormal
                 # vectors, modified across blocks); the newest vector
@@ -528,6 +588,7 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                 _orthogonalise(V, k, vk, w, blk, H[:, k])
                 hk = float(np.linalg.norm(w))
                 H[k + 1, k] = hk
+                H0[:k + 2, k] = H[:k + 2, k]
                 for j in range(k):
                     t = cs[j]*H[j, k] + sn[j]*H[j + 1, k]
                     H[j + 1, k] = -np.conj(sn[j])*H[j, k] + cs[j]*H[j + 1, k]
@@ -548,7 +609,8 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                     vk = V.append(w)     # the stored complex64 copy
                 del w                    # dead once stored; it stood
                 # under the check's matvec as a whole extra vector
-                cycle_end = (k >= restart or nmv >= budget or breakdown)
+                cycle_end = (k >= restart + naug or nmv >= budget
+                             or breakdown)
                 # measure the true residual when the prediction says
                 # converged, and in any case every CHECK_EVERY steps:
                 # the ratio drifts as the residual moves into the
@@ -556,8 +618,11 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                 # and a prediction taken from the rough initial
                 # residual can be pessimistic by a large factor (an
                 # early R3 run marched blind to the budget)
+                # (no periodic check once the cycle's Krylov steps
+                # are done: the augmentation steps cost no matvec, a
+                # check does, and the cycle-end check is coming)
                 if not (cycle_end or est <= tol*ratio*CHECK_MARGIN
-                        or k - k_checked >= CHECK_EVERY):
+                        or (k < restart and k - k_checked >= CHECK_EVERY)):
                     continue
                 k_checked = k
                 # form the iterate and measure the true residual
@@ -566,7 +631,30 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                 XF.reset()
                 XF.append(x)                   # parked; the same bytes
                 del x
-                u = _combine(V, y, n, blk)
+                kk = min(k, restart)           # the Krylov columns
+                if cycle_end and K > 0 and V.count > 0:
+                    # the cycle's correction dx = V y (+ the augmented
+                    # columns below) and its product M A dx, a
+                    # combination of the same basis by the unrotated
+                    # Hessenberg (scipy's Q R y), in the one pass
+                    q = H0[:V.count, :k].dot(y)
+                    u, ax = _combine(V, [y[:kk], q], n, blk)
+                else:
+                    (u,) = _combine(V, [y[:kk]], n, blk)
+                    ax = None
+                for j in range(kk, k):
+                    ZF.add_into(aug[j - restart][0], u, scale=y[j])
+                if ax is not None:
+                    nx = float(np.linalg.norm(u))
+                    if nx > 0.0:
+                        if len(aug) >= K:
+                            iz, iw = aug.pop(0)     # the oldest pair
+                        else:
+                            iz, iw = 2*len(aug), 2*len(aug) + 1
+                        ZF.write(iz, u, 1.0/nx)
+                        ZF.write(iw, ax, 1.0/nx)
+                        aug.append((iz, iw))
+                    del ax                     # before the operator
                 XF.add_into(0, u)              # u += x, from the file
                 t = time.time()
                 r = np.asarray(A.matvec(u), dt)
@@ -612,6 +700,15 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                 if cycle_end or nmv >= budget:
                     x = u
                     break
+                if _CHECK_MR:
+                    t = time.time()
+                    mr = float(np.linalg.norm(_apply_M(M, r)))
+                    t_ops += time.time() - t
+                    print("gmres_stream: k %d actual |Mr|/|b| %.3e vs "
+                          "estimate %.3e (x%.3g)"
+                          % (k, mr/bnorm, est/bnorm,
+                             mr/est if est > 0 else float('inf')),
+                          flush=True)
                 del u, r
                 x = np.empty(n, dt)
                 XF.read(0, out=x)              # the check failed: x is back
@@ -624,9 +721,10 @@ def gmres_stream(A, b, M, rtol=1e-4, budget=300, restart=None, x0=None,
                 break
         if _VERBOSE:
             print("gmres_stream: done flag %d, %d matvecs (%d residual "
-                  "checks), %.0f s: operators %.0f, basis reads %.0f "
-                  "(%.0f thread-s), projections %.0f, block %d x %.0f MB"
-                  % (flag, nmv, nchecks, time.time() - t_start, t_ops,
-                     V.t_block, V.t_read, _T_KERNEL[0], nb,
-                     V.nbytes/2**20), flush=True)
+                  "checks, restart %d + %d augmentation pairs), %.0f s: "
+                  "operators %.0f, basis reads %.0f (%.0f thread-s), "
+                  "projections %.0f, block %d x %.0f MB"
+                  % (flag, nmv, nchecks, restart, K,
+                     time.time() - t_start, t_ops, V.t_block, V.t_read,
+                     _T_KERNEL[0], nb, V.nbytes/2**20), flush=True)
     return x, flag, nmv
