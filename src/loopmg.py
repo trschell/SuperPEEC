@@ -139,30 +139,33 @@ def csc_permute_prefix(B, perm, chunk=1 << 22):
     B = B.tocsc()
     nperm = int(len(perm))
     ncol = B.shape[1]
-    full = np.concatenate([np.asarray(perm, np.int64),
-                           np.arange(nperm, ncol, dtype=np.int64)])
-    lens = np.diff(B.indptr).astype(np.int64)
-    new_lens = lens[full]
+    # int32 bookkeeping, each helper freed as soon as it is consumed
+    # (2026-09-30): four int64 helpers the length of the column count
+    # were 8 GB at R6 beside the copy itself
+    full = np.concatenate([np.asarray(perm, np.int32),
+                           np.arange(nperm, ncol, dtype=np.int32)])
+    lens = np.diff(B.indptr)
     indptr = np.zeros(ncol + 1, dtype=B.indptr.dtype)
-    np.cumsum(new_lens, out=indptr[1:])
+    np.cumsum(lens[full], out=indptr[1:])
+    del lens
     data = np.empty(B.data.shape[0], B.data.dtype)
     indices = np.empty(B.indices.shape[0], B.indices.dtype)
-    src_start = B.indptr[:-1].astype(np.int64)
     for c0 in range(0, ncol, chunk):
         c1 = min(ncol, c0 + chunk)
         cols = full[c0:c1]
-        ln = new_lens[c0:c1]
+        ln = (indptr[c0 + 1:c1 + 1] - indptr[c0:c1]).astype(np.int64)
         tot = int(ln.sum())
         if tot == 0:
             continue
-        # entry k of this chunk comes from src_start[col] + offset
-        rep = np.repeat(src_start[cols] - np.concatenate(
+        # entry k of this chunk comes from the source column's start
+        # plus its offset inside that column
+        rep = np.repeat(B.indptr[cols].astype(np.int64) - np.concatenate(
             [[0], np.cumsum(ln[:-1])]), ln)
         idx = rep + np.arange(tot, dtype=np.int64)
         d0 = int(indptr[c0])
         data[d0:d0 + tot] = B.data[idx]
         indices[d0:d0 + tot] = B.indices[idx]
-        del rep, idx
+        del rep, idx, ln, cols
     out = _sp.csc_matrix((data, indices, indptr), shape=B.shape)
     out.has_sorted_indices = bool(B.has_sorted_indices)
     return out

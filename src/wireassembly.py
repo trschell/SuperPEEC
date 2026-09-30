@@ -1729,8 +1729,11 @@ class WireBondSolver:
         # a view of its arrays, and the block's row split is small
         B = self.Bmat.tocsc()
         ncol = int(B.shape[1])
-        step = max(1, min(ncol, (1 << 22)))
+        step = max(1, min(ncol, (1 << 20)))
         div = 0.0
+        # the incidence transpose once, as CSR, for every block: the
+        # product converted the CSC view per block (2026-09-30)
+        BT = BT.tocsr()
         for c0 in range(0, ncol, step):
             c1 = min(ncol, c0 + step)
             p0, p1 = int(B.indptr[c0]), int(B.indptr[c1])

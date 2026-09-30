@@ -666,18 +666,27 @@ class Stencil0(object):
         self.implicit = mono and \
             os.environ.get('SPPEEC_OCL_IMPLICIT_FLAT', '1') != '0'
         if self.implicit:
+            # built a chunk at a time (2026-09-30): the whole-array form
+            # held five int64 copies of the map -- 20 GiB at R6, the
+            # instant the second R6 attempt was OOM-killed at
             per = 3*self.TL**3
             nw = (per + 63)//64
-            t = flat//per
-            loc = flat - t*per
-            key = t*nw + (loc >> 6)
-            bit = np.uint64(1) << (loc & 63).astype(np.uint64)
-            starts = np.flatnonzero(np.r_[True, key[1:] != key[:-1]])
             mask = np.zeros(self.nt*nw, np.uint64)
-            mask[key[starts]] = np.bitwise_or.reduceat(bit, starts)
+            cnt = np.zeros(self.nt, np.int64)
+            CH = 1 << 22
+            for a0 in range(0, self.n, CH):
+                fl = flat[a0:a0 + CH]
+                t = fl//per
+                loc = (fl - t*per).astype(np.int64)
+                key = t*nw + (loc >> 6)
+                bit = np.uint64(1) << (loc & 63).astype(np.uint64)
+                starts = np.flatnonzero(np.r_[True, key[1:] != key[:-1]])
+                mask[key[starts]] |= np.bitwise_or.reduceat(bit, starts)
+                cnt += np.bincount(t, minlength=self.nt)
+                del fl, t, loc, key, bit, starts
             pre = np.zeros(self.nt + 1, np.int32)
-            np.cumsum(np.bincount(t, minlength=self.nt), out=pre[1:])
-            del t, loc, key, bit, starts
+            np.cumsum(cnt, out=pre[1:])
+            del cnt
             self._mask = ocl_core.to_device(mask)
             self._pre = ocl_core.to_device(pre)
             self._flat = None
@@ -710,16 +719,23 @@ class Stencil0(object):
         # occupancy mask is not needed either: an empty slot has no
         # work item. Where the weight varies it is kept per plaquette.
         w = np.ascontiguousarray(wdi_t).astype(dt).ravel()
-        wp = w[flat]
-        nz = np.unique(wp)
-        self.uniform_w = bool(nz.size == 1)
+        # uniform? decided a chunk at a time; the per-plaquette gather
+        # is made only when the weights differ
+        w0 = dt.type(w[flat[0]]) if flat.size else dt.type(0)
+        uniform = True
+        CH = 1 << 22
+        for a0 in range(0, flat.size, CH):
+            if not np.all(w[flat[a0:a0 + CH]] == w0):
+                uniform = False
+                break
+        self.uniform_w = uniform
         if self.uniform_w:
-            self.wdi = dt.type(nz[0])
+            self.wdi = w0
             self._wp = None
         else:
             self.wdi = dt.type(0)
-            self._wp = ocl_core.to_device(wp)
-        del w, wp
+            self._wp = ocl_core.to_device(w[flat])
+        del w
         defs = {'TL': self.TL}
         if self.implicit:
             defs['IMPLICIT_FLAT'] = 1

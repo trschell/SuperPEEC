@@ -116,6 +116,69 @@ def _program(dt, data8=True):
                             {'DATA': data}, key='ocl_wire/' + data)
 
 
+def _laplacian_host(B, chunk=1 << 24):
+    """``B^T B`` for a filament incidence with exactly two entries
+    (+1, -1) per row, as a CSR with int8 values, int32 indices, sorted
+    columns: the node degrees on the diagonal, -1 per filament off
+    it. Built by a counting sort over the 2E off-diagonal entries plus
+    the diagonal, in chunks, with no sparse product and no int64
+    temporaries the size of the incidence."""
+    import scipy.sparse as sp
+    Bc = B.tocsr()
+    if not np.all(np.diff(Bc.indptr) == 2):
+        raise ValueError("incidence rows must have exactly two entries")
+    ne, nn = (int(v) for v in Bc.shape)
+    pair = Bc.indices.reshape(ne, 2)
+    lo = pair[:, 0]
+    hi = pair[:, 1]
+    del pair
+    deg = np.bincount(lo, minlength=nn) + np.bincount(hi, minlength=nn)
+    counts = deg.astype(np.int64) + 1                 # neighbours + self
+    indptr = np.zeros(nn + 1, dtype=np.int64)
+    np.cumsum(counts, out=indptr[1:])
+    nnz = int(indptr[-1])
+    if nnz >= (1 << 31):
+        raise OverflowError("Laplacian past int32 indexing")
+    indices = np.empty(nnz, dtype=np.int32)
+    data = np.empty(nnz, dtype=np.int8)
+    fill = indptr[:-1].copy()
+    # the diagonal first, then each filament's two off-diagonals, in
+    # chunks: a counting sort by row, columns sorted afterwards
+    indices[fill] = np.arange(nn, dtype=np.int32)
+    data[fill] = np.minimum(deg, 127).astype(np.int8)
+    if int(deg.max()) > 127:
+        raise OverflowError("node degree past a byte")
+    fill += 1
+    for a0 in range(0, ne, chunk):
+        a1 = min(ne, a0 + chunk)
+        for r, c in ((lo[a0:a1], hi[a0:a1]), (hi[a0:a1], lo[a0:a1])):
+            # stable placement: rows repeat inside a chunk, so the slot
+            # of each entry is fill[r] plus its rank among equal rows
+            srt = np.argsort(r, kind='stable')
+            rs = r[srt]
+            st = np.flatnonzero(np.r_[True, rs[1:] != rs[:-1]])
+            ln = np.diff(np.r_[st, rs.size])
+            within = np.arange(rs.size, dtype=np.int64) - np.repeat(st, ln)
+            pos = np.repeat(fill[rs[st]], ln) + within
+            indices[pos] = c[srt]
+            data[pos] = -1
+            fill[rs[st]] += ln
+            del srt, rs, st, ln, within, pos
+    L = sp.csr_matrix((data, indices, indptr.astype(np.int32)),
+                      shape=(nn, nn))
+    L.sort_indices()
+    return L
+
+
+def _laplacian_device(B, dt):
+    """The host-assembled byte Laplacian, uploaded as a DeviceCSR."""
+    L = _laplacian_host(B)
+    return ocl_sparse.DeviceCSR(ocl_core.to_device(L.indptr),
+                                ocl_core.to_device(L.indices),
+                                ocl_core.to_device(L.data),
+                                L.shape, L.nnz)
+
+
 def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000):
     """``ihat = B phi`` with ``(B^T B) phi = rhs``, solved on the device.
 
@@ -128,29 +191,18 @@ def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000):
     k = {n: ocl_core.kernel(prg, n)
          for n in ('dirichlet', 'diag_inv', 'axpy', 'xpay', 'vmul')}
 
+    # The Laplacian assembled on the host from the incidence's two
+    # entries per row and uploaded alone (2026-09-29): B^T B was formed
+    # ON THE DEVICE from an uploaded B and B^T -- 6.8 GB of the pair at
+    # R6 beside the 3.5 GB result and the tree's resident state, which
+    # is the allocation the card refused on the first R6 run (falling
+    # back to a host CG that ran for hours). L = D - A needs no product:
+    # a filament (lo, hi) is -1 at (lo, hi) and (hi, lo) and adds one
+    # to both degrees. Bytes for the values as before, columns sorted
+    # within each row, so the device sums each row in the same order
+    # the product's rows had.
     Bc = B.tocsr()
-    # Byte-valued matrices (2026-09-25): B and B^T are plus and minus
-    # ones, the Laplacian's entries are node degrees and minus ones,
-    # so all three carry their values as single bytes -- the
-    # incidence pair was 2.5 GB of doubles during the product at R5,
-    # the Laplacian 1 GB through the whole iteration -- while every
-    # vector and every product stays double: a byte widened to double
-    # is the double that was stored, so the bits are unchanged.
-    BTd_raw = ocl_sparse.transpose_device(Bc, dt, data8=True)
-    # a Laplacian row holds the node's neighbours plus itself, so the
-    # bound is small; widen on overflow rather than sizing the private
-    # array for the worst node in the graph
-    maxc = 64
-    while True:
-        try:
-            Ld = ocl_sparse.spgemm_device(BTd_raw, Bc, dt, maxc=maxc,
-                                          data8=True)
-            break
-        except ocl_sparse.SpGEMMOverflow:
-            if maxc >= 256:
-                raise
-            maxc *= 2
-    del BTd_raw                   # the Laplacian is formed; B^T is dead
+    Ld = _laplacian_device(Bc, dt)
     nn = int(Ld.shape[0])
     d = ocl_core.to_device(np.asarray(parent >= 0, dt))   # zero at roots
     k['dirichlet'](q, (nn,), None, Ld.indptr.data, Ld.indices.data,
@@ -167,6 +219,10 @@ def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000):
     k['vmul'](q, (nn,), None, r.data, b0.data, d.data, np.uint32(nn))
     bn = float(np.sqrt(ocl_sparse.dot(r, r, dt)))
 
+    # the mask and the right-hand side have done their work (the check
+    # runs on the host now): two node vectors fewer through the
+    # iteration, 1.4 GB at R6 on a card that is full there
+    del d, b0
     x = ocl_core.zeros((nn,), dt)
     z = ocl_core.zeros((nn,), dt)
     p = ocl_core.zeros((nn,), dt)
@@ -197,17 +253,30 @@ def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000):
         rz = rz_new
 
     del Lg, Ld               # the iteration is over; the Laplacian is dead
-    Bd = ocl_sparse.CSR(Bc, dt)
-    ihat = ocl_core.zeros((int(Bd.shape[0]),), dt)
-    Bd.spmv(x, ihat)
-    del Bd
-    # the KCL check needs the transpose again; one pass to rebuild it
-    # beats carrying it through the whole iteration
-    BTd = ocl_sparse.CSR(ocl_sparse.transpose_device(Bc, dt, data8=True),
-                         dt)
-    chk = z                  # dead since the last preconditioner sweep
-    BTd.spmv(ihat, chk)
-    k['axpy'](q, (nn,), None, chk.data, dt.type(-1.0), b0.data,
-              np.uint32(nn))
-    resid = ocl_sparse.maxabs(chk, dt)
-    return ihat.get(queue=q), resid
+    # The potential is done; the current and the KCL check run on the
+    # HOST (2026-09-29): they used to upload B and then B^T again --
+    # 10 GB at R6 beside the solve's vectors, the second allocation
+    # the card refuses there. A filament's current is the two-term
+    # difference of its end potentials, computed as the device kernel
+    # did (v0*x0 + v1*x1, exact plus or minus ones), so the bits are
+    # the same; the check is a threshold on a maximum.
+    xh = x.get(queue=q)
+    del x, r, z, p, Ap, dinv
+    ne = int(Bc.shape[0])
+    pair = Bc.indices.reshape(ne, 2)
+    vals = Bc.data.reshape(ne, 2)
+    ihat = np.empty(ne, dt)
+    chk = -np.asarray(rhs, dt)              # B^T ihat - rhs, accumulated
+    CH = 1 << 24
+    for a0 in range(0, ne, CH):
+        a1 = min(ne, a0 + CH)
+        c0, c1 = pair[a0:a1, 0], pair[a0:a1, 1]
+        v0 = vals[a0:a1, 0].astype(dt)
+        v1 = vals[a0:a1, 1].astype(dt)
+        blk = v0*xh[c0] + v1*xh[c1]
+        ihat[a0:a1] = blk
+        chk += np.bincount(c0, weights=v0*blk, minlength=nn)
+        chk += np.bincount(c1, weights=v1*blk, minlength=nn)
+        del c0, c1, v0, v1, blk
+    resid = float(np.abs(chk).max())
+    return ihat, resid
