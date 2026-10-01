@@ -1186,6 +1186,40 @@ class WireBondSolver:
             del d32
             Yp.has_sorted_indices = bool(self.Bmat.has_sorted_indices)
             Ym = self.Bmat[:, self.nplaq + self.nd:].T.tocsr()
+            # IMPEDANCE-WEIGHTED WIRE ROWS (2026-10-01). The Grams the
+            # preconditioner inverts for the distribution block (S^T S)
+            # and the chords weight every basis row 1, where the
+            # operator weights a lattice filament z0 and a wire element
+            # z_w -- 25-500x z0 on the DBC, spread 25x among
+            # themselves. The wire rows are scaled by sqrt(|z_w|/|z0|),
+            # z_w = r_w + jw L_self, z0 the lattice filament's R0 +
+            # jw L0 (L0 ~ (mu0/2pi) dx); the plaquette block (lattice
+            # rows only) is untouched. Measured: R3 167 -> 66 matvecs,
+            # R5 126 -> 89 (wall -23%), Z unchanged to 4e-6; a cubic
+            # 0.1 mm rung at 10 kHz 187 -> 22. Resistance-only weights
+            # converged faster but left 15x the error in R. The
+            # scaling touches the wire-row NONZEROS in place: a weight
+            # vector over all filaments was 2 GB at R6, inside the
+            # build's peak. SPPEEC_WIRE_GRAM_WEIGHT=0 opts out.
+            sw = None
+            if (os.environ.get('SPPEEC_WIRE_GRAM_WEIGHT', '1') != '0'
+                    and self.nwel):
+                # the lattice filament resistance from a bounded sample
+                # (uniform on a single-material lattice; a float64 copy
+                # of every filament's r was 1.85 GiB at R6)
+                R0 = float(np.median(np.concatenate([
+                    np.ravel(l.r)[:1 << 20][np.ravel(l.r)[:1 << 20] > 0]
+                    if np.ndim(l.r) else np.full(1, float(l.r))
+                    for l in (M.e, M.f, M.g)])))
+                om = float(np.imag(M.jomega))
+                Lw = np.real(np.asarray(self.wc.Lww.diagonal()))
+                zw = np.abs(np.asarray(self.r_w, np.float64) + 1j*om*Lw)
+                z0 = abs(R0 + 1j*om*1e-7*float(np.min(self.wc.l)))
+                sw = np.sqrt(zw/z0)
+                Ym = Ym.copy()
+                mk = Ym.indices >= self.efg
+                Ym.data[mk] *= sw[Ym.indices[mk] - self.efg]
+                del mk, zw, Lw
             geo = _GeoMGFactor(None, nrm, bse, self.nplaq,
                                cycles=self.amg_cycles, parts=(Yp, Ym))
             del Yp, Ym             # setup views: the factor holds
@@ -1194,6 +1228,13 @@ class WireBondSolver:
                 print("GeoMG precond apply: %s" % geo.gpu_state,
                       flush=True)
             Ssub = self.Bmat[:, self.nplaq:self.nplaq + self.nd]
+            if sw is not None:
+                # the distribution columns live on wire rows only
+                Ssub = Ssub.tocsc(copy=True)
+                mk = Ssub.indices >= self.efg
+                Ssub.data[mk] *= sw[Ssub.indices[mk] - self.efg]
+                del mk
+            del sw
             cholS = cholesky((Ssub.T @ Ssub).tocsc())
             nplaq, nd, size = self.nplaq, self.nd, self.size
 
