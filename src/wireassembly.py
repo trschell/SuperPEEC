@@ -1443,9 +1443,135 @@ class WireBondSolver:
         """Accumulate foot (j, e)'s patch distribution bundle."""
         nodes, ws = self.foot_patch[j][e]
         anchor = self.foot_node[j][e]
+        tg = [int(n) for n in nodes if n != anchor]
+        paths = (self._local_paths(anchor, tg) if tg and
+                 os.environ.get('SPPEEC_LOCAL_CYCLES', '1') != '0'
+                 else {})
         for n, wc in zip(nodes, ws):
             if n != anchor:
-                self._path_into(rows, vals, anchor, n, float(wc)*w)
+                p = paths.get(int(n))
+                if p is None:
+                    self._path_into(rows, vals, anchor, n, float(wc)*w)
+                else:
+                    for f_, sg_ in p:
+                        rows.append(f_)
+                        vals.append(sg_*float(wc)*w)
+
+    def _node_cell(self, n):
+        """Lattice cell (i, j, k) of node ``n``."""
+        ci = self.node_of_cell
+        i = int(np.flatnonzero(ci._order == n)[0])
+        k = int(ci._keys[i])
+        return np.array([k//(ci._m1*ci._m2), (k//ci._m2) % ci._m1,
+                         k % ci._m2], np.int64)
+
+    def _lpath_into(self, rows, vals, u, v, w=1.0):
+        """Like ``_path_into`` but along a SHORTEST LATTICE PATH u -> v.
+
+        LOCAL CYCLES (2026-10-01). The forest is depth-first: the forest
+        path between two foot nodes a millimetre apart can wander
+        across a whole copper island -- 13-15k filaments for the two
+        worst DBC chords at R3, and the length scales with refinement.
+        A sharing cycle carried along such a path is a long, weakly
+        coupled loop whose Gram weight (its length) and inductive
+        coupling to everything it crosses both grow with refinement;
+        at R6 those two chords held 99.9% of the solve's residual. The
+        cycle space is unchanged by the choice (two paths between the
+        same nodes differ by lattice loops the plaquettes span), so
+        the answer is the same; the conditioning is not. Here: the
+        filaments with both ends in the bounding box of u and v (plus
+        a margin, grown until the two connect), their endpoints and
+        signs read from the incidence itself, and a breadth-first
+        search of that small graph. Falls back to the forest path if
+        the box never connects. SPPEEC_LOCAL_CYCLES=0 keeps the
+        forest paths."""
+        if u == v:
+            return
+        if os.environ.get('SPPEEC_LOCAL_CYCLES', '1') == '0':
+            return self._path_into(rows, vals, u, v, w)
+        path = self._local_paths(u, [v]).get(v)
+        if path is None:
+            return self._path_into(rows, vals, u, v, w)
+        for e, sgn in path:
+            rows.append(e)
+            vals.append(sgn*w)
+
+    def _local_paths(self, u, targets, margin=4, grow=6):
+        """Shortest lattice paths u -> each target, from ONE local
+        search over the bounding box of u and all targets (grown until
+        every target connects): ``{target: [(filament, sign), ...]}``,
+        targets the box never reaches omitted."""
+        import scipy.sparse.csgraph as csg
+        # all cells in one pass over the index (a scan per node is
+        # 90 M compares at R6)
+        ci = self.node_of_cell
+        want = np.unique(np.r_[u, np.asarray(targets, np.int64)])
+        pos = np.flatnonzero(np.isin(ci._order, want))
+        kk = ci._keys[pos].astype(np.int64)
+        cells = np.stack([kk//(ci._m1*ci._m2), (kk//ci._m2) % ci._m1,
+                          kk % ci._m2], axis=1)
+        lo0, hi0 = cells.min(axis=0), cells.max(axis=0)
+        result = {}
+        fc, B = self.fil_cell, self.B
+        nf = int(fc.shape[0])
+        CH = 1 << 24
+        for _ in range(grow):
+            lo, hi = lo0 - margin, hi0 + margin
+            sel = []
+            for a in range(0, nf, CH):
+                c = np.asarray(fc[a:a + CH], np.int64)
+                m = np.all((c >= lo) & (c <= hi), axis=1)
+                sel.append(np.flatnonzero(m) + a)
+            sel = np.concatenate(sel)
+            if sel.size:
+                sub = B[sel]                       # rows: 2 nodes each
+                if sub.nnz == 2*sel.size:
+                    nodes = sub.indices.reshape(-1, 2)
+                    sg = sub.data.reshape(-1, 2)
+                    uniq, inv = np.unique(nodes, return_inverse=True)
+                    inv = inv.reshape(-1, 2)
+                    iu = np.searchsorted(uniq, u)
+                    if iu < uniq.size and uniq[iu] == u:
+                        k = uniq.size
+                        G = sp.csr_matrix(
+                            (np.ones(2*sel.size),
+                             (np.r_[inv[:, 0], inv[:, 1]],
+                              np.r_[inv[:, 1], inv[:, 0]])), shape=(k, k))
+                        _, pred = csg.breadth_first_order(
+                            G, iu, directed=False, return_predecessors=True)
+                        key = None
+                        for t in targets:
+                            if t in result:
+                                continue
+                            it = np.searchsorted(uniq, t)
+                            if not (it < uniq.size and uniq[it] == t
+                                    and (pred[it] >= 0 or it == iu)):
+                                continue
+                            if key is None:
+                                # edge lookup: (a, b) -> local row
+                                key = {}
+                                for r in range(sel.size):
+                                    a_, b_ = inv[r]
+                                    key.setdefault((a_, b_), r)
+                                    key.setdefault((b_, a_), r)
+                            out = []
+                            b_ = it
+                            while b_ != iu:
+                                a_ = pred[b_]
+                                r = key[(a_, b_)]
+                                # unit current a -> b in _tree_path's
+                                # convention (_assert_kcl verifies the
+                                # cycles)
+                                col = 0 if inv[r, 0] == b_ else 1
+                                out.append((int(sel[r]),
+                                            -float(sg[r, col])))
+                                b_ = a_
+                            out.reverse()
+                            result[t] = out
+                        if len(result) == len(set(targets)):
+                            return result
+            margin *= 2
+        return result
 
     def _path_col(self, u, v):
         """Sparse (efg,1) column carrying unit current u -> v."""
@@ -1708,13 +1834,13 @@ class WireBondSolver:
             node = self.foot_node[j][1]
             for (jj, sgn) in back:
                 inn = self.foot_node[jj][0 if sgn > 0 else 1]
-                self._path_into(fr, fv, node, inn)
+                self._lpath_into(fr, fv, node, inn)
                 _wire_into(jj, sgn)
                 ei, eo = (0, 1) if sgn > 0 else (1, 0)
                 self._bundle_into(fr, fv, jj, ei, +1.0)
                 self._bundle_into(fr, fv, jj, eo, -1.0)
                 node = self.foot_node[jj][1 if sgn > 0 else 0]
-            self._path_into(fr, fv, node, self.foot_node[j][0])
+            self._lpath_into(fr, fv, node, self.foot_node[j][0])
             f = sp.csc_matrix((fv, (fr, [0]*len(fr))),
                               shape=(self.efg, 1))
             wvcol = sp.csc_matrix((wv_, (wr, [0]*len(wr))),
