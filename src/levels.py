@@ -475,6 +475,12 @@ class LeafLevel(Level):
         if not accumulate:
             self.above.data = np.zeros((msize, (self.nmax+1)**2),
                                        dtype=np.complex128)
+        op = self._ocl_leaf_op()
+        if op is not None:
+            try:
+                return op.p2m(self.data, self.above.data)
+            except Exception as exc:
+                self._ocl_leaf_off(exc)
         # The element ranges idx0[g]:idx0[g+1] are CONTIGUOUS, so the
         # old ``np.r_`` fancy index was an arange in disguise -- built
         # 24096 times per matvec on square_coil (~7% of the sweep). The
@@ -511,6 +517,43 @@ class LeafLevel(Level):
                     self._ynmr_g[a:b, :].T, np.conj(self.data[a:b])))
 
     # -- device-resident leaf gather (opt-in) ---------------------------
+
+    def _ocl_leaf_op(self):
+        """The OpenCL leaf P2M/L2P (:mod:`ocl_leaf`) on this leaf's near
+        field packs, or None off the OpenCL backend, for leaves with no
+        OpenCL near field, after a device failure, or with
+        ``SPPEEC_OCL_LEAF=0``. Adds no per-filament card arrays."""
+        op = getattr(self, '_ocl_leaf', None)
+        if op is not None:
+            return op if op is not False else None
+        try:
+            import backend
+            if (backend.name() != 'opencl'
+                    or _os.environ.get('SPPEEC_OCL_LEAF') == '0'
+                    or not hasattr(self, 'p2pocl')
+                    # a leaf that has FALLEN BACK to the host near field
+                    # (p2pocl's own failure path rebinds p2p to p2pcpu)
+                    or getattr(self, 'p2p', None) == getattr(
+                        self, 'p2pcpu', None)):
+                self._ocl_leaf = False
+                return None
+            nf = getattr(self, '_ocl_nf', None)
+            if nf is None:
+                import ocl_p2p
+                nf = self._ocl_nf = ocl_p2p.NearField(self)
+            import ocl_leaf
+            self._ocl_leaf = ocl_leaf.LeafExpansions(self, nf)
+        except Exception as exc:
+            self._ocl_leaf_off(exc)
+            return None
+        return self._ocl_leaf
+
+    def _ocl_leaf_off(self, exc):
+        import warnings
+        warnings.warn("OpenCL leaf P2M/L2P unavailable (%s: %s) -- host "
+                      "path for the rest of the process"
+                      % (type(exc).__name__, exc))
+        self._ocl_leaf = False
 
     def _leaf_gpu(self):
         """True when the leaf gather is (to be) device-resident: uploads
@@ -593,6 +636,12 @@ class LeafLevel(Level):
         (downward) step of the FMM far-field contribution.
         """
         msize = np.size(self.idx0) - 1
+        op = self._ocl_leaf_op()
+        if op is not None:
+            try:
+                return op.l2p(self.data, self.above.data)
+            except Exception as exc:
+                self._ocl_leaf_off(exc)
         # Same slice + pre-gathered-operator rewrite as p2m -- see the
         # comment there. Bit-identical.
         if _LEAF_PATH != 'gather':
@@ -831,6 +880,67 @@ class MidLevel(Level):
                              * self._mid_v[None, None, None, :]
                              ).astype(np.complex64)
 
+    def _ocl_tr_op(self):
+        """The OpenCL M2M/L2L of this level (:class:`ocl_mid.MidTranslate`),
+        or None off the OpenCL backend, after a device failure, or with
+        ``SPPEEC_OCL_MID=0``."""
+        op = getattr(self, '_ocl_tr', None)
+        if op is not None:
+            return op if op is not False else None
+        try:
+            import backend
+            if (backend.name() != 'opencl'
+                    or _os.environ.get('SPPEEC_OCL_MID') == '0'):
+                self._ocl_tr = False
+                return None
+            import ocl_mid
+            self._ocl_tr = ocl_mid.MidTranslate(self)
+        except Exception as exc:
+            self._ocl_tr_off(exc)
+            return None
+        return self._ocl_tr
+
+    def _ocl_tr_off(self, exc):
+        import warnings
+        warnings.warn("OpenCL M2M/L2L unavailable (%s: %s) -- host loops "
+                      "for the rest of the process"
+                      % (type(exc).__name__, exc))
+        self._ocl_tr = False
+
+    def _ocl_mid_op(self):
+        """The OpenCL mid-level M2L (:mod:`ocl_mid`), built on first use,
+        or None off the OpenCL backend, after a device failure, or with
+        ``SPPEEC_OCL_MID=0``. In fp64 (the default storage) it is
+        bit-identical to ``mp_fortran.mid_m2l``; under
+        ``SPPEEC_OCL_FP32=1`` it narrows like the near field and the
+        top-level M2L (~1e-7). Measured on R4 (2026-10-02): 201 ms ->
+        31.7 ms (fp64) / 12.2 ms (fp32) per orientation, 16-33 MB of
+        card; the interaction list is never uploaded."""
+        op = getattr(self, '_ocl_mid', None)
+        if op is not None:
+            return op if op is not False else None
+        try:
+            import backend
+            if (backend.name() != 'opencl'
+                    or _os.environ.get('SPPEEC_OCL_MID') == '0'
+                    or self.below is None
+                    or not hasattr(self.below, 'xidx')):
+                self._ocl_mid = False
+                return None
+            import ocl_mid
+            self._ocl_mid = ocl_mid.MidM2L(self)
+        except Exception as exc:
+            self._ocl_mid_off(exc)
+            return None
+        return self._ocl_mid
+
+    def _ocl_mid_off(self, exc):
+        import warnings
+        warnings.warn("OpenCL mid-level M2L unavailable (%s: %s) -- host "
+                      "kernel for the rest of the process"
+                      % (type(exc).__name__, exc))
+        self._ocl_mid = False
+
     def m2l(self):
         """Multipole-to-local: accumulate the far-field at this level.
 
@@ -840,6 +950,13 @@ class MidLevel(Level):
         ``self.data``. Delegated to the Fortran kernel ``mp_fortran.mid_m2l``
         (the commented Python loop below is the reference implementation).
         """
+        op = self._ocl_mid_op()
+        if op is not None:
+            try:
+                self.data = op.apply(self.data)
+                return
+            except Exception as exc:
+                self._ocl_mid_off(exc)
         if self._mid_u is None:                   # fp64 default
             self.data = mp_fortran.mid_m2l(self.transfer.T, self.data.T,
                                            self.idx,
@@ -960,6 +1077,13 @@ class MidLevel(Level):
         FMM at this level.
         """
         gsize = np.size(self.idx0) - 1
+        tr = self._ocl_tr_op()
+        if tr is not None:
+            try:
+                self.above.data = tr.m2m(self.data)
+                return
+            except Exception as exc:
+                self._ocl_tr_off(exc)
         self.above.data = np.empty((gsize, self.nnmax), dtype=np.complex128)
         m_temp = np.zeros((np.prod(self.n), self.nnmax), dtype=np.complex128)
         for group in range(gsize):
@@ -976,6 +1100,17 @@ class MidLevel(Level):
         adds the result to ``self.data``. The downward pass of the FMM at this
         level.
         """
+        tr = self._ocl_tr_op()
+        if tr is not None:
+            try:
+                if not (self.data.flags.c_contiguous
+                        and self.data.dtype == np.complex128):
+                    self.data = np.ascontiguousarray(self.data,
+                                                     np.complex128)
+                tr.l2l(self.data, self.above.data)
+                return
+            except Exception as exc:
+                self._ocl_tr_off(exc)
         for group in range(np.size(self.idx0) - 1):
             fidx = np.r_[self.idx0[group]:self.idx0[group+1]]
             l_temp = np.dot(self.l2ltrans, self.above.data[group, :])

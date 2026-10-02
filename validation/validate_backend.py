@@ -629,6 +629,96 @@ def workspace_cases():
             os.environ['SPPEEC_FMM_FP32'] = keep
 
 
+def ladder_cases():
+    """The FMM ladder stages on the card (2026-10-02): mid-level M2L
+    (fp64 bit-identical to the Fortran kernel, fp32 to its storage
+    rounding), M2M / L2L, and leaf P2M / L2P on the near field's packs.
+    A three-level tree with scattered holes, so boxes are missing and
+    interaction lists are partial. Each stage must also repeat bit for
+    bit."""
+    import mp_fortran
+    import ocl_leaf
+    import ocl_mid
+    import ocl_p2p
+    rng = np.random.default_rng(11)
+    f = np.ones((32, 32, 16), np.int8)
+    f[rng.random(f.shape) < 0.15] = 0
+    f[:12, 20:, :] = 0
+    M = mp.Tree(f, np.array([4, 4, 4]), np.array(f.shape)*CELL, 3, 1e0, 2)
+    lv = M.lv[1]
+    nn = int(lv.nnmax)
+    nch = int(lv.idx0[-1])
+    ng = int(np.size(lv.idx0) - 1)
+    d = rng.standard_normal((nch, nn)) + 1j*rng.standard_normal((nch, nn))
+    ref = mp_fortran.mid_m2l(lv.transfer.T, d.T, lv.idx,
+                             lv.farneighbors.T).T
+    scale = float(np.abs(ref).max())
+    for dt, tol, name in ((np.complex128, 0.0, 'fp64'),
+                          (np.complex64, 1e-5, 'fp32')):
+        op = ocl_mid.MidM2L(lv, dtype=dt)
+        g = op.apply(d)
+        err = float(np.abs(g - ref).max())/scale
+        check("mid-level M2L %s: agrees with the Fortran kernel" % name,
+              err <= tol, "rel err=%.3e (bound %.0e)" % (err, tol))
+        check("mid-level M2L %s: repeated call is bit-identical" % name,
+              np.array_equal(g, op.apply(d)))
+    tr = ocl_mid.MidTranslate(lv)
+    lv._ocl_tr = False                       # host reference loops
+    lv.data = d.copy()
+    lv.m2m()
+    mref = lv.above.data.copy()
+    p = rng.standard_normal((ng, nn)) + 1j*rng.standard_normal((ng, nn))
+    lv.data = d.copy()
+    lv.above.data = p.copy()
+    lv.l2l()
+    lref = lv.data.copy()
+    a = tr.m2m(d)
+    x = d.copy()
+    tr.l2l(x, p)
+    for nm_, got, r in (('M2M', a, mref), ('L2L', x, lref)):
+        err = float(np.abs(got - r).max())/float(np.abs(r).max())
+        check("mid-level %s: agrees with the host loop" % nm_, err < 1e-13,
+              "rel err=%.3e" % err)
+    a2 = tr.m2m(d)
+    x2 = d.copy()
+    tr.l2l(x2, p)
+    check("mid-level M2M/L2L: repeated call is bit-identical",
+          np.array_equal(a, a2) and np.array_equal(x, x2))
+    for nm_ in ('e', 'f', 'g'):
+        lf = getattr(M, nm_)
+        nfil = int(np.size(lf.idx))
+        nbox = int(np.size(lf.idx0) - 1)
+        xs = rng.standard_normal(nfil) + 1j*rng.standard_normal(nfil)
+        loc = (rng.standard_normal((nbox, nn))
+               + 1j*rng.standard_normal((nbox, nn)))
+        lf.data = xs.copy()
+        lf.above.data = np.zeros((nbox, nn), complex)
+        lf._p2m_gemm(nbox)
+        pref = lf.above.data.copy()
+        lf.data = np.zeros(nfil, complex)
+        lf.above.data = loc.copy()
+        lf._l2p_gemm()
+        eref = lf.data.copy()
+        op = ocl_leaf.LeafExpansions(lf, ocl_p2p.NearField(
+            lf, dtype=np.complex128))
+        res = []
+        for _ in range(2):
+            m_ = np.zeros((nbox, nn), complex)
+            op.p2m(xs, m_)
+            e_ = np.zeros(nfil, complex)
+            op.l2p(e_, loc)
+            res.append((m_, e_))
+        e1 = float(np.abs(res[0][0] - pref).max())/float(np.abs(pref).max())
+        e2 = float(np.abs(res[0][1] - eref).max())/float(np.abs(eref).max())
+        check("leaf %s P2M: OpenCL agrees with the host" % nm_, e1 < 1e-12,
+              "rel err=%.3e" % e1)
+        check("leaf %s L2P: OpenCL agrees with the host" % nm_, e2 < 1e-12,
+              "rel err=%.3e" % e2)
+        check("leaf %s P2M/L2P: repeated call is bit-identical" % nm_,
+              np.array_equal(res[0][0], res[1][0])
+              and np.array_equal(res[0][1], res[1][1]))
+
+
 def operator_cases():
     import backend
     if backend.name() != 'opencl':
@@ -670,6 +760,7 @@ def operator_cases():
     m2l_cases(M, rng)
     fp32_cases(M, rng)
     workspace_cases()
+    ladder_cases()
 
     top = M.lv[int(M.numlevels) - 1]
     data = (rng.standard_normal(top.data.shape)
