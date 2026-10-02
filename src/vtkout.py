@@ -190,66 +190,21 @@ def current_density(M, i, dims):
     return J
 
 
-def export_currents_streaming(model, M, i, path, quicklook=4,
-                              slab_z=None):
-    """Slab-streamed ``.vti`` export: O(one slab) memory at ANY size.
+def current_density_slabs(M, i, dims, slab_z=None):
+    """Yield ``(z0, z1, J)`` z-slab by z-slab: the cell-centred current
+    density of :func:`current_density` for cells ``z0 <= z < z1``,
+    shape ``(nx, ny, z1 - z0, 3)``, in O(one slab) memory.
 
-    Produces the SAME file, byte for byte, as :func:`export_currents`
-    (no potentials/phases) -- gated by direct comparison -- but never
-    materialises the full-domain field. The z-slowest ordering of
-    VTK's appended blocks means a z-slab of cells is CONTIGUOUS in
-    every array's block, so the file is written with per-slab seeks
-    into precomputed offsets: one pass over the filaments, O(slab)
-    transients where the old path needed the full domain (~100 GB at
-    hero scale; measured at R3: 1701 -> 446 MB, byte-identical).
-    Default slab thickness is one leaf-box z-span -- at 1e9 cells
-    that is a few GB of transients; pass a smaller ``slab_z`` to
-    shrink further at some per-slab scatter overhead.
-
-    ``quicklook`` (the docket's REQUIRED companion): additionally
-    writes ``<stem>_quicklook.vti`` with every field bin-averaged
-    ``quicklook``^3 -- 1/64th the bytes at the default 4, interactive
-    on any workstation, accumulated slab-by-slab in one small buffer.
-    0 or 1 disables it. Returns the list of files written.
+    The same arithmetic, element for element, as the dense function
+    (the face averages are formed in the same order), shared by the
+    streamed ``.vti`` and ``.glb`` exporters (2026-10-02). Default slab
+    thickness is one leaf-box z-span.
     """
-    dims = tuple(int(d) for d in np.asarray(model.dims, dtype=int))
-    nx, ny, nz = dims
-    spacing = tuple(float(v) for v in np.asarray(M.e.l, dtype=float))
+    nx, ny, nz = (int(d) for d in dims)
+    dx, dy, dz = (float(v) for v in np.asarray(M.e.l, dtype=float))
     ne, nf = np.size(M.e.struc), np.size(M.f.struc)
     i = np.asarray(i)
     vals = {'e': i[:ne], 'f': i[ne:ne + nf], 'g': i[ne + nf:]}
-    dx, dy, dz = spacing
-    struc = np.asarray(model.struc())
-
-    # -- array table, SAME names/order/dtypes as export_currents -----
-    spec = [('J_re', 3, np.float32, 'Float32'),
-            ('J_im', 3, np.float32, 'Float32'),
-            ('J_mag', 1, np.float32, 'Float32'),
-            ('conductor', 1, np.float32, 'Float32'),
-            ('vtkGhostType', 1, np.uint8, 'UInt8')]
-    ncell = nx*ny*nz
-    payload = [ncell*nc*np.dtype(dt).itemsize for _, nc, dt, _ in spec]
-    offsets = np.concatenate([[0], np.cumsum([8 + p
-                                              for p in payload])[:-1]])
-    # header EXACTLY as write_vti builds it
-    ext = "0 %d 0 %d 0 %d" % (nx, ny, nz)
-    head = ['<?xml version="1.0"?>',
-            '<VTKFile type="ImageData" version="1.0" '
-            'byte_order="LittleEndian" header_type="UInt64">',
-            '  <ImageData WholeExtent="%s" Origin="%.17g %.17g %.17g" '
-            'Spacing="%.17g %.17g %.17g">'
-            % (ext, 0.0, 0.0, 0.0, spacing[0], spacing[1], spacing[2]),
-            '    <Piece Extent="%s">' % ext,
-            '      <CellData>']
-    for (name, nc, _, vt), off in zip(spec, offsets):
-        head.append('        <DataArray type="%s" Name="%s" '
-                    'NumberOfComponents="%d" format="appended" '
-                    'offset="%d"/>' % (vt, name, nc, off))
-    head += ['      </CellData>', '    </Piece>', '  </ImageData>',
-             '  <AppendedData encoding="raw">', '   _']
-    header = ("\n".join(head)).encode()
-
-    # -- per-leaf slab scatter machinery -----------------------------
     lv0 = M.lv[0]
     leaves = {'e': (M.e, (nx, ny - 1, nz)),
               'f': (M.f, (nx - 1, ny, nz)),
@@ -282,6 +237,97 @@ def export_currents_streaming(model, M, i, path, quicklook=4,
 
     if slab_z is None:
         slab_z = max(int(np.asarray(M.e.n, dtype=int)[2]), 1)
+    for z0 in range(0, nz, slab_z):
+        z1 = min(z0 + slab_z, nz)
+        s = z1 - z0
+        Ie = scatter_slab('e', z0, z1)
+        If = scatter_slab('f', z0, z1)
+        glo, ghi = max(z0 - 1, 0), min(z1, nz - 1)
+        Ig = scatter_slab('g', glo, ghi)
+        J = np.zeros((nx, ny, s, 3), dtype=np.complex128)
+        ax = np.zeros((nx, ny, s), dtype=np.complex128)
+        ax[1:, :, :] += If
+        ax[:-1, :, :] += If
+        del If
+        J[..., 0] = 0.5*ax/(dy*dz)
+        ay = ax
+        ay[:] = 0.0
+        ay[:, 1:, :] += Ie
+        ay[:, :-1, :] += Ie
+        del Ie
+        J[..., 1] = 0.5*ay/(dx*dz)
+        az = ay
+        az[:] = 0.0
+        a0 = max(z0, 1)               # cells with a face below
+        if a0 < z1:
+            az[:, :, a0 - z0:] += Ig[:, :, a0 - 1 - glo:z1 - 1 - glo]
+        b0 = min(z1, nz - 1)          # cells with a face above
+        if b0 > z0:
+            az[:, :, :b0 - z0] += Ig[:, :, z0 - glo:b0 - glo]
+        del Ig
+        J[..., 2] = 0.5*az/(dx*dy)
+        del az, ay, ax
+        yield z0, z1, J
+        del J
+
+
+def export_currents_streaming(model, M, i, path, quicklook=4,
+                              slab_z=None):
+    """Slab-streamed ``.vti`` export: O(one slab) memory at ANY size.
+
+    Produces the SAME file, byte for byte, as :func:`export_currents`
+    (no potentials/phases) -- gated by direct comparison -- but never
+    materialises the full-domain field. The z-slowest ordering of
+    VTK's appended blocks means a z-slab of cells is CONTIGUOUS in
+    every array's block, so the file is written with per-slab seeks
+    into precomputed offsets: one pass over the filaments, O(slab)
+    transients where the old path needed the full domain (~100 GB at
+    hero scale; measured at R3: 1701 -> 446 MB, byte-identical).
+    Default slab thickness is one leaf-box z-span -- at 1e9 cells
+    that is a few GB of transients; pass a smaller ``slab_z`` to
+    shrink further at some per-slab scatter overhead.
+
+    ``quicklook`` (the docket's REQUIRED companion): additionally
+    writes ``<stem>_quicklook.vti`` with every field bin-averaged
+    ``quicklook``^3 -- 1/64th the bytes at the default 4, interactive
+    on any workstation, accumulated slab-by-slab in one small buffer.
+    0 or 1 disables it. Returns the list of files written.
+    """
+    dims = tuple(int(d) for d in np.asarray(model.dims, dtype=int))
+    nx, ny, nz = dims
+    spacing = tuple(float(v) for v in np.asarray(M.e.l, dtype=float))
+    struc = np.asarray(model.struc())
+
+    # -- array table, SAME names/order/dtypes as export_currents -----
+    spec = [('J_re', 3, np.float32, 'Float32'),
+            ('J_im', 3, np.float32, 'Float32'),
+            ('J_mag', 1, np.float32, 'Float32'),
+            ('conductor', 1, np.float32, 'Float32'),
+            ('vtkGhostType', 1, np.uint8, 'UInt8')]
+    ncell = nx*ny*nz
+    payload = [ncell*nc*np.dtype(dt).itemsize for _, nc, dt, _ in spec]
+    offsets = np.concatenate([[0], np.cumsum([8 + p
+                                              for p in payload])[:-1]])
+    # header EXACTLY as write_vti builds it
+    ext = "0 %d 0 %d 0 %d" % (nx, ny, nz)
+    head = ['<?xml version="1.0"?>',
+            '<VTKFile type="ImageData" version="1.0" '
+            'byte_order="LittleEndian" header_type="UInt64">',
+            '  <ImageData WholeExtent="%s" Origin="%.17g %.17g %.17g" '
+            'Spacing="%.17g %.17g %.17g">'
+            % (ext, 0.0, 0.0, 0.0, spacing[0], spacing[1], spacing[2]),
+            '    <Piece Extent="%s">' % ext,
+            '      <CellData>']
+    for (name, nc, _, vt), off in zip(spec, offsets):
+        head.append('        <DataArray type="%s" Name="%s" '
+                    'NumberOfComponents="%d" format="appended" '
+                    'offset="%d"/>' % (vt, name, nc, off))
+    head += ['      </CellData>', '    </Piece>', '  </ImageData>',
+             '  <AppendedData encoding="raw">', '   _']
+    header = ("\n".join(head)).encode()
+
+    if slab_z is None:
+        slab_z = max(int(np.asarray(M.e.n, dtype=int)[2]), 1)
     b = int(quicklook) if quicklook else 0
     if b > 1:
         q = [max(1, -(-d//b)) for d in dims]
@@ -301,30 +347,8 @@ def export_currents_streaming(model, M, i, path, quicklook=4,
         for off, p in zip(offsets, payload):
             fh.seek(base + int(off))
             fh.write(np.uint64(p).tobytes())
-        for z0 in range(0, nz, slab_z):
-            z1 = min(z0 + slab_z, nz)
+        for z0, z1, J in current_density_slabs(M, i, dims, slab_z):
             s = z1 - z0
-            Ie = scatter_slab('e', z0, z1)
-            If = scatter_slab('f', z0, z1)
-            glo, ghi = max(z0 - 1, 0), min(z1, nz - 1)
-            Ig = scatter_slab('g', glo, ghi)
-            J = np.zeros((nx, ny, s, 3), dtype=np.complex128)
-            ax = np.zeros((nx, ny, s), dtype=np.complex128)
-            ax[1:, :, :] += If
-            ax[:-1, :, :] += If
-            J[..., 0] = 0.5*ax/(dy*dz)
-            ay = np.zeros((nx, ny, s), dtype=np.complex128)
-            ay[:, 1:, :] += Ie
-            ay[:, :-1, :] += Ie
-            J[..., 1] = 0.5*ay/(dx*dz)
-            az = np.zeros((nx, ny, s), dtype=np.complex128)
-            a0 = max(z0, 1)               # cells with a face below
-            if a0 < z1:
-                az[:, :, a0 - z0:] += Ig[:, :, a0 - 1 - glo:z1 - 1 - glo]
-            b0 = min(z1, nz - 1)          # cells with a face above
-            if b0 > z0:
-                az[:, :, :b0 - z0] += Ig[:, :, z0 - glo:b0 - glo]
-            J[..., 2] = 0.5*az/(dx*dy)
             mag = np.sqrt((np.abs(J)**2).sum(axis=-1))
             st = struc[:, :, z0:z1]
             ghost = np.zeros(st.shape, dtype=np.uint8)

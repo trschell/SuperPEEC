@@ -223,6 +223,86 @@ def exposed_faces(struc):
 _WIND = ((0, 0), (1, 0), (1, 1), (0, 1))
 
 
+def _tangential(Jc, axis):
+    """|J| tangential to a face whose normal is ``axis``."""
+    t0, t1 = (axis + 1) % 3, (axis + 2) % 3
+    return np.sqrt(np.abs(Jc[:, t0])**2 + np.abs(Jc[:, t1])**2)
+
+
+def _faces_dense(struc, J):
+    """``(axis, sign, cells, |J_tan|)`` per face direction, from the
+    full-domain field (the reference path; ``SPPEEC_GLB_DENSE=1``)."""
+    out = []
+    for axis, sign, cells in exposed_faces(struc):
+        Jc = J[cells[:, 0], cells[:, 1], cells[:, 2]]
+        out.append((axis, sign, cells, _tangential(Jc, axis)))
+    return out
+
+
+def _faces_streamed(struc, M, i, dims, slab_z=None):
+    """The same faces and amplitudes as :func:`_faces_dense`, in the
+    same order, from the field streamed z-slab by z-slab
+    (``vtkout.current_density_slabs``) -- O(one slab) of field where
+    the dense path held the whole bounding lattice: 1e9 cells at R6,
+    16 GB per complex128 grid and ~110-145 GB at its peak (2026-10-02).
+
+    A slab's faces need its occupancy plus one layer above and below
+    (the z neighbours); x and y neighbours are in the slab. Each face
+    direction's cells are then put in ``np.argwhere`` order (x, then
+    y, then z) so everything downstream -- and the written file --
+    is identical to the dense path's.
+    """
+    S = np.asarray(struc) > 0
+    nz = S.shape[2]
+    acc = {(a, sg): ([], []) for a in range(3) for sg in (+1, -1)}
+    for z0, z1, J in vtkout.current_density_slabs(M, i, dims, slab_z):
+        h0, h1 = max(z0 - 1, 0), min(z1 + 1, nz)
+        Sh = S[:, :, h0:h1]
+        lo = z0 - h0                     # slab start inside the halo
+        Ss = Sh[:, :, lo:lo + (z1 - z0)]
+        for axis in range(3):
+            for sign in (+1, -1):
+                nb = np.zeros_like(Ss)
+                if axis < 2:
+                    sl_d = [slice(None)]*3
+                    sl_s = [slice(None)]*3
+                    if sign > 0:
+                        sl_d[axis] = slice(None, -1)
+                        sl_s[axis] = slice(1, None)
+                    else:
+                        sl_d[axis] = slice(1, None)
+                        sl_s[axis] = slice(None, -1)
+                    nb[tuple(sl_d)] = Ss[tuple(sl_s)]
+                else:
+                    # z neighbours from the halo; outside the domain
+                    # counts as air, exactly as exposed_faces has it
+                    k = np.arange(z1 - z0) + lo + sign
+                    ok = (k >= 0) & (k < Sh.shape[2])
+                    nb[:, :, ok] = Sh[:, :, k[ok]]
+                c = np.argwhere(Ss & ~nb)
+                if c.size:
+                    Jc = J[c[:, 0], c[:, 1], c[:, 2]]
+                    c[:, 2] += z0
+                    acc[(axis, sign)][0].append(c)
+                    acc[(axis, sign)][1].append(_tangential(Jc, axis))
+                del nb
+        del J
+    out = []
+    for axis in range(3):
+        for sign in (+1, -1):
+            cl, ml = acc.pop((axis, sign))
+            if not cl:
+                out.append((axis, sign, np.zeros((0, 3), np.int64),
+                            np.zeros(0)))
+                continue
+            cells = np.concatenate(cl)
+            mag = np.concatenate(ml)
+            del cl, ml
+            order = np.lexsort((cells[:, 2], cells[:, 1], cells[:, 0]))
+            out.append((axis, sign, cells[order], mag[order]))
+    return out
+
+
 def surface_meshes(model, M, i, cmap='inferno', vmin=None, vmax=None,
                    J=None, parts=None):
     """Conductor skin as primitives coloured by |J_tangential|.
@@ -251,17 +331,19 @@ def surface_meshes(model, M, i, cmap='inferno', vmin=None, vmax=None,
     dims = tuple(int(d) for d in np.asarray(model.dims, dtype=int))
     spacing = np.asarray(M.e.l, dtype=float)
     struc = np.asarray(model.struc())
-    if J is None:
-        J = vtkout.current_density(M, i, dims)
+    if J is not None or os.environ.get('SPPEEC_GLB_DENSE') == '1':
+        if J is None:
+            J = vtkout.current_density(M, i, dims)
+        faces = _faces_dense(struc, J)
+    else:
+        faces = _faces_streamed(struc, M, i, dims)
 
     quads, norms, mags, cells_all = [], [], [], []
-    for axis, sign, cells in exposed_faces(struc):
+    for axis, sign, cells, mag in faces:
         if cells.size == 0:
             continue
         t0, t1 = (axis + 1) % 3, (axis + 2) % 3
-        # tangential current amplitude: drop the normal component
-        Jc = J[cells[:, 0], cells[:, 1], cells[:, 2]]
-        mags.append(np.sqrt(np.abs(Jc[:, t0])**2 + np.abs(Jc[:, t1])**2))
+        mags.append(mag)
 
         base = cells.astype(np.float64)
         base[:, axis] += 0.5*(sign + 1.0)       # -1 -> 0, +1 -> 1

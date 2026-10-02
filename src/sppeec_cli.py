@@ -203,6 +203,29 @@ def main(argv=None):
     return rc
 
 
+def _release_solver(sw):
+    """Drop the sweeper's solver and collect it (device buffers go with
+    their Python owners); report what came back."""
+    import gc
+    rss0 = _rss_gb()
+    if getattr(sw, 'sol', None) is not None:
+        sw.sol = None
+    gc.collect()
+    print('released the solver before export: rss %.1f -> %.1f GB'
+          % (rss0, _rss_gb()), flush=True)
+
+
+def _rss_gb():
+    try:
+        with open('/proc/self/status') as fh:
+            for line in fh:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1])/2**20
+    except OSError:
+        pass
+    return float('nan')
+
+
 def _run(opts, status):
     import sppeec_input
     import vtkout
@@ -268,23 +291,33 @@ def _run(opts, status):
                   % (f, Z.real, abs(Z.imag)/w, sh,
                      info['matvecs'], info['residual']), flush=True)
         vti, vtp, glb = opts.export_paths(f)
+        # what the exporters need from the solver, taken before it is
+        # released: the wire geometry and the solved chain currents
+        wkw = {}
+        sol = getattr(sw, 'sol', None)
+        if sol is not None and 'i_w' in info:
+            wkw = dict(wires=sol.wires, i_w=info['i_w'],
+                       seg0=sol.wc.seg0, wire_of_seg=sol.wire_of_seg,
+                       foot_cell=getattr(sol, 'foot_cell', None),
+                       foot_r0=getattr(sol, 'foot_r0', None))
+        del sol
+        if (vti or glb) and f == freqs[-1]:
+            # RELEASE THE SOLVER before the field exports (2026-10-02):
+            # after the last solve nothing reads it, and at R6 it is
+            # 20-34 GB of basis, preconditioner, coupler and device
+            # buffers standing under the export's own transients. The
+            # exports need only the model, the tree's geometry and the
+            # currents in `info`.
+            _release_solver(sw)
         if vti:
             written += vtkout.export_currents_streaming(
                 m, M, info['i_f'], vti, quicklook=opts.quicklook)
         if vtp:
-            vtkout.export_wires(sw.sol.wires, info['i_w'],
-                                sw.sol.wc.seg0, sw.sol.wire_of_seg,
-                                vtp)
+            vtkout.export_wires(wkw['wires'], info['i_w'], wkw['seg0'],
+                                wkw['wire_of_seg'], vtp)
             written.append(vtp)
         if glb:
             import blendout
-            wkw = {}
-            if getattr(sw, 'sol', None) is not None and 'i_w' in info:
-                wkw = dict(wires=sw.sol.wires, i_w=info['i_w'],
-                           seg0=sw.sol.wc.seg0,
-                           wire_of_seg=sw.sol.wire_of_seg,
-                           foot_cell=getattr(sw.sol, 'foot_cell', None),
-                           foot_r0=getattr(sw.sol, 'foot_r0', None))
             written += blendout.export_scene(
                 m, M, info['i_f'], glb, freq=f,
                 parts=prob.block_cells(m),
