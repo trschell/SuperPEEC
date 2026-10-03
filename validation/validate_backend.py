@@ -246,6 +246,59 @@ def wire_cases():
           _np.array_equal(got, again))
 
 
+def wire_mg_cases():
+    """The particular current's multigrid preconditioner (2026-10-02):
+    on a lattice graph -- two conductors with a gap between them, holes
+    in both -- the MG-preconditioned CG must give the Jacobi CG's
+    current (to solver tolerance), a clean KCL residual, and the same
+    bits on a repeat."""
+    import numpy as _np
+    import scipy.sparse as _sp
+    import ocl_wire
+    from wireassembly import _forest
+    rng = _np.random.default_rng(43)
+    occ = _np.ones((40, 36, 10), bool)
+    occ[18:21, :, :] = False                      # the gap: two conductors
+    occ[rng.random(occ.shape) < 0.08] = False      # holes
+    cells = _np.argwhere(occ)
+    nn = cells.shape[0]
+    idx = -_np.ones(occ.shape, _np.int64)
+    idx[tuple(cells.T)] = _np.arange(nn)
+    rows = []
+    for ax in range(3):
+        sl0 = [slice(None)]*3
+        sl1 = [slice(None)]*3
+        sl0[ax] = slice(None, -1)
+        sl1[ax] = slice(1, None)
+        a, b = idx[tuple(sl0)].ravel(), idx[tuple(sl1)].ravel()
+        k = (a >= 0) & (b >= 0)
+        rows.append(_np.stack([a[k], b[k]], axis=1))
+    e = _np.concatenate(rows)
+    ne = e.shape[0]
+    B = _sp.csr_matrix((_np.tile([-1.0, 1.0], ne),
+                        (_np.repeat(_np.arange(ne), 2), e.ravel())),
+                       shape=(ne, nn))
+    parent, _pe, _ps, comp = _forest(B, nn)
+    rhs = rng.standard_normal(nn)
+    rhs[parent < 0] = 0.0
+    for cpt in _np.unique(comp):
+        m = comp == cpt
+        rhs[m] -= rhs[m].mean()
+    ref, _ = ocl_wire.laplacian_current(B, parent, rhs)
+    got, resid = ocl_wire.laplacian_current(
+        B, parent, rhs, cells=cells.astype(_np.int32), comp=comp)
+    check("wire Laplacian MG: KCL residual is clean", resid < 1e-9,
+          "max |B^T ihat - rhs| = %.2e" % resid)
+    scale = max(1e-30, float(_np.abs(ref).max()))
+    rel = float(_np.abs(got - ref).max())/scale
+    check("wire Laplacian MG: agrees with the Jacobi CG", rel < 1e-8,
+          "rel diff=%.3e" % rel)
+    again, _ = ocl_wire.laplacian_current(
+        B, parent, rhs, cells=cells.astype(_np.int32), comp=comp)
+    check("wire Laplacian MG: repeated solve is bit-identical",
+          _np.array_equal(got, again))
+
+
 def sparse_product_cases():
     """The device sparse-sparse product and transpose, against scipy.
 
@@ -754,6 +807,7 @@ def operator_cases():
 
     mode_cases()
     wire_cases()
+    wire_mg_cases()
     sparse_product_cases()
     precond_cases()
 

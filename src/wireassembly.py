@@ -698,12 +698,14 @@ def _laplacian_current_cpu(B, parent, rhs, tol=1e-12, maxiter=50000):
     return ihat, resid
 
 
-def _laplacian_current_device(B, parent, rhs, tol=1e-12, maxiter=50000):
+def _laplacian_current_device(B, parent, rhs, tol=1e-12, maxiter=50000,
+                              cells=None, comp=None):
     """The device Laplacian solve, on whichever backend is selected."""
     import backend
     if backend.name() == 'opencl':
         import ocl_wire
-        return ocl_wire.laplacian_current(B, parent, rhs, tol, maxiter)
+        return ocl_wire.laplacian_current(B, parent, rhs, tol, maxiter,
+                                          cells=cells, comp=comp)
     return _laplacian_current_gpu(B, parent, rhs, tol, maxiter)
 
 
@@ -1457,6 +1459,17 @@ class WireBondSolver:
                         rows.append(f_)
                         vals.append(sg_*float(wc)*w)
 
+    def _node_cells(self):
+        """(nnode, 3) lattice cells of every node, from the cell index
+        (the multigrid Laplacian aggregates them 2 x 2 x 2)."""
+        ci = self.node_of_cell
+        k = np.asarray(ci._keys, np.int64)
+        c = np.empty((k.size, 3), np.int32)
+        c[ci._order, 0] = k//(ci._m1*ci._m2)
+        c[ci._order, 1] = (k//ci._m2) % ci._m1
+        c[ci._order, 2] = k % ci._m2
+        return c
+
     def _node_cell(self, n):
         """Lattice cell (i, j, k) of node ``n``."""
         ci = self.node_of_cell
@@ -1740,7 +1753,8 @@ class WireBondSolver:
         if mode == 'gpu' and os.environ.get('SPPEEC_GPU', 'auto') != '0':
             try:
                 self.ihat_f, resid = _laplacian_current_device(
-                    self.B, self.parent, rhs)
+                    self.B, self.parent, rhs, cells=self._node_cells(),
+                    comp=self.comp)
             except Exception as exc:
                 warnings.warn("device Laplacian solve failed (%s: %s); "
                               "host CG" % (type(exc).__name__, exc))

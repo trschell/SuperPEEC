@@ -123,6 +123,33 @@ void csr_residual(__global const data_t *data,
     if (lid == 0) r[row] = b[row] - ax;
 }
 
+/* out[a] = sum over the members i of aggregate a of (b - A x)[i]:
+   the residual restricted without storing it (2026-10-02, the node
+   Laplacian multigrid). One work item per aggregate, members and row
+   entries in stored order: deterministic. For short rows only. */
+__kernel void csr_resrestrict(__global const data_t *data,
+                              __global const int *indices,
+                              __global const int *indptr,
+                              __global const real_t *x,
+                              __global const real_t *b,
+                              __global const int *rptr,
+                              __global const int *rind,
+                              __global real_t *out,
+                              const unsigned int nagg)
+{
+    const unsigned int a = get_global_id(0);
+    if (a >= nagg) return;
+    real_t acc = (real_t)0;
+    for (int m = rptr[a]; m < rptr[a + 1]; m++) {
+        const int row = rind[m];
+        real_t ax = (real_t)0;
+        for (int k = indptr[row]; k < indptr[row + 1]; k++)
+            ax += (real_t)data[k]*x[indices[k]];
+        acc += b[row] - ax;
+    }
+    out[a] = acc;
+}
+
 /* y += A x, for the prolongation update */
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
 void csr_spmv_add(__global const data_t *data,
@@ -745,6 +772,16 @@ class CSR(object):
                                 self.indices.data, self.indptr.data, x.data,
                                 b.data, r.data, np.uint32(self.shape[0]))
         return r
+
+    def residual_restrict(self, x, b, R, out):
+        """``out = R^T (b - A x)`` for an aggregation ``R``
+        (:class:`OnesRestrict`), without a fine residual vector."""
+        k = ocl_core.kernel(self.prg, 'csr_resrestrict')
+        n = int(R.shape[0])
+        k(ocl_core.queue(), (n,), None, self.data.data, self.indices.data,
+          self.indptr.data, x.data, b.data, R.indptr.data, R.indices.data,
+          out.data, np.uint32(n))
+        return out
 
     def jacobi(self, x, b, dinv, xout, omega):
         """``xout = x + omega*dinv*(b - A x)``, one fused sweep."""

@@ -32,6 +32,8 @@ not uploaded until there is a solution to multiply. The transpose is
 rebuilt for the final KCL check, which costs one pass against a solve
 of hundreds of iterations.
 """
+import os
+
 import numpy as np
 
 import ocl_core
@@ -179,7 +181,215 @@ def _laplacian_device(B, dt):
                                 L.shape, L.nnz)
 
 
-def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000):
+def _scale(v, a):
+    """v *= a on the device."""
+    v *= v.dtype.type(a)
+
+
+def _axpy(y, a, x):
+    """y += a*x on the device."""
+    y += x if a == 1.0 else x*y.dtype.type(a)
+
+
+class LaplaceMG(object):
+    """Geometric multigrid V-cycle for the masked node Laplacian, as the
+    preconditioner of :func:`laplacian_current`'s CG (2026-10-02).
+
+    WHY. Jacobi-preconditioned CG needs iterations proportional to the
+    lattice's linear size: 3.3k at R3, 6.7k at R4, ~26k at R6 -- an hour
+    of the R6 build. With this V-cycle: 26 / 33 iterations at R3 / R4,
+    the same current to the KCL tolerance.
+
+    THE HIERARCHY. Occupied cells are aggregated 2 x 2 x 2 per level,
+    NEVER across connected components (a block straddling the gap
+    between two conductors couples them in the coarse operator: 621
+    iterations at R4 against 77 when split), with piecewise-constant
+    prolongation P and Galerkin coarse operators P^T A P. Those are
+    7-POINT operators again -- aggregates of a nearest-neighbour graph
+    touch only face-adjacent aggregates -- so each level is built from
+    the previous level's EDGE WEIGHTS in chunks: an aggregate's
+    diagonal is its members' diagonals minus twice its internal edge
+    weight, and a face weight is the sum of the edges crossing it. The
+    fine Laplacian is never formed in floating point on the host and no
+    sparse product is taken.
+
+    THE CYCLE. Damped Jacobi (omega 0.6, nu sweeps) before and after,
+    the coarse correction scaled by alpha (1.8: plain aggregation's
+    coarse correction is too weak, 77 -> 33 iterations at R4), dense
+    inverse on the coarsest level; symmetric, so CG stays valid. Level 0
+    is the CG's own device Laplacian and diagonal, its input and output
+    the CG's r and z, its Jacobi scratch the caller's spare vector: the
+    only level-0 additions are the aggregation member lists and one
+    residual vector. Deterministic kernels throughout.
+    """
+
+    def __init__(self, B, parent, cells, comp, dt, A0, dinv0, nu=2,
+                 omega=0.6, alpha=None, coarse_n=1000):
+        import scipy.sparse as sp
+        self.dt = np.dtype(dt)
+        self.nu = int(os.environ.get('SPPEEC_IHAT_MG_NU', nu))
+        self.omega = float(os.environ.get('SPPEEC_IHAT_MG_OMEGA', omega))
+        self.alpha = float(alpha if alpha is not None else
+                           os.environ.get('SPPEEC_IHAT_MG_ALPHA', '1.8'))
+        B = sp.csr_matrix(B)
+        nn = int(B.shape[1])
+        d = (np.asarray(parent) >= 0).astype(np.float64)
+        pair = B.indices.reshape(-1, 2)
+        CH = 1 << 24
+        # level 0 as (diagonal, edge chunks): D_i = d_i deg_i + (1 - d_i),
+        # an edge (lo, hi) of weight d_lo d_hi
+        deg = np.zeros(nn)
+        for a0 in range(0, pair.shape[0], CH):
+            p = pair[a0:a0 + CH]
+            deg += np.bincount(p[:, 0], minlength=nn)
+            deg += np.bincount(p[:, 1], minlength=nn)
+        D = d*deg + (1.0 - d)
+        del deg
+
+        def edges0():
+            for a0 in range(0, pair.shape[0], CH):
+                p = pair[a0:a0 + CH].astype(np.int64)
+                w = d[p[:, 0]]*d[p[:, 1]]
+                k = w != 0
+                yield p[k, 0], p[k, 1], w[k]
+
+        c = np.asarray(cells, np.int64)
+        g = (np.asarray(comp, np.int64) if comp is not None
+             and os.environ.get('SPPEEC_IHAT_MG_COMP', '1') != '0'
+             else np.zeros(nn, np.int64))
+        g = g - g.min()
+        self.levels = []
+        edges = edges0
+        Afine, dinvfine = A0, dinv0
+        n = nn
+        while n > coarse_n and len(self.levels) < 20:
+            cc = c//2
+            m = cc.max(axis=0) + 1
+            span = int(m[0])*int(m[1])*int(m[2])
+            key = g*span + (cc[:, 0]*m[1] + cc[:, 1])*m[2] + cc[:, 2]
+            uk, agg = np.unique(key, return_inverse=True)
+            nc = int(uk.size)
+            if nc >= n:
+                break
+            rem = uk % span
+            ccell = np.stack([rem//(m[1]*m[2]), (rem//m[2]) % m[1],
+                              rem % m[2]], axis=1)
+            # coarse diagonal and face weights from the edges
+            Dc = np.bincount(agg, weights=D, minlength=nc)
+            Wf = np.zeros((nc, 3))            # weight to the +axis face
+            for i, j, w in edges():
+                ai, aj = agg[i], agg[j]
+                same = ai == aj
+                Dc -= 2.0*np.bincount(ai[same], weights=w[same],
+                                      minlength=nc)
+                ai, aj, w = ai[~same], aj[~same], w[~same]
+                dd = ccell[aj] - ccell[ai]
+                ax = np.argmax(np.abs(dd), axis=1)
+                sg = dd[np.arange(dd.shape[0]), ax]
+                if not (np.abs(dd).sum(axis=1) == 1).all():
+                    raise RuntimeError("aggregate edge is not a face step")
+                lo = np.where(sg > 0, ai, aj)
+                np.add.at(Wf, (lo, ax), w)
+            # the coarse edges: aggregate -> its +axis neighbour (same
+            # component, so the same key block)
+            ea, eb, ew = [], [], []
+            for ax in range(3):
+                a = np.flatnonzero(Wf[:, ax] != 0)
+                if a.size == 0:
+                    continue
+                nb = ccell[a].copy()
+                nb[:, ax] += 1
+                kb = (uk[a] - rem[a]) + (nb[:, 0]*m[1] + nb[:, 1])*m[2] \
+                    + nb[:, 2]
+                b = np.searchsorted(uk, kb)
+                if not (uk[np.minimum(b, nc - 1)] == kb).all():
+                    raise RuntimeError("missing face neighbour aggregate")
+                ea.append(a)
+                eb.append(b)
+                ew.append(Wf[a, ax])
+            ea = np.concatenate(ea) if ea else np.zeros(0, np.int64)
+            eb = np.concatenate(eb) if eb else np.zeros(0, np.int64)
+            ew = np.concatenate(ew) if ew else np.zeros(0)
+            del Wf
+            # level record: the fine operator (device), its aggregation
+            P = sp.csr_matrix((np.ones(n), (np.arange(n), agg)),
+                              shape=(n, nc))
+            lv = dict(n=n, A=Afine, dinv=dinvfine,
+                      R=ocl_sparse.OnesRestrict(P, self.dt))
+            del P
+            self.levels.append(lv)
+            # the coarse operator for the next level
+            Ac = sp.csr_matrix(
+                (np.concatenate([Dc, -ew, -ew]),
+                 (np.concatenate([np.arange(nc), ea, eb]),
+                  np.concatenate([np.arange(nc), eb, ea]))),
+                shape=(nc, nc))
+            n = nc
+            D = Dc
+            c, g = ccell, uk//span
+            edges = (lambda ea=ea, eb=eb, ew=ew: iter([(ea, eb, ew)]))
+            if n > coarse_n:
+                Afine = ocl_sparse.CSR(Ac, self.dt)
+                dinvfine = ocl_core.to_device(1.0/np.where(Dc != 0, Dc, 1.0),
+                                              self.dt)
+            self._Ac = Ac
+        self.nc = n
+        Ainv = np.linalg.inv(self._Ac.toarray()) if self.levels else None
+        del self._Ac
+        self.Ainv = ocl_core.to_device(Ainv, self.dt)
+        # level 0 keeps no residual: it is restricted as it is formed
+        for i, lv in enumerate(self.levels):
+            for k in (() if i == 0 else ('x', 'y', 'b', 'r')):
+                lv[k] = ocl_core.zeros((lv['n'],), self.dt)
+        self.cb = ocl_core.zeros((self.nc,), self.dt)
+        self.cx = ocl_core.zeros((self.nc,), self.dt)
+        self.nlev = len(self.levels) + 1
+
+    def device_bytes(self):
+        n = self.Ainv.nbytes + self.cb.nbytes + self.cx.nbytes
+        for i, lv in enumerate(self.levels):
+            n += lv['R'].device_bytes() + sum(lv[k].nbytes for k in
+                                              ('x', 'y', 'b', 'r') if k in lv)
+            if i > 0:
+                n += lv['A'].device_bytes() + lv['dinv'].nbytes
+        return int(n)
+
+    def _cycle(self, l, b, x, y):
+        q = ocl_core.queue()
+        if l == len(self.levels):
+            ocl_sparse.dense_gemv(self.Ainv, b, x, self.nc, self.nc,
+                                  self.dt)
+            return x
+        lv = self.levels[l]
+        A, dinv = lv['A'], lv['dinv']
+        x.fill(self.dt.type(0), queue=q)
+        for _ in range(self.nu):
+            A.jacobi(x, b, dinv, y, self.omega)
+            _copy(x, y)
+        nxt = self.levels[l + 1] if l + 1 < len(self.levels) else None
+        bc = nxt['b'] if nxt else self.cb
+        xc = nxt['x'] if nxt else self.cx
+        if 'r' in lv:
+            A.residual(x, b, lv['r'])
+            lv['R'].spmv(lv['r'], bc)
+        else:
+            A.residual_restrict(x, b, lv['R'], bc)
+        self._cycle(l + 1, bc, xc, nxt['y'] if nxt else None)
+        if self.alpha != 1.0:
+            _scale(xc, self.alpha)
+        lv['R'].prolong_add_tiled(xc, x)
+        for _ in range(self.nu):
+            A.jacobi(x, b, dinv, y, self.omega)
+            _copy(x, y)
+        return x
+
+    def apply(self, r, z, scratch):
+        """z = M^-1 r; ``scratch`` is a free level-0 vector."""
+        return self._cycle(0, r, z, scratch)
+
+
+def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000,
+                      cells=None, comp=None):
     """``ihat = B phi`` with ``(B^T B) phi = rhs``, solved on the device.
 
     Returns ``(ihat on the host, max |B^T ihat - rhs|)``, the same
@@ -227,7 +437,28 @@ def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000):
     z = ocl_core.zeros((nn,), dt)
     p = ocl_core.zeros((nn,), dt)
     Ap = ocl_core.zeros((nn,), dt)
-    k['vmul'](q, (nn,), None, z.data, dinv.data, r.data, np.uint32(nn))
+    mg = None
+    if cells is not None and os.environ.get('SPPEEC_IHAT_MG', '1') != '0':
+        import time as _time
+        _t = _time.perf_counter()
+        mg = LaplaceMG(Bc, parent, cells, comp, dt, A0=Lg, dinv0=dinv)
+        if os.environ.get('SPPEEC_STREAM_VERBOSE') == '1':
+            print("    ihat MG: %d levels, coarsest %d, %.1f MB card, "
+                  "built in %.1f s" % (mg.nlev, mg.nc,
+                                       mg.device_bytes()/1e6,
+                                       _time.perf_counter() - _t),
+                  flush=True)
+
+    def precond(rr, zz):
+        if mg is not None:
+            # Ap is free here: the update that used it is done and the
+            # next spmv overwrites it
+            return mg.apply(rr, zz, Ap)
+        k['vmul'](q, (nn,), None, zz.data, dinv.data, rr.data,
+                  np.uint32(nn))
+        return zz
+
+    precond(r, z)
     _copy(p, z)              # device to device, not out through the host
     rz = ocl_sparse.dot(r, z, dt)
 
@@ -243,16 +474,19 @@ def laplacian_current(B, parent, rhs, tol=1e-12, maxiter=50000):
         k['axpy'](q, (nn,), None, r.data, dt.type(-alpha), Ap.data,
                   np.uint32(nn))
         it += 1
-        if it % 50 == 0:
+        if it % (1 if mg is not None else 50) == 0:
             if float(np.sqrt(ocl_sparse.dot(r, r, dt))) <= tol*bn:
                 break
-        k['vmul'](q, (nn,), None, z.data, dinv.data, r.data, np.uint32(nn))
+        precond(r, z)
         rz_new = ocl_sparse.dot(r, z, dt)
         k['xpay'](q, (nn,), None, p.data, z.data, dt.type(rz_new/rz),
                   np.uint32(nn))
         rz = rz_new
 
-    del Lg, Ld               # the iteration is over; the Laplacian is dead
+    if os.environ.get('SPPEEC_STREAM_VERBOSE') == '1':
+        print("    ihat CG: %d iterations (%s)" % (it, 'MG' if mg is not None
+                                                  else 'Jacobi'), flush=True)
+    del Lg, Ld, mg           # the iteration is over; the Laplacian is dead
     # The potential is done; the current and the KCL check run on the
     # HOST (2026-09-29): they used to upload B and then B^T again --
     # 10 GB at R6 beside the solve's vectors, the second allocation
