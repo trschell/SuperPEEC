@@ -1515,6 +1515,46 @@ class WireBondSolver:
             rows.append(e)
             vals.append(sgn*w)
 
+    def _fil_xindex(self):
+        """Filaments grouped by x cell: ``(perm, xptr)``, the filaments
+        of x cell i being ``perm[xptr[i]:xptr[i + 1]]`` in ascending
+        order. Built on first use, dropped by the caller once the
+        sharing cycles are routed (int32: 4 bytes per filament, ~1 GB
+        at R6). A box query reads its x range instead of every
+        filament -- the full scan per query and per growth step was
+        24 s of 44 at R5 and 317 s at R6 (2026-10-03)."""
+        idx = getattr(self, '_fil_xidx', None)
+        if idx is not None:
+            return idx
+        fc = self.fil_cell
+        nf = int(fc.shape[0])
+        CH = 1 << 24
+        nx = int(max(np.asarray(fc[a:a + CH, 0]).max()
+                     for a in range(0, nf, CH))) + 1 if nf else 1
+        xptr = np.zeros(nx + 1, np.int64)
+        for a in range(0, nf, CH):
+            xptr[1:] += np.bincount(np.asarray(fc[a:a + CH, 0]),
+                                    minlength=nx)
+        np.cumsum(xptr, out=xptr)
+        perm = np.empty(nf, np.int32)
+        fill = xptr[:-1].copy()
+        # a stable counting sort, chunk by chunk in filament order, so
+        # each x cell's run ascends
+        for a in range(0, nf, CH):
+            x = np.asarray(fc[a:a + CH, 0], np.int64)
+            srt = np.argsort(x, kind='stable')
+            xs = x[srt]
+            st = np.flatnonzero(np.r_[True, xs[1:] != xs[:-1]])
+            ln = np.diff(np.r_[st, xs.size])
+            u = xs[st]
+            pos = np.repeat(fill[u], ln) + (np.arange(xs.size)
+                                            - np.repeat(st, ln))
+            perm[pos] = (a + srt).astype(np.int32)
+            fill[u] += ln
+            del x, srt, xs, st, ln, u, pos
+        self._fil_xidx = (perm, xptr)
+        return self._fil_xidx
+
     def _local_paths(self, u, targets, margin=4, grow=6):
         """Shortest lattice paths u -> each target, from ONE local
         search over the bounding box of u and all targets (grown until
@@ -1532,16 +1572,19 @@ class WireBondSolver:
         lo0, hi0 = cells.min(axis=0), cells.max(axis=0)
         result = {}
         fc, B = self.fil_cell, self.B
-        nf = int(fc.shape[0])
-        CH = 1 << 24
+        perm, xptr = self._fil_xindex()
         for _ in range(grow):
             lo, hi = lo0 - margin, hi0 + margin
-            sel = []
-            for a in range(0, nf, CH):
-                c = np.asarray(fc[a:a + CH], np.int64)
-                m = np.all((c >= lo) & (c <= hi), axis=1)
-                sel.append(np.flatnonzero(m) + a)
-            sel = np.concatenate(sel)
+            # the filaments of the box's x range, from the x index,
+            # filtered on y and z and put back in filament order: the
+            # same selection a scan of every filament makes
+            x0 = int(min(max(lo[0], 0), xptr.size - 1))
+            x1 = int(min(max(hi[0] + 1, 0), xptr.size - 1))
+            cand = perm[xptr[x0]:xptr[x1]]
+            c = np.asarray(fc[cand], np.int64)
+            m = np.all((c >= lo) & (c <= hi), axis=1)
+            sel = np.sort(cand[m]).astype(np.int64)
+            del cand, c, m
             if sel.size:
                 sub = B[sel]                       # rows: 2 nodes each
                 if sub.nnz == 2*sel.size:
@@ -1567,17 +1610,22 @@ class WireBondSolver:
                                     and (pred[it] >= 0 or it == iu)):
                                 continue
                             if key is None:
-                                # edge lookup: (a, b) -> local row
-                                key = {}
-                                for r in range(sel.size):
-                                    a_, b_ = inv[r]
-                                    key.setdefault((a_, b_), r)
-                                    key.setdefault((b_, a_), r)
+                                # edge lookup: unordered (a, b) -> its
+                                # FIRST local row, as sorted keys (a
+                                # dict built row by row in Python was
+                                # seconds per box at R6's patch feet)
+                                lo_ = np.minimum(inv[:, 0], inv[:, 1])
+                                ek = lo_.astype(np.int64)*k + (
+                                    inv[:, 0] + inv[:, 1] - lo_)
+                                eo = np.argsort(ek, kind='stable')
+                                key = (ek[eo], eo)
                             out = []
                             b_ = it
                             while b_ != iu:
                                 a_ = pred[b_]
-                                r = key[(a_, b_)]
+                                q_ = min(a_, b_)*k + max(a_, b_)
+                                r = int(key[1][np.searchsorted(key[0],
+                                                               q_)])
                                 # unit current a -> b in _tree_path's
                                 # convention (_assert_kcl verifies the
                                 # cycles)
@@ -1866,6 +1914,7 @@ class WireBondSolver:
             wvcol = sp.csc_matrix((wv_, (wr, [0]*len(wr))),
                                   shape=(self.nwel, 1))
             self._chords.append((f, wvcol))
+        self._fil_xidx = None          # the box index has no reader left
 
     def _coarse_route(self, adj, ca, cb):
         import collections
