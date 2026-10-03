@@ -956,9 +956,10 @@ class _GeoMGFactor:
                 warnings.warn("device Gram build failed (%s: %s); host "
                               "stencil path" % (type(exc).__name__, exc))
         try:
-            self.mg = loopmg.GeoMG(A, geom_normal, geom_base, nu=nu,
-                                   omega=omega, max_coarse=max_coarse,
-                                   basis=basis, coarse0=mv0)
+            with _status.task('GeoMG hierarchy'):
+                self.mg = loopmg.GeoMG(A, geom_normal, geom_base, nu=nu,
+                                       omega=omega, max_coarse=max_coarse,
+                                       basis=basis, coarse0=mv0)
         except Exception as exc:
             if mv0 is None:
                 raise
@@ -996,8 +997,9 @@ class _GeoMGFactor:
                     # the OpenCL apply needs the host level hierarchy,
                     # which it has: the device Gram build above is CUDA
                     # only and falls back to the host stencil here
-                    from ocl_geomg import GeoBlock
-                    self._gpu = GeoBlock(self)
+                    with _status.task('device upload'):
+                        from ocl_geomg import GeoBlock
+                        self._gpu = GeoBlock(self)
                     self.gpu_state = ('opencl (single device, level 0 as a %s)'
                                       % self._gpu.core.level0)
                 else:
@@ -1074,15 +1076,16 @@ class _GeoMGFactor:
             keep = 0 < self.loc.size*self.nmac*4 <= budget
             self._MB = (np.empty((self.loc.size, self.nmac), dtype=np.float32)
                         if keep else None)
-            BtAiB = None
-            for j in range(self.nmac):
-                mb = solve(Bc[:, j].toarray().ravel())
-                if keep:
-                    self._MB[:, j] = mb
-                col = BT @ mb
-                if BtAiB is None:
-                    BtAiB = np.empty((self.nmac, self.nmac), dtype=col.dtype)
-                BtAiB[:, j] = col
+            with _status.task('macro Schur'):
+                BtAiB = None
+                for j in range(self.nmac):
+                    mb = solve(Bc[:, j].toarray().ravel())
+                    if keep:
+                        self._MB[:, j] = mb
+                    col = BT @ mb
+                    if BtAiB is None:
+                        BtAiB = np.empty((self.nmac, self.nmac), dtype=col.dtype)
+                    BtAiB[:, j] = col
             del Bc
             self.S = lu_factor(np.float64(C - BtAiB))
         else:

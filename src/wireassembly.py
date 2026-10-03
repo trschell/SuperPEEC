@@ -1143,9 +1143,10 @@ class WireBondSolver:
             import loopmg
             from port_impedance import _GeoMGFactor
             from sksparse.cholmod import cholesky
-            nrm, bse = loopmg.plaquette_geometry(
-                csc_prefix(self.Bmat, self.efg, self.nplaq),
-                self.fil_axis, self.fil_cell, self.nplaq)
+            with _status.task('plaquette geometry'):
+                nrm, bse = loopmg.plaquette_geometry(
+                    csc_prefix(self.Bmat, self.efg, self.nplaq),
+                    self.fil_axis, self.fil_cell, self.nplaq)
             # tile order (2026-09-27): on the OpenCL path the plaquette
             # columns are put in the stencil's slot order first, so the
             # device map plaquette -> slot is monotone and reduces to
@@ -1154,9 +1155,11 @@ class WireBondSolver:
             # sums over a filament's plaquettes and the Krylov dot
             # products run in the new order (ulp-level).
             if loopmg.tile_order_engaged():
-                perm = loopmg.tile_permutation(nrm, bse)
+                with _status.task('tile order'):
+                    perm = loopmg.tile_permutation(nrm, bse)
                 if perm is not None:
-                    self.Bmat = loopmg.csc_permute_prefix(self.Bmat, perm)
+                    with _status.task('tile permute'):
+                        self.Bmat = loopmg.csc_permute_prefix(self.Bmat, perm)
                     nrm, bse = nrm[perm], bse[perm]
                     self._Bop = None       # any cached basis is stale
                     del perm
@@ -1171,7 +1174,8 @@ class WireBondSolver:
             # through the hierarchy build, inside the run's peak.
             from port_impedance import shrink_exact_f32
             from scipy.sparse import csr_matrix
-            shrink_exact_f32(self.Bmat)
+            with _status.task('basis to float32'):
+                shrink_exact_f32(self.Bmat)
             pl = int(self.Bmat.indptr[self.nplaq])
             # the shrink is refused where the chord columns carry a
             # value float32 cannot hold (0.04 on the DBC), and the CSC
@@ -1222,8 +1226,9 @@ class WireBondSolver:
                 mk = Ym.indices >= self.efg
                 Ym.data[mk] *= sw[Ym.indices[mk] - self.efg]
                 del mk, zw, Lw
-            geo = _GeoMGFactor(None, nrm, bse, self.nplaq,
-                               cycles=self.amg_cycles, parts=(Yp, Ym))
+            with _status.task('GeoMG factor'):
+                geo = _GeoMGFactor(None, nrm, bse, self.nplaq,
+                                   cycles=self.amg_cycles, parts=(Yp, Ym))
             del Yp, Ym             # setup views: the factor holds
             del nrm, bse           # everything it needs
             if verbose:
@@ -1237,7 +1242,8 @@ class WireBondSolver:
                 Ssub.data[mk] *= sw[Ssub.indices[mk] - self.efg]
                 del mk
             del sw
-            cholS = cholesky((Ssub.T @ Ssub).tocsc())
+            with _status.task('distribution Cholesky'):
+                cholS = cholesky((Ssub.T @ Ssub).tocsc())
             nplaq, nd, size = self.nplaq, self.nd, self.size
 
             class _GeoSplit:

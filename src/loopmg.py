@@ -18,6 +18,7 @@ extrapolated to be).
 import os
 
 import numpy as np
+import sppeec_status as _status
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
@@ -610,14 +611,16 @@ class GeoMG:
             got = None
             if mv0 is None and coarse0 is None and _STEN:
                 try:
-                    got = _Stencil0.build(
-                        None, normal, base, np.dtype(basis.dtype),
-                        None, basis=basis, omega=self.omega)
+                    with _status.task('stencil build'):
+                        got = _Stencil0.build(
+                            None, normal, base, np.dtype(basis.dtype),
+                            None, basis=basis, omega=self.omega)
                 except Exception:       # never break a solve
                     got = None
             if got is not None or mv0 is not None \
                     or coarse0 is not None:
-                P0, nrm1, bs1 = self._aggregate(normal, base)
+                with _status.task('aggregate level 0'):
+                    P0, nrm1, bs1 = self._aggregate(normal, base)
                 if P0.shape[1] < basis.shape[0]:
                     use_basis = True
             if not use_basis:
@@ -658,9 +661,15 @@ class GeoMG:
             P0 = P0c
             self.Ps.append(P0)
             self._PT0 = P0T
-            A = (sp.csr_matrix(coarse0(P0)).astype(self.dtype)
-                 if coarse0 is not None
-                 else self._probe_coarse(P0, nrm1, bs1, P0T))
+            with _status.task('probe coarse'):
+                if coarse0 is not None:
+                    A = sp.csr_matrix(coarse0(P0)).astype(self.dtype)
+                elif self._sten0 is not None and \
+                        os.environ.get('SPPEEC_GEOMG_PROBE') != '1':
+                    A = self._stencil_coarse(P0T, nrm1, bs1, normal,
+                                             base)
+                else:
+                    A = self._probe_coarse(P0, nrm1, bs1, P0T)
             nrm, bs = nrm1, bs1
             # level-0 nnz never counted exactly (no matrix); ~10.7
             # entries/row measured across the geometry family --
@@ -670,17 +679,18 @@ class GeoMG:
             A = A.tocsr()
             self.dtype = A.dtype
             nrm, bs = normal.copy(), base.copy()
-        for _ in range(max_levels):
-            self.levels.append(A)
-            if A.shape[0] <= max_coarse:
-                break
-            P, nrm, bs = self._aggregate(nrm, bs)
-            self._last_inv = None
-            if P.shape[1] >= A.shape[0]:
-                break                      # coarsening stalled
-            P = P.tocsr().astype(self.dtype)
-            self.Ps.append(P)
-            A = (P.T @ A @ P).tocsr()
+        with _status.task('coarse levels'):
+            for _ in range(max_levels):
+                self.levels.append(A)
+                if A.shape[0] <= max_coarse:
+                    break
+                P, nrm, bs = self._aggregate(nrm, bs)
+                self._last_inv = None
+                if P.shape[1] >= A.shape[0]:
+                    break                      # coarsening stalled
+                P = P.tocsr().astype(self.dtype)
+                self.Ps.append(P)
+                A = (P.T @ A @ P).tocsr()
         self.dinv = [np.full(n0, 0.25, dtype=self.dtype) if L is None
                      else (1.0/np.where(np.abs(L.diagonal()) > 0,
                                         L.diagonal(), 1.0)
@@ -867,6 +877,177 @@ class GeoMG:
         if fill >= (1 << 31):
             raise ValueError("coarse operator past int32 indexing")
         return _triplets_to_csr(rows[:fill], cols[:fill], vals[:fill], nc)
+
+    def _stencil_coarse(self, P0T, nrm1, bs1, normal, base,
+                        chunk=1 << 16):
+        """A1 = P0^T A0 P0 straight from the certified stencil TABLES
+        (2026-10-03) -- what :meth:`_probe_coarse` assembles, without
+        its 81 fine-length matvecs.
+
+        A0[i, j] = cf[s] for the stencil slot s of i's normal whose
+        source normal and offset reach an existing plaquette j. With
+        aggregates of at most 2 per axis, the pair (i, j) lands in
+        coarse column J = aggregate(j), one of 81 slots around row
+        I = aggregate(i): source normal x coarse offset in {-1,0,1}^3.
+        Aggregates are numbered in (normal, x, y, z) key order, so
+        ascending slot order IS ascending column order: each chunk of
+        coarse rows is accumulated densely over its 81 slots and
+        written into the CSR already sorted. The sums are small
+        integers -- exact in any order -- so the result equals the
+        probes' bit for bit.
+
+        At R6 the probes were 81 x ~4 fresh 1 GB fine vectors (P0 e,
+        the tiled output, its unpack, the cast): ~300 GB of page
+        faults, which near the memory cap became minutes of
+        huge-page compaction stalls (2026-10-02: 700 s for this
+        step). Here the transient is one chunk plus a fine occupancy
+        bitmap (one bit per lattice face) and the coarse rank grid.
+        """
+        st = self._sten0
+        nsrc = np.asarray(st.nsrc, np.int64) - 1
+        of = np.asarray(st.of, np.int64)              # (3, nsl)
+        cf = np.asarray(st.cf, np.int64)
+        sptr = np.asarray(st.sptr, np.int64)
+        div = np.asarray(self.divs[0], np.int64)
+        nc = int(P0T.shape[0])
+        if nc >= (1 << 31):
+            raise ValueError("coarse level past int32 indexing")
+        if not np.all(div <= 2):
+            raise ValueError("coarse reach past one cell")
+        # fine occupancy, one bit per (normal, x, y, z) lattice face, in
+        # a lattice padded by one cell each side: a neighbour's key is
+        # then the plaquette's own key plus a constant per stencil slot,
+        # never out of range, and absent faces read 0
+        F = [int(base[:, k].max()) + 3 for k in range(3)]
+        sz = F[0]*F[1]*F[2]
+        bm = np.zeros(((3*sz) >> 3) + 1, dtype=np.uint8)
+        n0 = int(normal.shape[0])
+
+        def pkey(nrm, b):
+            return ((nrm.astype(np.int64)*F[0] + b[:, 0] + 1)*F[1]
+                    + b[:, 1] + 1)*F[2] + b[:, 2] + 1
+
+        for a0 in range(0, n0, 1 << 22):
+            a1 = min(n0, a0 + (1 << 22))
+            lk = pkey(normal[a0:a1], base[a0:a1])
+            np.bitwise_or.at(bm, lk >> 3,
+                             np.left_shift(1, lk & 7).astype(np.uint8))
+            del lk
+        # per slot: the key shift, and the coarse slot (source normal x
+        # coarse offset) as a function of the face's parity inside its
+        # aggregate -- d = floor((b + o)/div) - floor(b/div) depends on
+        # b mod div only
+        nsl = int(sptr[3])
+        delta = np.empty(nsl, np.int64)
+        cslot = np.empty((nsl, 8), np.int64)
+        onrm = np.repeat(np.arange(3), np.diff(sptr))
+        for s in range(nsl):
+            o = of[:, s]
+            delta[s] = ((int(nsrc[s]) - int(onrm[s]))*F[0]
+                        + o[0])*F[1]*F[2] + o[1]*F[2] + o[2]
+            for pc in range(8):
+                p = np.array([(pc >> 2) & 1, (pc >> 1) & 1, pc & 1])
+                p = np.where(div == 2, p, 0)
+                d = (p + o)//div + 1
+                cslot[s, pc] = int(nsrc[s])*27 + d[0]*9 + d[1]*3 + d[2]
+        # coarse rank grid: aggregate index at (normal, cx, cy, cz)
+        cd = [int(bs1[:, k].max()) + 1 for k in range(3)]
+        grid = np.full(3*cd[0]*cd[1]*cd[2], -1, dtype=np.int32)
+        grid[((nrm1.astype(np.int64)*cd[0] + bs1[:, 0])*cd[1]
+              + bs1[:, 1])*cd[2] + bs1[:, 2]] = np.arange(nc,
+                                                          dtype=np.int32)
+        cap = 12*nc + 1024
+        indptr = np.zeros(nc + 1, dtype=np.int64)
+        indices = np.empty(cap, dtype=np.int32)
+        data = np.empty(cap, dtype=self.dtype)
+        fill = 0
+        fp = np.asarray(P0T.indptr, np.int64)
+        pw = np.where(div == 2, 1, 0)*np.array([4, 2, 1])
+
+        def rows(I0):
+            """Coarse rows [I0, I0 + chunk): (row counts, cols, vals)."""
+            I1 = min(nc, I0 + chunk)
+            m = I1 - I0
+            idx = P0T.indices[fp[I0]:fp[I1]]
+            rloc = np.repeat(np.arange(0, 81*m, 81, dtype=np.int64),
+                             np.diff(fp[I0:I1 + 1]))
+            nf = normal[idx]
+            bf = base[idx]
+            lk0 = pkey(nf, bf)
+            par = ((bf[:, 0] & 1)*pw[0] + (bf[:, 1] & 1)*pw[1]
+                   + (bf[:, 2] & 1)*pw[2]).astype(np.intp)
+            lins, wts = [], []
+            for nn in range(3):
+                sel = np.flatnonzero(nf == nn)
+                if sel.size == 0:
+                    continue
+                k0 = lk0[sel]
+                rl = rloc[sel]
+                pc = par[sel]
+                for s in range(int(sptr[nn]), int(sptr[nn + 1])):
+                    lk = k0 + delta[s]
+                    bit = (bm[lk >> 3] >> (lk & 7).astype(np.uint8)) & 1
+                    lins.append(rl + cslot[s][pc])
+                    wts.append(bit*float(cf[s]))
+            del idx, rloc, nf, bf, lk0, par
+            # one weighted pass per chunk: the sums are small integers,
+            # exact in float64 whatever the order
+            acc = np.bincount(np.concatenate(lins),
+                              weights=np.concatenate(wts),
+                              minlength=m*81)
+            del lins, wts
+            nz = np.flatnonzero(acc)
+            r = nz//81
+            sl = nz - r*81
+            src = sl//27
+            sl -= src*27
+            cr = bs1[I0:I1].astype(np.int64)[r]
+            ck = ((src*cd[0] + cr[:, 0] + sl//9 - 1)*cd[1]
+                  + cr[:, 1] + (sl//3) % 3 - 1)*cd[2] + cr[:, 2] \
+                + sl % 3 - 1
+            col = grid[ck]
+            if (col < 0).any():
+                raise RuntimeError("stencil coarse: column off the "
+                                   "aggregate lattice")
+            return (np.bincount(r, minlength=m), col,
+                    acc[nz].astype(self.dtype))
+
+        # chunks are independent and the work is numpy ufuncs and
+        # gathers, which release the GIL: a thread pool, consumed in
+        # order through a bounded window so finished chunks never pile
+        # up beside the output
+        from concurrent.futures import ThreadPoolExecutor
+        nthr = max(1, int(os.environ.get('OMP_NUM_THREADS', '4')))
+        starts = list(range(0, nc, chunk))
+        with ThreadPoolExecutor(max_workers=nthr) as pool:
+            pend = {}
+            for q, I0 in enumerate(starts):
+                pend[q] = pool.submit(rows, I0)
+                while len(pend) > 2*nthr or \
+                        (q == len(starts) - 1 and pend):
+                    q0 = min(pend)
+                    cnt, col, val = pend.pop(q0).result()
+                    I0_ = starts[q0]
+                    k = col.size
+                    if fill + k > cap:
+                        cap = max(2*cap, fill + k)
+                        indices.resize(cap, refcheck=False)
+                        data.resize(cap, refcheck=False)
+                    indices[fill:fill + k] = col
+                    data[fill:fill + k] = val
+                    indptr[I0_ + 1:I0_ + 1 + cnt.size] = cnt
+                    fill += k
+                    del cnt, col, val
+        del bm, grid
+        if fill >= (1 << 31):
+            raise ValueError("coarse operator past int32 indexing")
+        np.cumsum(indptr, out=indptr)
+        indices.resize(fill, refcheck=False)
+        data.resize(fill, refcheck=False)
+        A = sp.csr_matrix((data, indices, indptr.astype(np.int32)),
+                          shape=(nc, nc))
+        A.has_sorted_indices = True
+        return A
 
     def _aggregate(self, normal, base, chunk=1 << 22):
         """2x2x2 geometric agglomeration, per face orientation.
