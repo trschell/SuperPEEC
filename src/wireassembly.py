@@ -1910,31 +1910,59 @@ class WireBondSolver:
                                % np.abs(div - want).max())
         # plaquettes/zero-sum columns are structurally safe; spot-check
         # the whole basis anyway
-        # over column blocks (2026-09-29): the row slices of the whole
-        # basis and the one sparse product stood ~3 GB at R5 for a
-        # check whose answer is a maximum -- a column block of a CSC is
-        # a view of its arrays, and the block's row split is small
-        B = self.Bmat.tocsc()
-        ncol = int(B.shape[1])
-        step = max(1, min(ncol, (1 << 20)))
-        div = 0.0
-        # the incidence transpose once, as CSR, for every block: the
-        # product converted the CSC view per block (2026-09-30)
-        BT = BT.tocsr()
-        for c0 in range(0, ncol, step):
-            c1 = min(ncol, c0 + step)
-            p0, p1 = int(B.indptr[c0]), int(B.indptr[c1])
-            blk = sp.csc_matrix((B.data[p0:p1], B.indices[p0:p1],
-                                 B.indptr[c0:c1 + 1] - p0),
-                                shape=(B.shape[0], c1 - c0))
-            X = blk[:self.efg, :]
-            W = blk[self.efg:, :]
-            d = np.abs(BT @ X + self.Bw @ (self.Afoot @ W)).max()
-            div = max(div, float(d))
-            del blk, X, W, d
+        div = self._basis_divergence()
         if div > 1e-9:
             raise RuntimeError("stacked basis violates KCL (max %g)"
                                % div)
+
+    def _basis_divergence(self, step=1 << 22):
+        """max |divergence| over every column of the stacked basis.
+
+        The plaquette columns live on filament rows only, so their
+        divergences are the rows of X^T B -- and a CSC column block
+        read as a CSR IS its transpose, a view of the basis arrays,
+        multiplied against the incidence as it is stored. The product
+        keeps only entries that do not cancel, so a sound block comes
+        back nearly empty. Until 2026-10-03 this was B^T X per block,
+        whose CSR conversion of X and output pointer were both
+        full-length (filament rows, nodes) for every block: O(N) per
+        block, O(N^2) in all -- 25 s at R5, 497 s at R6.
+
+        The few remaining columns (distribution, chords) carry wire
+        rows and keep the B^T X + Bw (Afoot W) form in one block: put
+        through the transposed product, the foot map's wide rows made
+        the product's pre-cancellation size bound -- what scipy
+        allocates -- 20 GB at R6 (OOM, 2026-10-03).
+        """
+        B = self.Bmat.tocsc()
+        ncol = int(B.shape[1])
+        npl = int(self.nplaq)
+        Bi = self.B.tocsr()
+        div = 0.0
+        for c0 in range(0, npl, step):
+            c1 = min(npl, c0 + step)
+            p0, p1 = int(B.indptr[c0]), int(B.indptr[c1])
+            if p1 > p0 and int(B.indices[p0:p1].max()) >= self.efg:
+                raise RuntimeError("plaquette column on a wire row")
+            blkT = sp.csr_matrix((B.data[p0:p1], B.indices[p0:p1],
+                                  B.indptr[c0:c1 + 1] - p0),
+                                 shape=(c1 - c0, self.efg))
+            D = blkT @ Bi
+            if D.nnz:
+                div = max(div, float(np.abs(D.data).max()))
+            del blkT, D
+        if ncol > npl:
+            p0 = int(B.indptr[npl])
+            blk = sp.csc_matrix((B.data[p0:], B.indices[p0:],
+                                 B.indptr[npl:] - p0),
+                                shape=(B.shape[0], ncol - npl))
+            X = blk[:self.efg, :]
+            W = blk[self.efg:, :]
+            D = Bi.T @ X + self.Bw @ (self.Afoot @ W)
+            if D.nnz:
+                div = max(div, float(np.abs(D.data).max()))
+            del blk, X, W, D
+        return div
 
     # -- operator + solve (the A1 pattern with the foot term) -----------
 
