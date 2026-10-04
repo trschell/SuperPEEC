@@ -284,13 +284,12 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
             # a filament's weights: its transverse cell's normalised
             # sub-fill bins (both end cells share them)
             W = np.full((cells.shape[0], k*k), 1.0/(k*k))
-            partial = np.zeros(cells.shape[0], dtype=bool)
-            for f, c in enumerate(cells):
-                bins = cut['cells'].get((int(c[t1]), int(c[t2])))
-                if bins is not None and bins.min() < 1.0 - 1e-12:
-                    b = np.asarray(bins, dtype=float).ravel()
-                    W[f] = b/b.sum()
-                    partial[f] = True
+            import section
+            pmap, pbins = section.partial_map(cut)
+            r = pmap[cells[:, t1], cells[:, t2]]
+            partial = r >= 0
+            b = pbins[r[partial]].reshape(-1, k*k)
+            W[partial] = b/b.sum(axis=1, keepdims=True)
         elif kind == 'plane':
             k = int(cut['k'])
             n = [k, k, k]
@@ -341,13 +340,17 @@ def _plane_weights(cut, split, cells):
     import section
     ax = int(cut['axis'])
     t = [c for c in range(3) if c != ax]
-    part = {key for key, b in cut['cells'].items()
-            if b.min() < 1.0 - 1e-12}
+    pmap = section.partial_map(cut)[0]
     up = cells.copy()
     up[:, split.axis] += 1
-    partial = np.array([((int(c[t[0]]), int(c[t[1]])) in part)
-                        or ((int(e[t[0]]), int(e[t[1]])) in part)
-                        for c, e in zip(cells, up)])
+
+    def is_part(c):
+        a0, a1 = c[:, t[0]], c[:, t[1]]
+        ok = (a0 < pmap.shape[0]) & (a1 < pmap.shape[1])
+        out = np.zeros(c.shape[0], dtype=bool)
+        out[ok] = pmap[a0[ok], a1[ok]] >= 0
+        return out
+    partial = is_part(cells) | is_part(up)
     W = np.full((cells.shape[0], split.nsub), 1.0/split.nsub)
     sel = np.flatnonzero(partial)
     if sel.size:
@@ -356,7 +359,17 @@ def _plane_weights(cut, split, cells):
         o = (np.arange(ns) + 0.5)/ns
         xs = lo[:, t[0], None, None] + (hi - lo)[:, t[0], None, None]*o[None, :, None]
         ys = lo[:, t[1], None, None] + (hi - lo)[:, t[1], None, None]*o[None, None, :]
-        f = section.inside(cut['shapes'], xs, ys).reshape(sel.size, split.nsub, -1).mean(axis=2)
+        # each filament's samples lie in its own footprint: cull the
+        # pieces per filament (the all-points cull was 43 of the 57 s
+        # this took on the 1 um IHP spiral)
+        box = np.stack([lo[:, t[0]], lo[:, t[1]],
+                        hi[:, t[0]], hi[:, t[1]]], axis=1)
+        if box.ndim == 3:
+            box = np.stack([box[:, 0].min(axis=1), box[:, 1].min(axis=1),
+                            box[:, 2].max(axis=1), box[:, 3].max(axis=1)],
+                           axis=1)
+        f = section.inside_rows(cut['shapes'], xs, ys, box).reshape(
+            sel.size, split.nsub, -1).mean(axis=2)
         tot = f.sum(axis=1)
         ok = tot > 0
         W[sel[ok]] = f[ok]/tot[ok, None]
