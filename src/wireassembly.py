@@ -1623,9 +1623,15 @@ class WireBondSolver:
                             b_ = it
                             while b_ != iu:
                                 a_ = pred[b_]
-                                q_ = min(a_, b_)*k + max(a_, b_)
-                                r = int(key[1][np.searchsorted(key[0],
-                                                               q_)])
+                                # Python ints: pred holds int32, and
+                                # an int32 key wraps once the box has
+                                # ~46k nodes (R6 patch feet, 2026-10-03)
+                                q_ = int(min(a_, b_))*k + int(max(a_, b_))
+                                ip = int(np.searchsorted(key[0], q_))
+                                if ip >= key[0].size or key[0][ip] != q_:
+                                    raise RuntimeError("local path: edge "
+                                                       "not in the box")
+                                r = int(key[1][ip])
                                 # unit current a -> b in _tree_path's
                                 # convention (_assert_kcl verifies the
                                 # cycles)
