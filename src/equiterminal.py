@@ -2022,11 +2022,46 @@ class EquiTerminalSolver:
             out.imag = self.chol(np.float32(np.imag(vp)))[:nl]
             return out
 
-        Gop = LinearOperator((nl, nl), matvec=gram, dtype=np.complex128)
-        Pop = LinearOperator((nl, nl), matvec=pre, dtype=np.complex128)
-        cl, flag = lgmres(Gop, d[:nl], x0=c0[:nl], M=Pop, rtol=tol,
-                          inner_m=10, outer_k=3, maxiter=maxiter)
+        # REAL ARITHMETIC when the right-hand side is real (2026-10-05):
+        # the Gram is real and d = Y^T ihat is the tree route's current,
+        # real for a real port current -- the complex solve doubled every
+        # Krylov vector for an identically zero imaginary half. On the
+        # IHP spiral's 0.25 um rung (120 M loops) the complex lgmres
+        # (10 + 3 x 2 vectors of 1.9 GB) ran the readout into the 56 GiB
+        # cap after a converged mesh solve. Large bases also take a
+        # shorter cycle; the tolerance here is loose (1e-4).
+        real = not np.any(np.imag(d))
+        big = nl > 20_000_000
+        inner_m, outer_k = (5, 2) if big else (10, 3)
+        if real:
+            dl = np.ascontiguousarray(np.real(d[:nl]))
+
+            def gram_r(x):
+                return YlT @ (Yl @ x)
+
+            def pre_r(v):
+                if not self.nu:
+                    return np.asarray(self.chol(np.float32(v)),
+                                      dtype=np.float64)
+                vp = np.zeros(n, dtype=np.float32)
+                vp[:nl] = v
+                return np.asarray(self.chol(vp)[:nl], dtype=np.float64)
+
+            Gop = LinearOperator((nl, nl), matvec=gram_r, dtype=np.float64)
+            Pop = LinearOperator((nl, nl), matvec=pre_r, dtype=np.float64)
+            cl, flag = lgmres(Gop, dl, x0=np.real(c0[:nl]), M=Pop,
+                              rtol=tol, inner_m=inner_m, outer_k=outer_k,
+                              maxiter=maxiter)
+            del dl
+            cl = cl.astype(np.complex128)
+        else:
+            Gop = LinearOperator((nl, nl), matvec=gram, dtype=np.complex128)
+            Pop = LinearOperator((nl, nl), matvec=pre, dtype=np.complex128)
+            cl, flag = lgmres(Gop, d[:nl], x0=c0[:nl], M=Pop, rtol=tol,
+                              inner_m=inner_m, outer_k=outer_k,
+                              maxiter=maxiter)
         c = np.concatenate([cl, d[nl:]])
+        del cl
         c0 = np.concatenate([c0[:nl], d[nl:]])
         full = LinearOperator((n, n), matvec=lambda x: spmv_c(self.YT, spmv_c(self.Y, x)),
                               dtype=np.complex128)
