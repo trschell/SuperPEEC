@@ -859,7 +859,22 @@ class EquiTerminalSolver:
     # -- topology ------------------------------------------------------
 
     def _build_augmented(self):
-        """Augmented incidence, mesh basis and its Cholesky."""
+        """Augmented incidence, mesh basis and its Cholesky (in named
+        stages for the status API: the equipotential path's setup peak
+        sits in here, 3.5 -> 9.7 GB on the IHP spiral's 0.5 um rung)."""
+        with _spstatus.stages() as st:
+            self._st = st
+            try:
+                self._build_augmented_body()
+            finally:
+                self._st = None
+
+    def _stage_mark(self, name):
+        st = getattr(self, '_st', None)
+        if st is not None:
+            st(name)
+
+    def _build_augmented_body(self):
         M, term = self.M, self.term
         nt, efg, nn = term.n, self.efg, self.nnode
         self.pnode = {+1: nn, -1: nn + 1}
@@ -873,6 +888,7 @@ class EquiTerminalSolver:
             rows += [k, k]
             cols += [tail, head]
             vals += [1.0, -1.0]
+        self._stage_mark('augmented incidence')
         Bt = sp.coo_matrix((vals, (rows, cols)),
                            shape=(nt, nn + 2)).tocsr()
         # B is dropped after the first assembly (it is Baug's first efg
@@ -929,6 +945,7 @@ class EquiTerminalSolver:
             elif self.verbose:
                 print("  basis auto: selected (plaquettes span, %d "
                       "filaments under budget)" % efg)
+        self._stage_mark('mesh basis')
         if self.basis == 'overcomplete':
             Y = mg.getmesh_full(M.adjmats(), np.size(M.e.struc),
                                 np.size(M.e.struc) + np.size(M.f.struc),
@@ -940,19 +957,31 @@ class EquiTerminalSolver:
         Y.data = np.float64(Y.data)
         self.nplaq = Y.shape[1]
         self.nholes = 0
+        self._stage_mark('hole cycles')
         if self.basis == 'overcomplete':
             holes = self._hole_cycles(Y)
             if holes is not None:
                 Y = sp.hstack([Y, holes], format='csc')
                 self.nholes = holes.shape[1]
         self.nportcyc = 0
+        self._stage_mark('port cycles')
         newc = self._port_cycles()
+        self._adj = None               # the BFS adjacency's last reader
+        # Y's rows extend over the terminal rows for FREE -- a CSC's row
+        # count is not in its arrays -- and the port cycles join in ONE
+        # column concatenation (2026-10-04). The vstack-to-CSR then
+        # hstack-to-CSC this replaces copied the whole basis twice: +2.7
+        # GB at the IHP spiral's 0.5 um rung, ~20 GB at 0.25 um. Indices
+        # are sorted as the conversions left them, so Y is unchanged.
+        Yc = Y.tocsc()
+        Y = sp.csc_matrix((Yc.data, Yc.indices, Yc.indptr),
+                          shape=(efg + nt, Yc.shape[1]))
+        del Yc
         if newc is not None:
-            Y = sp.hstack([sp.vstack([Y, sp.csr_matrix((nt, Y.shape[1]))],
-                                     format='csr'), newc], format='csc')
+            Y = sp.hstack([Y, newc.tocsc()], format='csc')
             self.nportcyc = newc.shape[1]
-        else:
-            Y = sp.vstack([Y, sp.csr_matrix((nt, Y.shape[1]))], format='csc')
+        if not Y.has_sorted_indices:
+            Y.sort_indices()
         if self.nu:
             # Each redistribution mode is a branch of ZERO incidence, so
             # it is a cycle all by itself: its basis column is a unit
@@ -964,6 +993,7 @@ class EquiTerminalSolver:
                            sp.vstack([sp.csr_matrix((efg + nt, self.nu)),
                                       sp.identity(self.nu, format='csr')],
                                      format='csr')], format='csc')
+        self._stage_mark('stack basis')
         self.Y = sp.csc_matrix(Y)
         # Y^T is a CSR VIEW of Y's own arrays (scipy transposes CSC to
         # CSR without a copy); the separate CSC copy it used to be was
@@ -1023,6 +1053,7 @@ class EquiTerminalSolver:
         # solve then answers a different question -- which is exactly how
         # this first failed, with L looking right to 3e-4 while R was 1%
         # off and the current split was unrecognisable.
+        self._stage_mark('divergence check')
         div = np.abs(self.Baug.T.dot(self.Y)).max()
         if div > 1e-9:
             raise RuntimeError("mesh basis is not divergence-free "
@@ -1031,6 +1062,7 @@ class EquiTerminalSolver:
         # always was): handed CSR, _GeoMGFactor takes its row-slice
         # branch, which measured 2x+ slower on the XNOR's assembly
         # (2026-09-08, 2376 s and counting against 1050-1210)
+        self._stage_mark('basis to float32')
         YT32 = self.YT.tocsc()
         YT32.data = np.float32(YT32.data)
         # ('supernodal', 'amd') was hard-coded here and is the WORST of
@@ -1056,6 +1088,7 @@ class EquiTerminalSolver:
                 # and go to _GeoMGFactor's exact Schur block.
                 import loopmg
                 from port_impedance import _GeoMGFactor
+                self._stage_mark('plaquette geometry')
                 nrm, bse = loopmg.plaquette_geometry(
                     csc_prefix(self.Y, efg, self.nplaq), self.fil_axis,
                     self.fil_cell, self.nplaq)
@@ -1084,6 +1117,7 @@ class EquiTerminalSolver:
                 nmac = YT32.shape[0] - self.nplaq - self.nu
                 mac = (None if os.environ.get('SPPEEC_GEO_POSITIONAL') == '1'
                        else np.arange(self.nplaq, self.nplaq + nmac))
+                self._stage_mark('GeoMG factor')
                 self.chol = _GeoMGFactor(
                     YT32, nrm, bse, self.nplaq, cycles=self.amg_cycles,
                     macro_idx=mac)
@@ -1117,6 +1151,7 @@ class EquiTerminalSolver:
         # +-1 bases store exactly in float32 (bit-unchanged products,
         # refused if any entry would round); the factors above already
         # consumed their own full-precision copies
+        self._stage_mark('shrink')
         from port_impedance import shrink_exact_f32
         for _mat in (self.Y, self.Baug):
             shrink_exact_f32(_mat)
@@ -1145,41 +1180,102 @@ class EquiTerminalSolver:
         r, c, v = B.row[order], B.col[order], B.data[order]
         tail = c[v > 0]
         head = c[v < 0]
-        adj = [[] for _ in range(self.nnode)]
-        for f in range(self.efg):
-            adj[tail[f]].append((head[f], f))
-            adj[head[f]].append((tail[f], f))
+        del B, order, r, c, v
         parent = -np.ones(self.nnode, dtype=np.int64)
         pedge = -np.ones(self.nnode, dtype=np.int64)
         depth = -np.ones(self.nnode, dtype=np.int64)
         comp = -np.ones(self.nnode, dtype=np.int64)
         ncomp = 0
-        for seed in range(self.nnode):
-            if depth[seed] >= 0:
-                continue
+        if os.environ.get('SPPEEC_TREE_DFS'):
+            # the old depth-first order, kept for its A/B (Python lists)
+            adj = [[] for _ in range(self.nnode)]
+            for f in range(self.efg):
+                adj[tail[f]].append((head[f], f))
+                adj[head[f]].append((tail[f], f))
+            for seed in range(self.nnode):
+                if depth[seed] >= 0:
+                    continue
+                depth[seed] = 0
+                comp[seed] = ncomp
+                stack = [seed]
+                while stack:
+                    u = stack.pop()
+                    for v_, f in adj[u]:
+                        if depth[v_] < 0:
+                            depth[v_] = depth[u] + 1
+                            parent[v_], pedge[v_] = u, f
+                            comp[v_] = ncomp
+                            stack.append(v_)
+                ncomp += 1
+            self.tail, self.head = tail, head
+            self.ncomp = ncomp
+            self._forest = (parent, pedge, depth, comp)
+            return self._forest
+        # BREADTH-first, not depth-first. A DFS forest is long and
+        # snaky, so its fundamental cycles are long, so the local
+        # 4-filament plaquettes in _hole_cycles cannot match them and
+        # the collapse stalls spuriously -- declaring generators that
+        # no hole asked for. The path length grows with refinement,
+        # which is exactly why that surplus grew 2 -> 53 going from
+        # 200 nm to 100 nm. BFS gives shortest-path trees and the
+        # shortest fundamental cycles, which is what a plaquette can
+        # actually explain. Set SPPEEC_TREE_DFS=1 to get the old
+        # order back for an A/B.
+        #
+        # LEVEL-SYNCHRONOUS and vectorised (2026-10-04): the per-node
+        # Python adjacency lists were 4.7 GB and 16 s on the IHP
+        # spiral's 0.5 um rung (~40 GB at 0.25 um), the setup's peak.
+        # The tree is the queue BFS's own: neighbours in filament
+        # order (as the lists were appended), each level walked in
+        # discovery order, a node taken by its FIRST claimant.
+        it = np.int32 if max(self.nnode, self.efg) < 2**31 else np.int64
+        node = np.concatenate([tail, head]).astype(it)
+        nbr = np.concatenate([head, tail]).astype(it)
+        fil = np.concatenate([np.arange(self.efg, dtype=it)]*2)
+        o = np.lexsort((fil, node))
+        node, nbr, fil = node[o], nbr[o], fil[o]
+        del o
+        ptr = np.zeros(self.nnode + 1, dtype=np.int64)
+        np.cumsum(np.bincount(node, minlength=self.nnode), out=ptr[1:])
+        del node
+        seed = 0
+        while True:
+            while seed < self.nnode and depth[seed] >= 0:
+                seed += 1
+            if seed >= self.nnode:
+                break
             depth[seed] = 0
             comp[seed] = ncomp
-            # BREADTH-first, not depth-first. A DFS forest is long and
-            # snaky, so its fundamental cycles are long, so the local
-            # 4-filament plaquettes in _hole_cycles cannot match them and
-            # the collapse stalls spuriously -- declaring generators that
-            # no hole asked for. The path length grows with refinement,
-            # which is exactly why that surplus grew 2 -> 53 going from
-            # 200 nm to 100 nm. BFS gives shortest-path trees and the
-            # shortest fundamental cycles, which is what a plaquette can
-            # actually explain. Set SPPEEC_TREE_DFS=1 to get the old
-            # order back for an A/B.
-            bfs = not os.environ.get('SPPEEC_TREE_DFS')
-            stack = deque([seed])
-            while stack:
-                u = stack.popleft() if bfs else stack.pop()
-                for v_, f in adj[u]:
-                    if depth[v_] < 0:
-                        depth[v_] = depth[u] + 1
-                        parent[v_], pedge[v_] = u, f
-                        comp[v_] = ncomp
-                        stack.append(v_)
+            front = np.array([seed], dtype=np.int64)
+            lev = 0
+            while front.size:
+                cnt = ptr[front + 1] - ptr[front]
+                tot = int(cnt.sum())
+                if tot == 0:
+                    break
+                # every (u, neighbour, filament) of the frontier, in
+                # frontier order then filament order
+                start = np.repeat(ptr[front], cnt)
+                off = np.arange(tot) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+                idx = start + off
+                vv = nbr[idx].astype(np.int64)
+                new_ = depth[vv] < 0
+                idx, vv = idx[new_], vv[new_]
+                uu = np.repeat(front, cnt)[new_]
+                # first claimant of each newly reached node
+                _, first = np.unique(vv, return_index=True)
+                first.sort()
+                vv, uu, idx = vv[first], uu[first], idx[first]
+                lev += 1
+                depth[vv] = lev
+                parent[vv] = uu
+                pedge[vv] = fil[idx]
+                comp[vv] = ncomp
+                front = vv
             ncomp += 1
+        # the adjacency, for _port_cycles' direct-filament lookups
+        # (dropped there once the port cycles exist)
+        self._adj = (ptr, nbr, fil)
         self.tail, self.head = tail, head
         self.ncomp = ncomp
         self._forest = (parent, pedge, depth, comp)
@@ -1319,6 +1415,17 @@ class EquiTerminalSolver:
         plaquettes already span (every simply-connected conductor).
         """
         from collections import deque
+        # b1 FIRST (2026-10-04): it is the exact deficit, from the Euler
+        # characteristic of the occupancy grid in seconds and no solver.
+        # At b1 = 0 the plaquettes provably span and the collapse below
+        # -- Python member lists for every plaquette, 58 s and a +4.8 GB
+        # transient on the IHP spiral's 0.5 um rung, the setup's peak --
+        # has nothing to find (anything it declared would be dependent).
+        target = self._betti1()
+        if target == 0:
+            if self.verbose:
+                print('  hole generators: b1 = 0, plaquettes span')
+            return None
         parent, pedge, depth, comp = self._spanning_tree()
         nontree = np.ones(self.efg, dtype=bool)
         te = pedge[pedge >= 0]
@@ -1418,7 +1525,6 @@ class EquiTerminalSolver:
                 fire(nxt)
             return not bool((nontree & ~mt).any())
 
-        target = self._betti1()
         if target is not None and len(gens) > target:
             surplus = len(gens) - target
             # Test the LAST-declared first: by then the collapse has
@@ -1487,10 +1593,45 @@ class EquiTerminalSolver:
         if term.n < 3:
             return None
         parent, pedge, depth, comp = self._spanning_tree()
+        adj = getattr(self, '_adj', None)
+
+        def direct(ca, cb):
+            """The lattice filament joining nodes ca and cb, signed
+            along ca -> cb (tail -> head positive), or None."""
+            if adj is None:
+                return None
+            ptr, nbr, fil = adj
+            lo, hi = int(ptr[ca]), int(ptr[ca + 1])
+            hit = np.flatnonzero(nbr[lo:hi] == cb)
+            if hit.size == 0:
+                return None
+            f = int(fil[lo + hit[0]])
+            return [(f, +1.0 if self.tail[f] == ca else -1.0)]
+
+        def serpentine(grp):
+            """The terminal's faces ordered so that consecutive ones are
+            lattice neighbours wherever the face set allows it: the two
+            axes the cells vary along, the second reversed on every
+            other line (2026-10-04). The cycles then close through ONE
+            filament each -- 3 nonzeros, as this docstring always
+            assumed -- instead of a spanning-tree path that can wander
+            far between two adjacent cells (+2.8 GB of row lists and
+            long dense macro columns on the IHP spiral's 0.5 um port)."""
+            cells = np.array([term.faces[a][0] for a in grp], dtype=np.int64)
+            vary = [ax for ax in range(3) if np.ptp(cells[:, ax]) > 0]
+            if len(vary) == 1:
+                return grp[np.argsort(cells[:, vary[0]], kind='stable')]
+            if len(vary) != 2:
+                return grp
+            c0, c1 = cells[:, vary[0]], cells[:, vary[1]]
+            r0 = np.searchsorted(np.unique(c0), c0)
+            serp = np.where(r0 % 2 == 0, c1, -c1)
+            return grp[np.lexsort((serp, c0))]
+
         rows, cols, vals = [], [], []
         k = 0
         for pol in (+1, -1):
-            grp = np.flatnonzero(term.pol == pol)
+            grp = serpentine(np.flatnonzero(term.pol == pol))
             gc = {int(comp[self.node_of_cell[term.faces[a][0]]])
                   for a in grp}
             if len(gc) > 1:
@@ -1514,7 +1655,10 @@ class EquiTerminalSolver:
                 rows.append(self.efg + a)
                 cols.append(k)
                 vals.append(sa)
-                for f, s in self._tree_path(ca, cb, parent, pedge, depth):
+                path = direct(ca, cb)
+                if path is None:
+                    path = self._tree_path(ca, cb, parent, pedge, depth)
+                for f, s in path:
                     rows.append(f)
                     cols.append(k)
                     vals.append(s)
@@ -1523,6 +1667,7 @@ class EquiTerminalSolver:
                 cols.append(k)
                 vals.append(sb)
                 k += 1
+        self._adj = None
         if k == 0:
             return None
         return sp.coo_matrix((vals, (rows, cols)),
