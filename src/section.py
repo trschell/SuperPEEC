@@ -27,9 +27,16 @@ half a diagonal inside -> whole, at least half a diagonal outside ->
 empty (the distance is exact inside a convex piece and a lower bound
 outside it, so both tests are safe); only the rest is sampled.
 """
+import os
+
 import numpy as np
 
 S = 64          # samples per cell axis on boundary cells (16 per bin at k=4)
+CLAIM_MIN = 1e-3   # a primitive claims a boundary cell from this fill up
+SLIVER = float(os.environ.get('SPPEEC_SLIVER', '0.05'))
+                   # floor on the fill along the cut axis (the record's
+                   # 'axial_floor', read by VoxelModel.impedance_scale;
+                   # 0 disables; the env is a study override)
 KS = 4          # sub-fill bins per cell axis (measured NOT the accuracy
                 # limiter: k = 8 left the Kelvin gate unchanged-to-worse)
 
@@ -360,7 +367,7 @@ def paint(m, prims, axis, ks=KS, s=S):
             ins = np.zeros((ci.size, s, s), dtype=bool)
             for q, (pieces, _, _, _) in enumerate(prims):
                 iq = _inside_cells(pieces, ci, cj, ox, oy, p1, p2)
-                claim[q, ci, cj] = iq.reshape(ci.size, -1).mean(axis=1) >= 1e-3
+                claim[q, ci, cj] = iq.reshape(ci.size, -1).mean(axis=1) >= CLAIM_MIN
                 ins |= iq
             insf = ins.reshape(ci.size, -1)
             f[c0:c0 + ci.size] = insf.mean(axis=1)
@@ -368,10 +375,10 @@ def paint(m, prims, axis, ks=KS, s=S):
                                     / cnt).reshape(ci.size, ks, ks)
             del ins, insf
         fill[bi, bj] = f
-        for r in np.flatnonzero(f >= 1e-3):
+        for r in np.flatnonzero(f >= CLAIM_MIN):
             bins[(int(bi[r]), int(bj[r]))] = sub[r]
         bpart = np.zeros((n1, n2), dtype=bool)
-        bpart[bi, bj] = (f >= 1e-3) & (f < 1.0)
+        bpart[bi, bj] = (f >= CLAIM_MIN) & (f < 1.0)
     else:
         bpart = np.zeros((n1, n2), dtype=bool)
     # whole cells share ONE read-only all-ones pattern (a fresh array per
@@ -452,4 +459,4 @@ def paint(m, prims, axis, ks=KS, s=S):
             G[fi, fj] = inside(shapes, xs, ys).mean(axis=1)
         faces[int(a)] = G
     return dict(kind='section', axis=int(axis), shapes=shapes,
-                k=int(ks), cells=cells, faces=faces)
+                k=int(ks), cells=cells, faces=faces, axial_floor=SLIVER)

@@ -1728,6 +1728,28 @@ def resolve(model, request, port_axis):
             except ValueError:
                 if explicit:
                     raise
+                # MIXED MATERIALS under 'auto' (2026-10-04): the modes
+                # carry ONE material response (Enrichment ->
+                # model.material_response), so the family stays off --
+                # but no longer silently where it would have engaged:
+                # on the IHP spiral's 1 um rung (two top metals + via
+                # arrays) the trace read R +9.8% at 10 GHz without it.
+                vals = model.sigma_values()
+                if vals.size:
+                    lmin = skin_depth(float(vals.max()), f_ref)
+                    dtc = (float(d3[int(fnorm)]) if film
+                           else max(float(d3[c]) for c in tr))
+                    if dtc > lmin:
+                        warnings.warn(
+                            "enrich='auto': %d conductivities -- the "
+                            "sub-cell skin modes support one material, so "
+                            "they are OFF; the cell (%.3g m) exceeds the "
+                            "shortest skin depth (%.3g m at %.3g Hz), so "
+                            "R there carries the unenriched error (a "
+                            "section cut reads HIGH). Refine the pitch "
+                            "below the skin depth." % (vals.size, dtc,
+                                                       lmin, f_ref),
+                            RuntimeWarning, stacklevel=2)
         if length is None:
             fam.remove('section')
         else:

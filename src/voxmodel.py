@@ -427,6 +427,23 @@ class VoxelModel:
         for a in range(3):
             if a != skip:
                 zs[..., a] = inv
+        floor = (float(self.cut.get('axial_floor', 0.0))
+                 if self.cut and self.cut['kind'] == 'section' else 0.0)
+        if floor > 0.0:
+            # AXIAL FLOOR (2026-10-04): along a section cut's invariance
+            # axis a sliver cell (a corner the boundary clips) is a
+            # column of filaments of conductance ~fill -- up to 1000x
+            # the bulk resistance, invisible to the impedance-blind loop
+            # preconditioner (229 vs 68 matvecs on the IHP spiral's 1 um
+            # rung). Those filaments carry no current a film trace
+            # needs: conserving their conductance exactly moved the
+            # spiral's Z by < 1e-7, while the IN-PLANE links of the same
+            # slivers are load-bearing (removing them failed the trace
+            # gate's 16-across DC ratio, 1.029 vs 1.005). So the floor
+            # bounds only the axial scale; faces, bins and the in-plane
+            # network are untouched.
+            a = int(self.cut['axis'])
+            zs[..., a] = np.where(f > 0.0, 1.0/np.maximum(f, floor), 1.0)
         return zs
 
     def sigma_along(self, axis):
