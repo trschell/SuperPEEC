@@ -1886,12 +1886,67 @@ class EquiTerminalSolver:
                         self.YT.dot(ihat)/current, tol=1e-4, rtol=rtol)
                 d = self.YT.dot(zi)
                 v = (np.dot(ihat, zi) - current*np.dot(self._gram_a, d))/current
+            if getattr(self, 'keep_probe', False):
+                # what probe_voltage() needs from this solve (opt-in: Z i
+                # and Y^T Z i are full-length vectors)
+                self._probe_state = dict(zi=zi, d=d, current=current)
         info = dict(matvecs=self.matvecs - n0, flag=flag, residual=resid,
                     time=time.perf_counter() - t0)
         if self.verbose:
             print("    %.4g Hz: %d matvecs, flag %s, resid %.2e, %.2f s"
                   % (freq, info['matvecs'], flag, resid, info['time']))
         return complex(v), i, info
+
+    def probe_voltage(self, p_cells, n_cells):
+        """Open-circuit voltage ``mean phi(p_cells) - mean phi(n_cells)``
+        from the LAST solve (2026-10-05), per unit port current.
+
+        The readout's work-conjugate identity is not specific to the
+        driven port: for ANY current pattern ``ihat2`` with
+        ``Baug^T ihat2 = s2`` (here +1/n_P at each p cell, -1/n_N at each
+        n cell) ``ihat2 . (Z i) = s2 . phi`` wherever the mesh equations
+        hold, and the same Gram correction takes it from O(|r|) to
+        O(|r| x gram defect). So a second, undriven lead pair -- a
+        transformer's other winding -- reads its open-circuit voltage
+        from the driven solve: Z21 = V2 / I1 with no extra mesh solve,
+        no shorting strap and no ring in the conductor. ``ihat2`` runs
+        along the spanning tree from every cell to one reference cell of
+        the n set; KCL is verified before use. Needs ``keep_probe = True``
+        set before ``solve``. ``p_cells``/``n_cells``: lattice cells
+        ``(i, j, k)`` of ONE conductor component."""
+        st = getattr(self, '_probe_state', None)
+        if st is None:
+            raise RuntimeError("probe_voltage needs keep_probe = True "
+                               "before solve()")
+        parent, pedge, depth, comp = self._spanning_tree()
+        P = [int(self.node_of_cell[tuple(c)]) for c in p_cells]
+        N = [int(self.node_of_cell[tuple(c)]) for c in n_cells]
+        if len({int(comp[u]) for u in P + N}) != 1:
+            raise ValueError("probe cells span several conductor components")
+        ref = N[0]
+        n = self.efg + self.term.n + self.nu
+        ihat2 = np.zeros(n)
+        for nodes, wgt in ((P, 1.0/len(P)), (N, -1.0/len(N))):
+            for u in nodes:
+                for f, sg in self._tree_path(u, ref, parent, pedge, depth):
+                    ihat2[f] += sg*wgt
+        s2 = np.zeros(self.nnode + 2)
+        np.add.at(s2, np.asarray(P), 1.0/len(P))
+        np.add.at(s2, np.asarray(N), -1.0/len(N))
+        t = self.Baug.T @ ihat2
+        if np.abs(t + s2).max() < np.abs(t - s2).max():
+            ihat2 = -ihat2              # the orientation convention
+            t = -t
+        err = np.abs(t - s2).max()
+        if err > 1e-9:
+            raise RuntimeError("probe pattern violates KCL (max %.3g)" % err)
+        key = (tuple(P), tuple(N))
+        cache = self.__dict__.setdefault('_probe_gram', {})
+        if key not in cache:
+            cache[key] = self._gram_solve(self.YT.dot(ihat2), tol=1e-4)
+        a2 = cache[key]
+        v = np.dot(ihat2, st['zi']) - np.dot(a2, st['d'])
+        return complex(v/st['current'])
 
     def _tree_particular(self, current, s):
         """Particular augmented current with ``Baug^T ihat == s``, O(N).
@@ -2031,8 +2086,12 @@ class EquiTerminalSolver:
         # cap after a converged mesh solve. Large bases also take a
         # shorter cycle; the tolerance here is loose (1e-4).
         real = not np.any(np.imag(d))
-        big = nl > 20_000_000
-        inner_m, outer_k = (5, 2) if big else (10, 3)
+        # the cycle shrinks with the basis: 10+3x2 vectors in memory on a
+        # small model, 5+2x2 above 2e7 loops, 3+1x2 above 1e8 (the 0.25
+        # um IHP transformer -- 123 M loops -- sat at the 56 GiB cap in
+        # this readout with (5, 2))
+        inner_m, outer_k = ((3, 1) if nl > 100_000_000 else
+                            (5, 2) if nl > 20_000_000 else (10, 3))
         if real:
             dl = np.ascontiguousarray(np.real(d[:nl]))
 

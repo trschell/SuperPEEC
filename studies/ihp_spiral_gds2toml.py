@@ -96,7 +96,18 @@ def convert(a):
             sys.exit("rectangle %s is not commensurate with %g um" % (r, p_um))
         return [int(round(x)) for x in v]
 
-    rects = side['rects_um']
+    # one or two windings (a spiral, or the interwound transformer of
+    # studies/ihp_transformer_gds.py): each a coil path (the trace), its
+    # 1 um-grid rectangles, its via fills and its lead-pair port
+    xfmr = side.get('kind') == 'transformer'
+    if xfmr:
+        wind = side['windings']
+    else:
+        wind = [dict(name='coil', coil_path_um=side['coil_path_um'],
+                     rects_um=side['rects_um'], via_fill=side['via_fill'],
+                     port=dict(P=side['ports']['P'], N=side['ports']['N'],
+                               face='-y'),
+                     short_um=None)]
     blocks, ncell = [], 0
 
     def rect_block(name, r, layer, sig):
@@ -108,65 +119,101 @@ def convert(a):
 
     traces = []
     occ2 = _raster(polys['TopMetal2'], origin, (p_um, p_um), (nx, ny))
+    tag = (lambda wd, base: base + '_' + wd['name']) if xfmr else \
+        (lambda wd, base: base)
     if a.coil == 'blocks':
-        # staircase: every TopMetal2 polygon (coil + its P lead, N lead)
-        # rasterised at cell centres, merged into boxes
+        # staircase: every TopMetal2 polygon (coils + their P leads, N
+        # leads) rasterised at cell centres, merged into boxes
         ncell += int(occ2.sum())*(zc['TopMetal2'][1] - zc['TopMetal2'][0])
         for (i0, j0, i1, j1) in _boxes(occ2):
             blocks.append(('TopMetal2', (i0, j0, zc['TopMetal2'][0]),
                            (i1, j1, zc['TopMetal2'][1]), SIGMA_TM2))
     else:
-        # the coil and its P lead as ONE section-cut trace (sub-cell
-        # fills, face rule, edge palette); the N lead is a block
-        path = np.asarray(side['coil_path_um'])
-        path_m = ((path - np.asarray(origin))*1e-6).tolist()
-        traces.append(dict(name='coil', path_m=path_m,
-                           width_m=side['coil_width_um']*1e-6,
-                           z_m=[Z_UM['TopMetal2'][0]*1e-6,
-                                Z_UM['TopMetal2'][1]*1e-6],
-                           sigma=SIGMA_TM2))
-        # occupied count: the coil's cells as the staircase sees them
-        # (the trace's own partial cells are within its rim)
+        # each coil and its P lead as ONE section-cut trace (sub-cell
+        # fills, face rule, edge palette); the N leads are blocks
         lead = np.zeros_like(occ2)
-        i0, j0, i1, j1 = cells(rects['lead_n'])
-        lead[i0:i1, j0:j1] = True
+        for wd in wind:
+            path = np.asarray(wd['coil_path_um'])
+            path_m = ((path - np.asarray(origin))*1e-6).tolist()
+            traces.append(dict(name=wd['name'], path_m=path_m,
+                               width_m=side['coil_width_um']*1e-6,
+                               z_m=[Z_UM['TopMetal2'][0]*1e-6,
+                                    Z_UM['TopMetal2'][1]*1e-6],
+                               sigma=SIGMA_TM2))
+            i0, j0, i1, j1 = cells(wd['rects_um']['lead_n'])
+            lead[i0:i1, j0:j1] = True
+        # occupied count: the coils' cells as the staircase sees them
+        # (the trace's own partial cells are within its rim)
         ncell += int((occ2 & ~lead).sum())*(zc['TopMetal2'][1]
                                             - zc['TopMetal2'][0])
-        rect_block('TopMetal2_lead_n', rects['lead_n'], 'TopMetal2',
+        for wd in wind:
+            rect_block(tag(wd, 'TopMetal2_lead_n'), wd['rects_um']['lead_n'],
+                       'TopMetal2', SIGMA_TM2)
+    for wd in wind:
+        rect_block(tag(wd, 'TopMetal1_underpass'), wd['rects_um']['underpass'],
+                   'TopMetal1', SIGMA_TM1)
+        for k, key in enumerate(('via_in', 'via_land')):
+            # the array as one block over its landing, sigma_W times the
+            # array's metal fraction of that landing (DC resistance kept)
+            rect_block(tag(wd, 'TopVia2_array%d' % k), wd['rects_um'][key],
+                       'TopVia2', SIGMA_W*wd['via_fill'][k])
+    if a.short:
+        # the open / short extraction's SHORT: a TopMetal2 bar across the
+        # named winding's lead-pair ends (that winding is not driven)
+        wd = wind[a.short - 1]
+        rect_block(tag(wd, 'TopMetal2_short'), wd['short_um'], 'TopMetal2',
                    SIGMA_TM2)
-    rect_block('TopMetal1_underpass', rects['underpass'], 'TopMetal1',
-               SIGMA_TM1)
-    for k, key in enumerate(('via_in', 'via_land')):
-        # the array as one block over its landing, sigma_W times the
-        # array's metal fraction of that landing (DC resistance kept)
-        rect_block('TopVia2_array%d' % k, rects[key], 'TopVia2',
-                   SIGMA_W*side['via_fill'][k])
 
-    def faces(x, y, w):
-        """The lead's end: the -y faces of the first row's cells lying
-        WHOLLY inside the lead (full cells: the equipotential terminal
-        on a section cut wants fill 1), through the metal thickness."""
-        j = int(round((y - origin[1])/p_um))
+    def faces(x, y, w, face):
+        """The lead's end: the faces of the end row's cells lying WHOLLY
+        inside the lead (full cells: the equipotential terminal on a
+        section cut wants fill 1), through the metal thickness. '-y': the
+        lead's FIRST row starts at y; '+y': its LAST row ends at y."""
+        jb = int(round((y - origin[1])/p_um))
+        j, out_ = (jb, jb - 1) if face == '-y' else (jb - 1, jb)
         xl = origin[0] + np.arange(nx)*p_um
         ii = np.flatnonzero((xl >= x - w/2 - 1e-9) & (xl + p_um <= x + w/2 + 1e-9))
-        if ii.size == 0 or not occ2[ii, j].all() or occ2[ii, j - 1].any():
+        if ii.size == 0 or not occ2[ii, j].all() or occ2[ii, out_].any():
             sys.exit("lead end at (%g, %g) um is not a clean row" % (x, y))
-        return [[int(i), j, k, "-y"] for i in ii
+        return [[int(i), j, k, face] for i in ii
                 for k in range(*zc['TopMetal2'])]
 
-    P, N = side['ports']['P'], side['ports']['N']
+    drive = wind[a.drive - 1]
+    if a.short and a.short == a.drive:
+        sys.exit("the driven winding cannot also be shorted")
+    P, N = drive['port']['P'], drive['port']['N']
     out = []
-    out.append("# IHP SG13G2 octagonal spiral inductor -- SuperPEEC model")
-    out.append("# generated by studies/ihp_spiral_gds2toml.py from %s "
-               "(coil as %s)" % (os.path.basename(a.gds), a.coil))
-    out.append("# (layout: studies/ihp_spiral_gds.py on the IHP gdsfactory "
-               "PDK, ihp-gdsfactory)")
-    out.append("#")
-    out.append("# %d turns, width %.1f um, space %.1f um, inner diameter "
-               "%.0f um, outer %.0f um flat to flat; coil centreline %.2f mm"
-               % (side['turns'], side['width_um'], side['space_um'],
-                  side['d_in_um'], side['outer_flat_to_flat_um'],
-                  side['length_um']/1e3))
+    if xfmr:
+        out.append("# IHP SG13G2 1:1 interwound octagonal transformer -- "
+                   "SuperPEEC model")
+        out.append("# generated by studies/ihp_spiral_gds2toml.py from %s "
+                   "(coils as %s)" % (os.path.basename(a.gds), a.coil))
+        out.append("# (layout: studies/ihp_transformer_gds.py on the IHP "
+                   "gdsfactory PDK, ihp-gdsfactory)")
+        out.append("#")
+        out.append("# %d turns per winding, width %.1f um, space %.1f um, "
+                   "inner diameter %.0f um, outer %.0f um flat to flat; "
+                   "%.2f mm per winding"
+                   % (side['turns_per_winding'], side['width_um'],
+                      side['space_um'], side['d_in_um'],
+                      side['outer_flat_to_flat_um'],
+                      side['winding_length_um']/1e3))
+        out.append("# DRIVEN: the %s (port P1 on its lead pair); the %s %s"
+                   % (drive['name'], wind[2 - a.drive]['name'],
+                      'is SHORTED across its lead ends' if a.short
+                      else 'is open'))
+    else:
+        out.append("# IHP SG13G2 octagonal spiral inductor -- SuperPEEC model")
+        out.append("# generated by studies/ihp_spiral_gds2toml.py from %s "
+                   "(coil as %s)" % (os.path.basename(a.gds), a.coil))
+        out.append("# (layout: studies/ihp_spiral_gds.py on the IHP gdsfactory "
+                   "PDK, ihp-gdsfactory)")
+        out.append("#")
+        out.append("# %d turns, width %.1f um, space %.1f um, inner diameter "
+                   "%.0f um, outer %.0f um flat to flat; coil centreline %.2f mm"
+                   % (side['turns'], side['width_um'], side['space_um'],
+                      side['d_in_um'], side['outer_flat_to_flat_um'],
+                      side['length_um']/1e3))
     out.append("# stack (PDK, um): TopMetal1 %.2f+%.1f, TopVia2 %.2f+%.1f, "
                "TopMetal2 %.2f+%.1f; modelled TM1 [0,2), TV2 [2,5) (2.8 -> "
                "3.0), TM2 [5,8)" % tuple(v for k in ('topmetal1', 'topvia2',
@@ -175,12 +222,16 @@ def convert(a):
     out.append("# sigma (nominal, S/m): TM2 %.2g, TM1 %.2g, W %.2g x array "
                "fill (%s); no substrate/oxide"
                % (SIGMA_TM2, SIGMA_TM1, SIGMA_W,
-                  ", ".join("%.3f" % f for f in side['via_fill'])))
+                  ", ".join("%.3f" % f for wd in wind[:1]
+                            for f in wd['via_fill'])))
     out.append("#")
     out.append("# ATTRIBUTION: layer numbers and the SG13G2 BEOL stack come from the")
     out.append("# IHP Open PDK through ihp-gdsfactory (Apache-2.0,")
-    out.append("# https://github.com/gdsfactory/IHP); the spiral itself is generated")
-    out.append("# by studies/ihp_spiral_gds.py (the PDK's inductor2/3 PCells are")
+    out.append("# https://github.com/gdsfactory/IHP); the %s itself is generated"
+               % ('transformer' if xfmr else 'spiral'))
+    out.append("# by %s (the PDK's inductor2/3 PCells are"
+               % ('studies/ihp_transformer_gds.py' if xfmr
+                  else 'studies/ihp_spiral_gds.py'))
     out.append("# 1-3 turn cells). No PDK file is copied here.")
     out.append("#")
     out.append("# WHAT THIS MODEL IS (and is not): the conductors in free space --")
@@ -190,6 +241,12 @@ def convert(a):
     out.append("# its Q loss above a few GHz; neither is represented here (no")
     out.append("# capacitance, no substrate). Use L and the conductor R; take Q and")
     out.append("# SRF from a substrate-aware solver.")
+    if xfmr:
+        out.append("# For the transformer the same holds for the INTERWINDING")
+        out.append("# capacitance (common-mode coupling, the windings' self-")
+        out.append("# resonance): L1, L2, M, k and the winding resistances are what")
+        out.append("# this model delivers. The 2-port is read with")
+        out.append("# studies/ihp_transformer_2port.py from the _p1 and _p2 files.")
     out.append("#")
     out.append("# pitch %.3g um cubic: lattice %d x %d x %d = %.1f M, "
                "staircase estimate ~%.2f M occupied cells, %d blocks, %d traces"
@@ -204,7 +261,7 @@ def convert(a):
     out.append("name  = \"P1\"")
     out.append("equipotential = true")
     for key, (x, y, w) in (('p_faces', P), ('n_faces', N)):
-        fs = faces(x, y, w)
+        fs = faces(x, y, w, drive['port']['face'])
         out.append("%s = [%s]" % (key, ",\n  ".join(
             "[%d, %d, %d, \"%s\"]" % tuple(f) for f in fs)))
     out.append("")
@@ -249,6 +306,11 @@ def main(argv=None):
     ap.add_argument('--method', default=None,
                     help='Krylov method, e.g. gmres_stream for the large '
                          'rungs (the basis parked on disk)')
+    ap.add_argument('--drive', type=int, choices=(1, 2), default=1,
+                    help='transformer: the winding carrying the port')
+    ap.add_argument('--short', type=int, choices=(1, 2), default=None,
+                    help='transformer: short this winding across its lead '
+                         'ends (the open / short 2-port extraction)')
     ap.add_argument('--coil', choices=('blocks', 'trace'), default='trace',
                     help='the coil as a [[trace]] (section cut, default) '
                          'or as a staircase of [[block]]s')
