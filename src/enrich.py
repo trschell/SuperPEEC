@@ -277,8 +277,18 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=100_000_000):
     dims = tuple(int(v) for v in model.dims)
     tables = PairTables() if tables is None else tables
     parts = []
-    for orient, kind in fams:
+    import section
+    # a multi-span cut (stacked traces, 2026-10-05) corrects each layer's
+    # filaments against that layer's own bins and shapes; the single-span
+    # record is its own one layer over every cell
+    lays = section.cut_layers(cut) if cut['kind'] == 'section' else [cut]
+    jobs = [(lay, o, kd) for lay in lays for o, kd in fams]
+    for lay, orient, kind in jobs:
         sel = np.flatnonzero(fil_axis == orient)
+        span = lay.get('span') if kind != 'slab' else None
+        if span is not None:
+            ca = np.asarray(fil_cell[sel, int(cut['axis'])])
+            sel = sel[(ca >= span[0]) & (ca < span[1])]
         if sel.size == 0:
             continue
         cells = np.asarray(fil_cell[sel], dtype=np.int64)
@@ -289,8 +299,7 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=100_000_000):
             # a filament's weights: its transverse cell's normalised
             # sub-fill bins (both end cells share them)
             W = np.full((cells.shape[0], k*k), 1.0/(k*k))
-            import section
-            pmap, pbins = section.partial_map(cut)
+            pmap, pbins = section.partial_map(lay)
             r = pmap[cells[:, t1], cells[:, t2]]
             partial = r >= 0
             b = pbins[r[partial]].reshape(-1, k*k)
@@ -300,7 +309,7 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=100_000_000):
             n = [k, k, k]
             n[int(cut['axis'])] = 1
             split = Split(orient, n, d)
-            W, partial = _plane_weights(cut, split, cells)
+            W, partial = _plane_weights(lay, split, cells)
         else:
             k = 8
             n = [1, 1, 1]
@@ -1799,6 +1808,20 @@ def resolve(model, request, port_axis):
         rc = ((12, 16) if film else (3, 4) if cyl
               else _auto_rc(model.struc(), port_axis))
     rc = (int(rc[0]), int(rc[1]))
+    if fam and cyl and 'layers' in model.cut:
+        # stacked traces (a multi-span section cut, 2026-10-05): the mode
+        # palettes read ONE sub-fill pattern per transverse cell
+        if explicit:
+            raise NotImplementedError(
+                "sub-cell modes on a multi-span section cut (traces over "
+                "each other at different heights): the palettes read one "
+                "sub-fill pattern per transverse cell")
+        warnings.warn(
+            "enrich='auto': the sub-cell skin modes would engage, but the "
+            "section cut has several spans (stacked traces) and the "
+            "palettes read one pattern per column -- they are OFF; refine "
+            "the pitch below the skin depth", RuntimeWarning, stacklevel=2)
+        return None
     if not fam:
         return None
     return EnrichConfig(families=fam, k=k, kk=kk, reach=reach, rc=rc,

@@ -287,6 +287,92 @@ def dogleg_doc(nw, freq, equipotential, pad_m=PAD_M, angle_deg=45.0):
         '[solve]', 'freq = [%r]' % freq, 'enrich = "off"'])
 
 
+def stacked_doc(nw, freq, equipotential, gap_cells=2, pad_m=PAD_M):
+    """The 45-degree dogleg TWICE, one run over the other in plan view:
+    traces at z [0, T) and [T + gap, 2T + gap), pads through the full
+    height joining them at both ends (the runs carry current in
+    parallel); ports on the pads' outer faces."""
+    h = W/nw
+    nt = int(round(T/h))
+    g = gap_cells*h
+    ntot = 2*nt + gap_cells
+    pad_cells = int(round(pad_m/h))
+    rx = round(LEN*float(np.cos(np.pi/4))/h)*h
+    ry = round(LEN*float(np.sin(np.pi/4))/h)*h
+    pad = pad_cells*h
+    margin = 2*h
+    x0, y0 = margin, margin + W/2
+    x1 = x0 + pad
+    x2, y2 = x1 + rx, y0 + ry
+    x3 = x2 + pad
+    n1 = int(np.ceil((x3 + margin)/h))
+    n2 = int(np.ceil((y2 + W/2 + margin)/h))
+    j0, j1 = int(round((y0 - W/2)/h)), int(round((y0 + W/2)/h))
+    j2, j3 = int(round((y2 - W/2)/h)), int(round((y2 + W/2)/h))
+    i0, i3 = int(round(x0/h)), int(round(x3/h)) - 1
+    pf = ', '.join('[%d, %d, %d, "-x"]' % (i0, j, k)
+                   for j in range(j0, j1) for k in range(ntot))
+    nf = ', '.join('[%d, %d, %d, "+x"]' % (i3, j, k)
+                   for j in range(j2, j3) for k in range(ntot))
+    H = 2*T + g
+    lines = ['[grid]', 'dims = [%d, %d, %d]' % (n1, n2, ntot),
+             'pitch = %r' % h,
+             '[[block]]', 'from_m = [%r, %r, 0.0]' % (x0, y0 - W/2),
+             'to_m = [%r, %r, %r]' % (x1, y0 + W/2, H), 'sigma = %r' % SIGMA]
+    for z0, z1 in ((0.0, T), (T + g, H)):
+        lines += ['[[trace]]',
+                  'path_m = [[%r, %r], [%r, %r]]' % (x1, y0, x2, y2),
+                  'width_m = %r' % W, 'z_m = [%r, %r]' % (z0, z1),
+                  'sigma = %r' % SIGMA]
+    lines += ['[[block]]', 'from_m = [%r, %r, 0.0]' % (x2, y2 - W/2),
+              'to_m = [%r, %r, %r]' % (x3, y2 + W/2, H), 'sigma = %r' % SIGMA,
+              '[port]', 'p_faces = [%s]' % pf, 'n_faces = [%s]' % nf,
+              'equipotential = %s' % ('true' if equipotential else 'false'),
+              '[solve]', 'freq = [%r]' % freq, 'enrich = "off"']
+    return '\n'.join(lines), (rx, ry, pad, g)
+
+
+def part_h():
+    """Stacked traces (2026-10-05): two runs over each other in plan view
+    at different heights -- a multi-span section cut. Each layer must
+    carry the single trace's own accuracy."""
+    print("H: stacked traces, one 45-degree run over another (multi-span cut)")
+    nw, f = 8, 1e3
+    for eq in (False, True):
+        doc, (rx, ry, pad, g) = stacked_doc(nw, f, eq)
+        pr = sppeec_input.loads(doc)
+        m = pr.model()
+        lays = m.cut.get('layers', []) if m.cut else []
+        if not eq:
+            check('two layers in the cut record', len(lays) == 2,
+                  'spans %s' % [l['span'] for l in lays])
+        run = float(np.hypot(rx, ry))
+        r_ref = (2*pad/(SIGMA*W*(2*T + g)) + run/(SIGMA*W*T)/2)
+        M = pr.tree(m)
+        Z = pr.sweeper(m, M).solve(f)
+        r = float(np.real(np.atleast_2d(Z)[0, 0]))
+        # the single trace's own ratio on the same path
+        prs = sppeec_input.loads(dogleg_doc(nw, f, eq))
+        ms = prs.model()
+        rs = float(np.real(np.atleast_2d(
+            prs.sweeper(ms, prs.tree(ms)).solve(f))[0, 0]))
+        rs_ref = (run + 2*PAD_M)/(SIGMA*W*T)
+        tag = 'equipotential' if eq else 'prescribed'
+        check('%s path: stacked DC R within 6%% of the aligned bound' % tag,
+              abs(r/r_ref - 1) < 0.06, 'R/R_ref = %.4f' % (r/r_ref))
+        check('%s path: each layer as accurate as the single trace (1%%)'
+              % tag, abs(r/r_ref - rs/rs_ref) < 0.01,
+              'stacked %.4f, single %.4f' % (r/r_ref, rs/rs_ref))
+    import enrich
+    pr = sppeec_input.loads(stacked_doc(4, 1e9, True)[0])
+    m = pr.model()
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        cfg = enrich.resolve(m, 'auto', 0)
+    check('sub-cell modes stay off on a multi-span cut', cfg is None)
+
+
 def part_d():
     print("D: the dogleg with pads, both port paths, 45 and 30 degrees")
     nw, f = 8, 1e3
@@ -414,7 +500,8 @@ def main():
         print("SKIP: [[trace]] not parsed yet (%s) -- docs/trace_plan.md "
               "phase 1" % msg)
         return 0
-    for part in (part_a, part_b, part_c, part_d, part_e, part_f, part_g):
+    for part in (part_a, part_b, part_c, part_d, part_e, part_f, part_g,
+                 part_h):
         part()
     print("%d checks failed" % len(FAIL))
     for f in FAIL:

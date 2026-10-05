@@ -930,18 +930,33 @@ class VoxelModel:
         l = [float(v) for v in np.asarray(M.e.l, dtype=float)]
         area = (l[1]*l[2], l[0]*l[2], l[0]*l[1])       # perp to x, y, z
         out = []
-        faces = (self.cut.get('faces') if self.cut is not None
-                 and self.cut['kind'] == 'section' else None)
+        import section
+        layers = section.cut_layers(self.cut)
+        cax = int(self.cut['axis']) if layers else None
         for leaf, axis in ((M.e, 1), (M.f, 0), (M.g, 2)):
             c = filament_cells(M, leaf)
             up = c.copy()
             up[:, axis] += 1
-            if faces is not None and axis in faces:
+            if layers and axis != cax:
                 # in-plane orientation through a section cut: the
                 # conductance of the face the filament crosses
-                # (section.paint), bulk density on both sides
-                t = [q for q in range(3) if q != self.cut['axis']]
-                g = np.maximum(faces[axis][c[:, t[0]], c[:, t[1]]], 1e-3)
+                # (section.paint), bulk density on both sides. A
+                # multi-span cut (stacked traces) applies each layer's
+                # face fills to the filaments of its own span only.
+                t = [q for q in range(3) if q != cax]
+                if len(layers) == 1 and layers[0].get('span') is None:
+                    g = np.maximum(
+                        layers[0]['faces'][axis][c[:, t[0]], c[:, t[1]]],
+                        1e-3)
+                else:
+                    g = np.ones(c.shape[0])
+                    for lay in layers:
+                        a0, a1 = lay['span']
+                        sel = np.flatnonzero((c[:, cax] >= a0)
+                                             & (c[:, cax] < a1))
+                        g[sel] = np.maximum(
+                            lay['faces'][axis][c[sel, t[0]], c[sel, t[1]]],
+                            1e-3)
                 zg = z
             else:
                 g = 1.0

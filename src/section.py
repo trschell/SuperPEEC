@@ -279,6 +279,9 @@ def partial_map(cut):
     that row order. Built once per cut and cached on it -- readers that
     asked ``cut['cells']`` one filament at a time (a Python loop over
     ~10^8 filaments at the IHP spiral's 0.25 um rung) gather instead."""
+    if 'layers' in cut:
+        raise ValueError("partial_map takes one LAYER of a multi-span "
+                         "cut (section.cut_layers)")
     got = cut.get('_pmap')
     if got is not None:
         return got
@@ -311,8 +314,69 @@ def lattice(s):
 
 # --- the painter --------------------------------------------------------
 
+def cut_layers(cut):
+    """The layers of a section cut record: a list of dicts with
+    ``span`` (the half-open cell span along the cut axis it governs;
+    absent -- ``layer.get('span') is None`` -- on the single-span
+    record, which governs every cell), ``shapes``,
+    ``cells``, ``faces`` and ``k``. A single-span cut is its own one
+    layer; a multi-span cut (traces over each other in plan view at
+    different heights, 2026-10-05) carries one per span."""
+    if cut is None or cut.get('kind') != 'section':
+        return []
+    if 'layers' in cut:
+        return cut['layers']
+    return [cut]           # its own layer: no 'span' key = every cell
+
+
 def paint(m, prims, axis, ks=KS, s=S):
     """Paint section primitives into ``m`` (sigma, fill, cut).
+
+    Primitives are painted in groups of equal span along ``axis``. One
+    group (every model before 2026-10-05) gives the single-span record,
+    unchanged. Several groups -- traces at different heights, which may
+    then overlap in plan view (a stacked transformer's windings) -- give
+    a MULTI-LAYER record: each group's own shapes, sub-fill bins and
+    face fills, valid over its own span only (``cut_layers``). Groups
+    whose spans intersect may not claim the same transverse cell: that
+    is a cell painted twice, not a stack."""
+    groups = {}
+    for pr in prims:
+        groups.setdefault((int(pr[2]), int(pr[3])), []).append(pr)
+    if len(groups) == 1:
+        rec, _ = _paint_layer(m, prims, axis, ks, s)
+        if rec is None:
+            if np.all(m.fill[np.asarray(m.struc()) > 0] >= 1.0):
+                m.fill = None
+        return rec
+    spans = sorted(groups)
+    for a in range(len(spans)):
+        for b in range(a + 1, len(spans)):
+            (a0, a1), (b0, b1) = spans[a], spans[b]
+            if a0 < b1 and b0 < a1:
+                raise ValueError(
+                    "section primitives with spans [%d, %d) and [%d, %d) "
+                    "overlap along the axis -- stacked traces need "
+                    "disjoint spans" % (a0, a1, b0, b1))
+    layers, claims = [], []
+    for sp in spans:
+        rec, claimed = _paint_layer(m, groups[sp], axis, ks, s)
+        claims.append((sp, claimed))
+        if rec is not None:
+            layers.append(dict(kind='section', axis=int(axis), span=sp,
+                               shapes=rec['shapes'], cells=rec['cells'],
+                               faces=rec['faces'], k=rec['k']))
+    if not layers:
+        if np.all(m.fill[np.asarray(m.struc()) > 0] >= 1.0):
+            m.fill = None
+        return None
+    return dict(kind='section', axis=int(axis), k=int(ks),
+                shapes=[p for pr in prims for p in pr[0]],
+                layers=layers, axial_floor=SLIVER)
+
+
+def _paint_layer(m, prims, axis, ks=KS, s=S):
+    """One span group of :func:`paint`: ``(record or None, claimed)``.
 
     ``prims`` is a list of ``(pieces, sigma, a0, a1)``: the convex
     pieces of one primitive, its conductivity and its half-open cell
@@ -424,9 +488,7 @@ def paint(m, prims, axis, ks=KS, s=S):
     cells = {key: b for key, b in bins.items() if claimed[key]}
     part = bpart & claimed
     if not part.any():
-        if np.all(m.fill[np.asarray(m.struc()) > 0] >= 1.0):
-            m.fill = None
-        return None
+        return None, claimed
     shapes = [p for pr in prims for p in pr[0]]
     # FACE fills for the in-plane orientations: the metal fraction of
     # the + face of each transverse cell along t1 and t2. A filament
@@ -458,5 +520,6 @@ def paint(m, prims, axis, ks=KS, s=S):
                 ys = np.broadcast_to(((fj + 1.0)*p2)[:, None], (fi.size, s))
             G[fi, fj] = inside(shapes, xs, ys).mean(axis=1)
         faces[int(a)] = G
-    return dict(kind='section', axis=int(axis), shapes=shapes,
-                k=int(ks), cells=cells, faces=faces, axial_floor=SLIVER)
+    return (dict(kind='section', axis=int(axis), shapes=shapes,
+                 k=int(ks), cells=cells, faces=faces, axial_floor=SLIVER),
+            claimed)
