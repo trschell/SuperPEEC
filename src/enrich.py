@@ -225,7 +225,7 @@ def slab_weights(fill, k):
     return None if tot <= 0.0 else w/tot
 
 
-def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
+def partial_dL(model, M, window=2, tables=None, max_pairs=100_000_000):
     """Sparse partial-cell inductance correction (subpixel stage B).
 
     Stage A folds a partial cell's RESISTANCE into its material law;
@@ -248,7 +248,12 @@ def partial_dL(model, M, window=2, tables=None, max_pairs=250_000_000):
     they are computed once per distinct triple and gathered; every pair
     with at least one partial end is emitted. ``max_pairs`` bounds the
     OUTPUT (~16 B per pair); over it the function warns and returns
-    ``None`` and the solve keeps stage A. An imposed skin profile in
+    ``None`` and the solve keeps stage A. 1e8 since 2026-10-04 (was
+    2.5e8): the IHP spiral's 0.25 um rung fell just under the old cap
+    and spent 1030 s and a 32.5 GB peak on a correction measured at
+    1.2e-4 of R on that spiral (trace program: ~1e-4 on traces), which
+    shrinks with the pitch -- it engages where the rim is a large share
+    of the cells, i.e. where it can matter. An imposed skin profile in
     ``w`` measured WORSE (the lattice already carries the between-cell
     phase; enrichment amplitudes are solved, never imposed).
 

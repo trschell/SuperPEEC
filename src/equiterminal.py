@@ -1062,39 +1062,68 @@ class EquiTerminalSolver:
         # always was): handed CSR, _GeoMGFactor takes its row-slice
         # branch, which measured 2x+ slower on the XNOR's assembly
         # (2026-09-08, 2376 s and counting against 1050-1210)
-        self._stage_mark('basis to float32')
-        YT32 = self.YT.tocsc()
-        YT32.data = np.float32(YT32.data)
-        # ('supernodal', 'amd') was hard-coded here and is the WORST of
-        # the four combinations measured on a 24k-voxel bar (45201
-        # loops): simplicial+metis costs 0.13 GB of factor against
-        # 0.21 GB and runs 4.2 s against 12.5 s -- 38% less memory and
-        # 3x faster. Same change as port_impedance.LpRSolver; see the
-        # table at that call site for the full matrix and the two
-        # caveats (the times are SINGLE CORE, and supernodal is the mode
-        # that can use threaded BLAS, so the TIME ranking may reverse --
-        # the MEMORY result is structural). Exposed rather than
-        # hard-coded so a caller can go back.
-        if self.basis == 'overcomplete':
-            # Y^T Y is singular here, so no Cholesky exists -- and none is
-            # wanted: the point of the over-complete basis is that AMG
-            # works on its Gram.
-            # The port cycles are LONG and break plain AMG (3.0x nnz,
-            # no convergence). Split them off and treat them exactly.
+        lean = (self.basis == 'overcomplete' and self.gram_solver == 'geo'
+                and self.nu == 0
+                and os.environ.get('SPPEEC_GEO_POSITIONAL') != '1')
+        if lean:
+            # LEAN GeoMG build (2026-10-04), the bond-wire path's: the
+            # factor gets the plaquette rows as a CSR VIEW of the basis
+            # (a CSC's column prefix IS the CSR of its transpose once
+            # the data is float32 -- exact, the entries are +-1) and
+            # the few macro rows on their own. The full float32 copy
+            # (YT32) made before the plaquette geometry, made AGAIN with
+            # a CSR transpose after the tile permutation, beside the
+            # float64 basis, ran the IHP spiral's 0.25 um setup into the
+            # 56 GiB cap (49.6 GB at the plaquette geometry, killed at
+            # the factor).
+            import loopmg
+            from port_impedance import _GeoMGFactor, shrink_exact_f32
+            from scipy.sparse import csr_matrix
+            self._stage_mark('plaquette geometry')
+            nrm, bse = loopmg.plaquette_geometry(
+                csc_prefix(self.Y, efg, self.nplaq), self.fil_axis,
+                self.fil_cell, self.nplaq)
+            if loopmg.tile_order_engaged():
+                perm = loopmg.tile_permutation(nrm, bse)
+                if perm is not None:
+                    self.Y = loopmg.csc_permute_prefix(self.Y, perm)
+                    nrm, bse = nrm[perm], bse[perm]
+                    del perm
+            self._stage_mark('basis to float32')
+            shrink_exact_f32(self.Y)
+            self.YT = self.Y.T
+            pl = int(self.Y.indptr[self.nplaq])
+            d32 = self.Y.data[:pl]
+            if d32.dtype != np.float32:
+                d32 = d32.astype(np.float32)
+            Yp = csr_matrix((d32, self.Y.indices[:pl],
+                             self.Y.indptr[:self.nplaq + 1]),
+                            shape=(self.nplaq, self.Y.shape[0]))
+            Yp.has_sorted_indices = bool(self.Y.has_sorted_indices)
+            Ym = self.Y[:, self.nplaq:].T.tocsr().astype(np.float32)
+            del d32
+            self._stage_mark('GeoMG factor')
+            self.chol = _GeoMGFactor(None, nrm, bse, self.nplaq,
+                                     cycles=self.amg_cycles,
+                                     parts=(Yp, Ym))
+            del Yp, Ym, nrm, bse
+            if self.verbose:
+                print("GeoMG precond apply: %s" % self.chol.gpu_state,
+                      flush=True)
+        else:
+            self._stage_mark('basis to float32')
+            YT32 = self.YT.tocsc()
+            YT32.data = np.float32(YT32.data)
+        if lean:
+            pass
+        elif self.basis == 'overcomplete':
             if self.gram_solver == 'geo':
-                # GEOMETRIC multigrid on the plaquette block. Only the
-                # first nplaq columns are lattice faces; hole cycles,
-                # port cycles and redistribution modes have no geometry
-                # and go to _GeoMGFactor's exact Schur block.
                 import loopmg
                 from port_impedance import _GeoMGFactor
                 self._stage_mark('plaquette geometry')
                 nrm, bse = loopmg.plaquette_geometry(
                     csc_prefix(self.Y, efg, self.nplaq), self.fil_axis,
                     self.fil_cell, self.nplaq)
-                # tile order on the OpenCL path (2026-09-27; see
-                # wireassembly): the plaquette columns in the stencil's
-                # slot order, so the device map is an occupancy mask
                 if loopmg.tile_order_engaged():
                     perm = loopmg.tile_permutation(nrm, bse)
                     if perm is not None:
@@ -1104,16 +1133,6 @@ class EquiTerminalSolver:
                         YT32.data = np.float32(YT32.data)
                         nrm, bse = nrm[perm], bse[perm]
                         del perm
-                # The basis runs [plaquettes | holes + port cycles |
-                # redistribution modes]. Only the middle group belongs
-                # in the exact Schur block: the modes are an identity
-                # block in the cycle basis whose rows _precond
-                # overwrites with mode_precond, and there are far too
-                # many of them on a thin film to densify. Name the
-                # macro set rather than let it be "everything past the
-                # plaquettes".
-                # SPPEEC_GEO_POSITIONAL=1 restores the old split for
-                # A/B (it cannot run at thin-film mode counts).
                 nmac = YT32.shape[0] - self.nplaq - self.nu
                 mac = (None if os.environ.get('SPPEEC_GEO_POSITIONAL') == '1'
                        else np.arange(self.nplaq, self.nplaq + nmac))
