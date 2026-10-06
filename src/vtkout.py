@@ -158,11 +158,30 @@ def scatter_leaf(M, leaf, values, lattice):
     return out
 
 
-def current_density(M, i, dims):
+def _fill_scale(J, fill):
+    """J over the cell's metal fraction where the cell is partial.
+
+    A filament's current is formed per full cell cross-section, but a
+    partial cell (a section cut's rim, an off-grid slab) carries it
+    through its METAL only: the density there is the cell's current
+    over (fill x area). Without this every 45-degree trace edge reads
+    as a dark rim of falsely low |J| in the exports (2026-10-06)."""
+    if fill is None:
+        return J
+    f = np.asarray(fill, dtype=np.float64)
+    part = (f > 0.0) & (f < 1.0)
+    if part.any():
+        J[part] /= np.maximum(f[part], 1e-3)[:, None]
+    return J
+
+
+def current_density(M, i, dims, fill=None):
     """Cell-centred complex current density from filament currents.
 
     ``i`` is the solver's ``e|f|g`` stacked current vector. Returns a
     complex array of shape ``dims + (3,)`` in A/m^2, x/y/z order.
+    ``fill`` (the model's fill record, or None) puts a partial cell's
+    current on its metal (:func:`_fill_scale`).
     """
     dims = tuple(int(d) for d in dims)
     nx, ny, nz = dims
@@ -187,10 +206,10 @@ def current_density(M, i, dims):
     az[:, :, 1:] += Ig
     az[:, :, :-1] += Ig
     J[..., 2] = 0.5*az/(dx*dy)
-    return J
+    return _fill_scale(J, fill)
 
 
-def current_density_slabs(M, i, dims, slab_z=None):
+def current_density_slabs(M, i, dims, slab_z=None, fill=None):
     """Yield ``(z0, z1, J)`` z-slab by z-slab: the cell-centred current
     density of :func:`current_density` for cells ``z0 <= z < z1``,
     shape ``(nx, ny, z1 - z0, 3)``, in O(one slab) memory.
@@ -267,6 +286,8 @@ def current_density_slabs(M, i, dims, slab_z=None):
         del Ig
         J[..., 2] = 0.5*az/(dx*dy)
         del az, ay, ax
+        if fill is not None:
+            J = _fill_scale(J, np.asarray(fill)[:, :, z0:z1])
         yield z0, z1, J
         del J
 
@@ -347,7 +368,8 @@ def export_currents_streaming(model, M, i, path, quicklook=4,
         for off, p in zip(offsets, payload):
             fh.seek(base + int(off))
             fh.write(np.uint64(p).tobytes())
-        for z0, z1, J in current_density_slabs(M, i, dims, slab_z):
+        for z0, z1, J in current_density_slabs(M, i, dims, slab_z,
+                                               fill=model.fill):
             s = z1 - z0
             mag = np.sqrt((np.abs(J)**2).sum(axis=-1))
             st = struc[:, :, z0:z1]
@@ -422,7 +444,7 @@ def export_currents(model, M, i, path, potentials=None, phases=0,
     Returns the list of files written.
     """
     dims = tuple(int(d) for d in np.asarray(model.dims, dtype=int))
-    J = current_density(M, i, dims)
+    J = current_density(M, i, dims, fill=model.fill)
     mag = np.sqrt((np.abs(J)**2).sum(axis=-1))
     struc = np.asarray(model.struc())
     cd = {'J_re': J.real, 'J_im': J.imag, 'J_mag': mag,
@@ -489,7 +511,8 @@ def _main(argv):
                             phases=int(os.environ.get('PHASES', '0')),
                             freq=freq)
     J = current_density(M, i, tuple(int(d) for d in np.asarray(m.dims,
-                                                              dtype=int)))
+                                                              dtype=int)),
+                        fill=m.fill)
     mag = np.sqrt((np.abs(J)**2).sum(axis=-1))
     print("|J|: max %.4g  mean-over-conductor %.4g A/m^2"
           % (mag.max(), mag[np.asarray(m.struc()) > 0].mean()))

@@ -239,7 +239,7 @@ def _faces_dense(struc, J):
     return out
 
 
-def _faces_streamed(struc, M, i, dims, slab_z=None):
+def _faces_streamed(struc, M, i, dims, slab_z=None, fill=None):
     """The same faces and amplitudes as :func:`_faces_dense`, in the
     same order, from the field streamed z-slab by z-slab
     (``vtkout.current_density_slabs``) -- O(one slab) of field where
@@ -255,7 +255,8 @@ def _faces_streamed(struc, M, i, dims, slab_z=None):
     S = np.asarray(struc) > 0
     nz = S.shape[2]
     acc = {(a, sg): ([], []) for a in range(3) for sg in (+1, -1)}
-    for z0, z1, J in vtkout.current_density_slabs(M, i, dims, slab_z):
+    for z0, z1, J in vtkout.current_density_slabs(M, i, dims, slab_z,
+                                                  fill=fill):
         h0, h1 = max(z0 - 1, 0), min(z1 + 1, nz)
         Sh = S[:, :, h0:h1]
         lo = z0 - h0                     # slab start inside the halo
@@ -333,10 +334,10 @@ def surface_meshes(model, M, i, cmap='inferno', vmin=None, vmax=None,
     struc = np.asarray(model.struc())
     if J is not None or os.environ.get('SPPEEC_GLB_DENSE') == '1':
         if J is None:
-            J = vtkout.current_density(M, i, dims)
+            J = vtkout.current_density(M, i, dims, fill=model.fill)
         faces = _faces_dense(struc, J)
     else:
-        faces = _faces_streamed(struc, M, i, dims)
+        faces = _faces_streamed(struc, M, i, dims, fill=model.fill)
 
     quads, norms, mags, cells_all = [], [], [], []
     for axis, sign, cells, mag in faces:
