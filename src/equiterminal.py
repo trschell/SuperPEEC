@@ -1449,115 +1449,104 @@ class EquiTerminalSolver:
         nontree = np.ones(self.efg, dtype=bool)
         te = pedge[pedge >= 0]
         nontree[te] = False
+        # VECTORISED COLLAPSE (2026-10-06). The tree-cotree matching is
+        # the same; its data structures are arrays: every plaquette's
+        # non-tree members as one fixed-width int32 table, filament ->
+        # plaquettes as a CSR, and the queue drained in WAVES -- every
+        # plaquette with exactly one free member matches it at once (a
+        # filament named by several is matched once, which is what the
+        # sequential queue does with the later ones: their count drops
+        # to 0). The per-plaquette Python lists were tens of GB at the
+        # IHP transformer's 0.25 um rung (123 M plaquettes): a shorted
+        # winding (b1 = 1) died at the 56 GiB cap here. The wave order
+        # differs from the deque's, so the declared generators may too
+        # -- equally valid, trimmed to b1 below as before.
         Yc = Y.tocsc()
         nplaq = Yc.shape[1]
-        indptr, indices = Yc.indptr, Yc.indices
-        matched = np.zeros(self.efg, dtype=bool)
-        members = []
-        edge_plaq = {}
-        free = np.zeros(nplaq, dtype=np.int64)
-        for j in range(nplaq):
-            mem = [int(f) for f in indices[indptr[j]:indptr[j+1]]
-                   if nontree[f]]
-            members.append(mem)
-            free[j] = len(mem)
-            for f in mem:
-                edge_plaq.setdefault(f, []).append(j)
-        # the pristine per-plaquette unmatched count, so the dedup pass
-        # below can replay the collapse without rebuilding `members`
-        # (which is the memory-heavy part of this routine)
-        free0 = free.copy()
-        # a plaquette's 4 filaments cannot all be tree edges (they
-        # would close a cycle in the tree), so free >= 1 initially
-        queue = deque(np.flatnonzero(free == 1).tolist())
+        cnt = np.diff(Yc.indptr)
+        width = int(cnt.max()) if nplaq else 0
+        mem = np.full((nplaq, max(width, 1)), -1, dtype=np.int32)
+        if nplaq and np.all(cnt == width):
+            mem[:] = Yc.indices.reshape(nplaq, width)
+        else:
+            rowpos = np.arange(Yc.indices.size) - np.repeat(Yc.indptr[:-1], cnt)
+            mem[np.repeat(np.arange(nplaq), cnt), rowpos] = Yc.indices
+        del Yc
+        mem[mem >= 0] = np.where(nontree[mem[mem >= 0]], mem[mem >= 0], -1)
+        free0 = (mem >= 0).sum(axis=1).astype(np.int8)
+        # filament -> plaquettes as a CSR, by scipy's C counting sort
+        # from two int32 arrays (an argsort route held three int64
+        # arrays over every entry: ~12 GB at the 0.25 um transformer)
+        livem = mem >= 0
+        fil = mem[livem]                               # int32, row-major
+        pid = np.repeat(np.arange(nplaq, dtype=np.int32),
+                        livem.sum(axis=1).astype(np.int64))
+        del livem
+        E = sp.coo_matrix((np.ones(fil.size, dtype=np.int8), (fil, pid)),
+                          shape=(self.efg, nplaq)).tocsr()
+        del fil, pid
+        ept = E.indptr.astype(np.int64)
+        eplq = E.indices
+        del E
+
+        def fire(fs, matched, free):
+            """Match filaments ``fs``; decrement their plaquettes; return
+            the plaquettes whose count has just reached one."""
+            matched[fs] = True
+            lo, hi = ept[fs], ept[fs + 1]
+            n = hi - lo
+            if n.sum() == 0:
+                return np.empty(0, dtype=np.int64)
+            pl = eplq[np.repeat(lo, n) + (np.arange(int(n.sum()))
+                                          - np.repeat(np.cumsum(n) - n, n))]
+            np.subtract.at(free, pl, 1)
+            pl = np.unique(pl)
+            return pl[free[pl] == 1]
+
+        def drain(front, matched, free):
+            while front.size:
+                front = front[free[front] == 1]
+                if front.size == 0:
+                    break
+                m = mem[front]
+                pick = m[(m >= 0) & ~matched[np.maximum(m, 0)]]
+                pick = np.unique(pick)
+                front = fire(pick, matched, free) if pick.size else pick
+
+        def collapse(declared=()):
+            """Declared filaments pre-matched, then the waves. Returns the
+            matched mask and the plaquette counts."""
+            matched = np.zeros(self.efg, dtype=bool)
+            free = free0.copy()
+            front = np.flatnonzero(free == 1)
+            if len(declared):
+                dec = np.unique(np.asarray(declared, dtype=np.int64))
+                front = np.union1d(front, fire(dec, matched, free))
+            drain(front, matched, free)
+            return matched, free
+
+        matched, free = collapse()
         gens = []
-
-        def drain():
-            while queue:
-                j = queue.popleft()
-                if free[j] != 1:
-                    continue
-                f = next(f for f in members[j] if not matched[f])
-                matched[f] = True
-                for j2 in edge_plaq[f]:
-                    free[j2] -= 1
-                    if free[j2] == 1:
-                        queue.append(j2)
-
-        # Collapse until dry, then break each stall by DECLARING one
-        # unmatched filament a generator and resuming -- one generator
-        # per stall keeps the count near the true homology deficit
-        # (dumping every leftover at once gave 235 generators for a
-        # 40-dimensional deficit on the 48-cell pdn test, and the long
-        # redundant columns degraded lgmres). Prefer the stalled
-        # filament of smallest tree-depth sum: its fundamental cycle
-        # is shortest.
-        drain()
-        loose = [int(f) for f in np.flatnonzero(nontree & ~matched)]
-        while loose:
-            f = min(loose, key=lambda f: depth[self.tail[f]]
-                    + depth[self.head[f]])
+        while True:
+            loose = np.flatnonzero(nontree & ~matched)
+            if loose.size == 0:
+                break
+            key = depth[self.tail[loose]] + depth[self.head[loose]]
+            f = int(loose[np.argmin(key)])
             gens.append(f)
-            matched[f] = True
-            for j2 in edge_plaq.get(f, ()):
-                free[j2] -= 1
-                if free[j2] == 1:
-                    queue.append(j2)
-            drain()
-            loose = [int(f) for f in np.flatnonzero(nontree & ~matched)]
+            drain(fire(np.array([f]), matched, free), matched, free)
         if not gens:
             return None
 
-        # DEDUP to the topological truth. The collapse above is a
-        # matching, so `gens` can overshoot -- and the overshoot grows
-        # with refinement, which is what degrades the macro Schur block
-        # (see _betti1). Drop a generator, replay the collapse, and keep
-        # the drop only if the collapse still completes: completion
-        # IMPLIES spanning by the induction above, so a kept drop can
-        # never cost correctness. b1 supplies the stopping criterion the
-        # greedy lacks; without it we would not know when to stop and
-        # would pay a replay per generator for nothing.
         def replay(declared):
             """Collapse with `declared` pre-matched; True if it completes."""
-            mt = np.zeros(self.efg, dtype=bool)
-            fr = free0.copy()
-            q = deque()
-
-            def fire(f):
-                mt[f] = True
-                for j2 in edge_plaq.get(f, ()):
-                    fr[j2] -= 1
-                    if fr[j2] == 1:
-                        q.append(j2)
-
-            for f in declared:
-                if not mt[f]:
-                    fire(f)
-            q.extend(np.flatnonzero(fr == 1).tolist())
-            while q:
-                j = q.popleft()
-                if fr[j] != 1:
-                    continue
-                nxt = next((f for f in members[j] if not mt[f]), None)
-                if nxt is None:
-                    continue
-                fire(nxt)
+            mt, _ = collapse(declared)
             return not bool((nontree & ~mt).any())
 
         if target is not None and len(gens) > target:
             surplus = len(gens) - target
-            # Test the LAST-declared first: by then the collapse has
-            # already covered the genuine holes, so late declarations
-            # are the likely passengers. One replay per generator is the
-            # natural budget -- there is nothing to learn from a second.
             kept = list(gens)
             dropped = 0
-            # Repeat to a FIXED POINT. The replay test is sufficient but
-            # not necessary, so a generator can fail while a passenger
-            # is still in the set and pass once that passenger is gone
-            # (measured: pass 1 caught 1 of the 2 surplus at 200 nm).
-            # Each pass strictly shrinks `kept` or ends the loop, so
-            # this terminates in at most `surplus` passes.
             while dropped < surplus:
                 before = dropped
                 for f in reversed(list(kept)):
@@ -1584,6 +1573,7 @@ class EquiTerminalSolver:
         elif self.verbose and target is not None:
             print('  hole generators: %d declared, b1 = %d (no surplus)'
                   % (len(gens), target))
+        del mem, eplq, ept
         rows, cols, vals = [], [], []
         for k, f in enumerate(gens):
             rows.append(int(f))
