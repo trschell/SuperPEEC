@@ -322,20 +322,22 @@ def phase2():
           'export fields' in seen and os.path.getsize(vti) > 0)
 
 
-# --------------------------- E. phase-3 LpPR fgmres + per-drive tasks
+# --------------------------- E. phase-3 LpPR Krylov + per-drive tasks
 def phase3():
-    """The LpPR path reports residual-based fgmres progress, and a
+    """The LpPR path reports residual-based Krylov progress (its task
+    is 'gcrot', the default since 2026-10-08, or 'fgmres'), and a
     multi-port solve shows one 'drive port j/n' task per column
     (coupled_plates: the 2x2 Z-matrix example)."""
     import sppeec_status as st
     import sppeec_input
     st.disable()
     seen = set()
-    fg = []                       # fgmres detail snapshots
+    fg = []                       # Krylov detail snapshots
+    krylov = ('gcrot', 'fgmres')
 
     def sink(d):
         seen.update(d['task']['stack'])
-        if d['task'].get('current') == 'fgmres' \
+        if d['task'].get('current') in krylov \
                 and d['task'].get('pct') is not None:
             fg.append((d['task']['pct'],
                        d['task']['detail'].get('residual')))
@@ -347,11 +349,11 @@ def phase3():
     Z, info = pr.sweeper(m, M).solve(1e8)
     st.finish('done')
     st.disable()
-    check('E: fgmres + per-drive tasks observed',
-          'fgmres' in seen
+    check('E: Krylov + per-drive tasks observed',
+          any(k in seen for k in krylov)
           and any(s.startswith('drive port') for s in seen),
           repr(sorted(seen)))
-    check('E: fgmres reports residual-based percent in (0, 100)',
+    check('E: Krylov reports residual-based percent in (0, 100)',
           any(0 < p < 100 and r is not None for p, r in fg),
           repr(fg[:3]))
     check('E: multi-port solve still lands',

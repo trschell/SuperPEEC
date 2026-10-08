@@ -2534,10 +2534,30 @@ class LpPRSolver:
     precond : {'diagschur', 'reluctance'}, optional
         diagschur (default) is the low-frequency solver -- the right
         regime for dielectric/PDN work far below resonance.
+    krylov : {'gcrot', 'fgmres'}, optional
+        The outer Krylov method. 'gcrot' (default since 2026-10-08):
+        scipy's GCROT(m, k) with a BOUNDED basis (``gcrot_mk``, about
+        2(m + k) vectors whatever the iteration count) under a
+        true-residual monitor (see :meth:`_gcrot`). Measured on the IHP
+        MOM capacitor at 44k cells, 10-300 GHz: the same matvec counts
+        as fgmres (349 vs 350 over the sweep) at 1.09 vs 1.79 GiB peak
+        with (80, 20) -- see gcrot_mk for why the default is longer.
+        'fgmres' is the pyamg flexible GMRES every earlier LpPR anchor
+        was taken with -- its two bases grow with the iteration count
+        (~2 * iterations * wholesize * 16 B), which is the first memory
+        wall of the larger capacitor rungs.
+    gcrot_mk : (int, int), optional
+        GCROT's inner cycle length m and the k vectors it carries
+        between cycles. (120, 40) measured on the capacitor's S2 rung
+        (154k cells) at 300 GHz, cold, 162 fgmres matvecs: (120, 40)
+        162 mv in 100 s vs fgmres 119 s; (60, 60) 242 mv; (80, 20) 302
+        mv -- short cycles lose to restarts on this spread spectrum,
+        so m + k must reach the typical count. Basis <= 2(m + k) = 320
+        vectors, flat; fgmres's grows to 2x the iteration count.
     """
 
     def __init__(self, model, M, precond='diagschur', wsolve='auto',
-                 **precopts):
+                 krylov='gcrot', gcrot_mk=(120, 40), **precopts):
         from systemmat import SystemMat as _SystemMat
         from scipy.sparse.linalg import LinearOperator as _LO
         if np.size(M.e.struc) == 0 or np.size(M.f.struc) == 0 \
@@ -2619,11 +2639,95 @@ class LpPRSolver:
         self._precond = precond
         self.P = _LO((self.S.wholesize, self.S.wholesize),
                      matvec=pv, dtype=np.complex128)
+        if krylov not in ('gcrot', 'fgmres'):
+            raise ValueError("krylov must be 'gcrot' or 'fgmres', got %r"
+                             % (krylov,))
+        self.krylov = krylov
+        self.gcrot_mk = (int(gcrot_mk[0]), int(gcrot_mk[1]))
+
+    def _gcrot(self, rhs, x0, tol, budget, task, callback, n0):
+        """GCROT(m, k) on the rescaled system under a TRUE-residual monitor.
+
+        The monitor runs at the start of every outer cycle (one matvec):
+        it keeps the best iterate by the true rescaled residual and
+        stops after two cycles that fail to halve it. That guard is not
+        optional. At low frequency the rescaled residual has a floor
+        (the constant-potential direction's singular value runs as
+        w C): fgmres's recurrence estimate drops below tol there and it
+        returns a good iterate at the floor, but GCROT recomputes the
+        true residual, finds it above tol and keeps cycling -- measured
+        on the MOM capacitor at 1 GHz: 508 matvecs and an iterate that
+        DRIFTED to a true residual of 1.5e-4 (ESR -0.44 ohm against
+        +0.24). With the guard it returns the floor iterate fgmres would
+        have. Recycling the (C, U) subspace across a sweep was measured
+        too and DIVERGES on this operator (the recycled vectors are
+        solution-sized against a ~1e4 ||b|| branch-row cancellation),
+        so the subspace is never carried between solves.
+
+        Returns ``(x, flag, rlist)``: flag 0 converged, -1 stopped on
+        stagnation (best iterate returned), > 0 budget exhausted;
+        ``rlist`` the true residual norms per outer cycle, rlist[0] the
+        initial one (the warm-start diagnostic, as with fgmres).
+        """
+        from scipy.sparse.linalg import gcrotmk
+        A, S = self.Kprime, self.S
+        m, k = self.gcrot_mk
+        nb = float(np.linalg.norm(rhs))
+        rlist, best = [], [None, np.inf]
+
+        class _Stagnated(Exception):
+            pass
+
+        def monitor(xk):
+            r = float(np.linalg.norm(rhs - A*xk)) if rlist or x0 is not None \
+                else nb                  # cold start: x = 0, r = b
+            rlist.append(r)
+            if r < best[1]:
+                best[0], best[1] = np.array(xk, copy=True), r
+            if task is not None and nb > 0 and tol > 0:
+                rrel = max(r/nb, 1e-300)
+                r0 = max(rlist[0]/nb, rrel)
+                span = np.log(max(r0/tol, 1.0 + 1e-15))
+                done = np.log(max(r0/rrel, 1.0))
+                task.set(pct=min(99.0, 100.0*done/span), residual=rrel,
+                         matvecs=int(S.numiters - n0))
+            if callback is not None:
+                callback(xk)
+            if len(rlist) >= 3 and min(rlist[-2:]) > 0.5*min(rlist[:-2]):
+                raise _Stagnated
+
+        Mop = self.P
+        if task is not None:
+            # gcrotmk calls back once per OUTER cycle only, so a live
+            # status would sit still for up to m steps: tick the matvec
+            # count from the preconditioner (the percent itself needs a
+            # residual and moves per cycle)
+            from scipy.sparse.linalg import LinearOperator as _LOp
+
+            def _pv(v, _p=self.P):
+                task.set(matvecs=int(S.numiters - n0))
+                return _p.matvec(v)
+            Mop = _LOp(self.P.shape, matvec=_pv, dtype=self.P.dtype)
+        try:
+            x, info = gcrotmk(A, rhs, x0=x0, rtol=tol, atol=0.0,
+                              maxiter=max(1, -(-int(budget)//m)), M=Mop,
+                              callback=monitor, m=m, k=k,
+                              truncate='smallest')
+            flag = int(info)
+        except _Stagnated:
+            x, flag = best[0], -1
+        else:
+            # converged: gcrotmk confirmed it on an explicit residual;
+            # exhausted: the last iterate may have drifted past the best
+            if flag != 0 and best[0] is not None and \
+                    float(np.linalg.norm(rhs - A*x)) > best[1]:
+                x = best[0]
+        return x, flag, rlist
 
     def solve(self, freq, port=0, current=1.0, tol=1e-10, restrt=300,
               maxiter=1, callback=None, verbose=False, x0=None,
               x0_freq=None, x0_mode='physical', weight='corner',
-              terminals=False, t_l=None):
+              terminals=False, t_l=None, krylov=None):
         """Solve at one frequency; returns ``(Z, x, info)``.
 
         ``Z`` is the port impedance V/I (physical sign). ``x`` is the
@@ -2699,6 +2803,10 @@ class LpPRSolver:
         ``x0_mode``: 'physical' (default) scales the node block by
         ``w0/w``; 'global' is the one-probe-matvec least-squares alpha
         kept for comparison; 'none' feeds ``x0`` unscaled.
+
+        ``krylov`` overrides the solver's Krylov method for this call
+        ('gcrot' or 'fgmres'); either way the matvec budget is
+        ``restrt * maxiter``.
         """
         from pyamg.krylov import fgmres as _fgmres
         m, M, S = self.model, self.M, self.S
@@ -2801,14 +2909,42 @@ class LpPRSolver:
                                  matvecs=int(S.numiters - n0))
                 if _user is not None:
                     _user(xk)
-        with _status.task('fgmres', rtol=tol) as _fg_task:
-            x, flag = _fgmres(self.Kprime, rhs, x0=guess, M=self.P,
-                              tol=tol, maxiter=maxiter, restrt=restrt,
-                              callback=cb, residuals=rlist)
+        krylov = self.krylov if krylov is None else krylov
+        resid = None
+        if krylov == 'gcrot':
+            # same matvec budget as fgmres's restrt * maxiter; the
+            # memory is bounded by gcrot_mk instead of growing with it
+            with _status.task('gcrot', rtol=tol) as _fg_task:
+                x, flag, rlist = self._gcrot(
+                    rhs, guess, tol, restrt*maxiter,
+                    _fg_task if _status.enabled() else None, callback, n0)
+                # the residual check below, taken INSIDE the task so the
+                # final percent reaches the status (a solve that ends
+                # within one cycle would otherwise never report one);
+                # reused as `resid`, so no extra matvec
+                resid = float(np.linalg.norm(rhs - self.Kprime*x)
+                              / np.linalg.norm(rhs))
+                if _status.enabled() and rlist and tol > 0:
+                    r0 = max(float(rlist[0])/float(np.linalg.norm(rhs)),
+                             resid)
+                    span = np.log(max(r0/tol, 1.0 + 1e-15))
+                    done = np.log(max(r0/max(resid, 1e-300), 1.0))
+                    _fg_task.set(pct=min(99.0, 100.0*done/span),
+                                 residual=resid,
+                                 matvecs=int(S.numiters - n0))
+        elif krylov == 'fgmres':
+            with _status.task('fgmres', rtol=tol) as _fg_task:
+                x, flag = _fgmres(self.Kprime, rhs, x0=guess, M=self.P,
+                                  tol=tol, maxiter=maxiter, restrt=restrt,
+                                  callback=cb, residuals=rlist)
+        else:
+            raise ValueError("krylov must be 'gcrot' or 'fgmres', got %r"
+                             % (krylov,))
         warm_r0 = (float(rlist[0]/np.linalg.norm(rhs))
                    if (guess is not None and rlist) else None)
-        resid = float(np.linalg.norm(rhs - self.Kprime*x)
-                      / np.linalg.norm(rhs))
+        if resid is None:
+            resid = float(np.linalg.norm(rhs - self.Kprime*x)
+                          / np.linalg.norm(rhs))
         # TRUE-residual postcheck on the UNRESCALED operator: the
         # rescaled residual is measured through W and a deficient W
         # can hide arbitrarily large true defects (that is exactly how
