@@ -423,6 +423,13 @@ class Tree:
                 # harmonics on the panel leaves
                 if hasattr(pleaf, 'ynmr'):
                     pleaf.ynmr = pleaf.ynmr/self.eps_r
+                    # The P2M reads this SAME table as conj(ynmr)/_m0
+                    # (one buffer for both operators since 2026-09-08),
+                    # so the prefactor it divides back out must carry
+                    # the medium too -- else the far field is divided
+                    # TWICE (measured: C(3.9)/C(1) = 4.28 on a 2-level
+                    # plate pair, and 35 -> 245 matvecs).
+                    pleaf._m0 = pleaf._m0/self.eps_r
         if circulant and numlevels == 1:
             # Circulant single level (the PyPEEC lesson): the whole-domain
             # panel potential operator is applied by FFT from the SAME gen

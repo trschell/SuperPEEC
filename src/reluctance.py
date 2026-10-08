@@ -398,6 +398,14 @@ def kernel_ccap_block_getter(M):
     pans = node_panel_geometry(M)
     ext = np.asarray(M.external)
     cache = {}
+    # A uniform medium divides every coefficient of potential; the Tree
+    # applies that at build to the operator's own carriers, but these
+    # blocks come straight from the free-space kernel, so they take the
+    # same division here. Without it W and C_cap describe vacuum while
+    # the operator describes the medium: answers stay right (W is any
+    # invertible rescale, and the true-residual postcheck guards), but
+    # the preconditioner's capacitive block is off by eps_r.
+    eps_r = float(getattr(M, 'eps_r', 1.0))
 
     def get(Wi, key=None):
         if key is not None and key in cache:
@@ -419,6 +427,8 @@ def kernel_ccap_block_getter(M):
         Wc = np.zeros((npn, nn))
         Wc[np.arange(npn), owner] = wts
         B = Wc.T.dot(Pp).dot(Wc)
+        if eps_r != 1.0:
+            B = B/eps_r
         if key is not None:
             cache[key] = B
         return B

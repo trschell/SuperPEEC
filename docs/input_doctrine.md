@@ -271,6 +271,18 @@ written today still means the same thing after the next refactor.
     cells; a slab port may touch a partial cell. Section and slab cuts
     do not combine in one model, and neither combines with `[[wire]]`.
 
+15. **The medium is `[background] epsilon`** (added 2026-10-08). One
+    relative permittivity for the homogeneous medium the whole model
+    sits in -- a chip's oxide, a potting compound. It divides every
+    coefficient of potential once at tree build, so it is exact for a
+    uniform medium and free: the medium needs no cells, only the metal
+    is discretised, and C scales with it exactly. It is charge
+    physics, so it resolves `formulation = "auto"` to LpPR and is an
+    error under LpR. It must be >= 1, leaves inductance alone (the
+    medium is non-magnetic), and does not compose with dielectric
+    blocks yet (a block's polarization law is written relative to
+    vacuum, not to the medium).
+
 ## What v1 deliberately leaves out
 
 * Wire capacitance — wires are chargeless inductors by decision

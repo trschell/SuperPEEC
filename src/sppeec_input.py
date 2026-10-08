@@ -83,6 +83,7 @@ _SCHEMA = {
     'solve': {'freq', 'rtol', 'current', 'foot_model', 'basis',
               'amg_cycles', 'method', 'gram_solver', 'formulation',
               'enrich', 'maxiter', 'schur_solver'},
+    'background': {'epsilon'},
 }
 
 _FACE = {'+x': (0, 1), '-x': (0, -1), '+y': (1, 1), '-y': (1, -1),
@@ -90,7 +91,7 @@ _FACE = {'+x': (0, 1), '-x': (0, -1), '+y': (1, 1), '-y': (1, -1),
 
 
 _TOP = {'grid', 'block', 'model', 'wire', 'port',
-        'cylinder', 'trace', 'solve'}
+        'cylinder', 'trace', 'solve', 'background'}
 
 
 def _reject_unknown(doc):
@@ -320,6 +321,25 @@ class Problem:
                 "dielectric (epsilon) and superconducting (lambda_l) "
                 "blocks cannot combine in one model -- "
                 "impedance_density does not compose them yet")
+        # [background] epsilon: the homogeneous medium the whole model
+        # sits in (a chip's oxide, a potting compound). It divides every
+        # coefficient of potential once at tree build -- exact for a
+        # uniform medium, and free: the medium needs no cells, only the
+        # metal is discretised. Charge physics, so it selects LpPR.
+        bg = doc.get('background', {})
+        if isinstance(bg, list):
+            raise ValueError("[background] is one table, not an array "
+                             "of tables")
+        self.eps_bg = float(bg.get('epsilon', 1.0))
+        if not self.eps_bg >= 1.0:
+            raise ValueError("background.epsilon must be >= 1 (a passive "
+                             "dielectric medium), got %r" % (self.eps_bg,))
+        has_bg = self.eps_bg != 1.0
+        if has_bg and has_eps:
+            raise ValueError(
+                "[background] epsilon and dielectric blocks do not "
+                "compose yet -- a block's polarization law is written "
+                "relative to vacuum, not to the background medium")
         form = str(solve.get('formulation', 'auto'))
         if form not in ('auto', 'LpR', 'LpPR'):
             raise ValueError("solve.formulation must be 'auto', 'LpR' "
@@ -328,8 +348,8 @@ class Problem:
             if self.equipotential:
                 form = 'LpR'         # solved-split terminal, inductive
             else:
-                form = 'LpPR' if (has_eps or has_sc or faces_port) \
-                    else 'LpR'
+                form = 'LpPR' if (has_eps or has_sc or faces_port
+                                  or has_bg) else 'LpR'
         if self.equipotential:
             if has_eps:
                 raise ValueError(
@@ -364,6 +384,11 @@ class Problem:
                 raise ValueError(
                     "dielectric blocks (epsilon) need formulation "
                     "LpPR -- the LpR path has no charge unknowns")
+            if has_bg:
+                raise ValueError(
+                    "[background] epsilon needs formulation LpPR -- the "
+                    "LpR path has no charge unknowns, so the medium "
+                    "would be silently ignored")
             if has_sc and not self.equipotential:
                 raise ValueError(
                     "superconducting blocks (lambda_l) need "
@@ -460,9 +485,14 @@ class Problem:
             # VoxelModel (VhrModel IS VoxelModel), which is what every
             # other caller in the tree already uses.
             import vhr as _vhr
-            return _vhr.read_vhr(self._doc['model']['vhr'])
+            mv = _vhr.read_vhr(self._doc['model']['vhr'])
+            mv.eps_bg = self.eps_bg
+            return mv
         g = self._doc['grid']
         m = voxmodel.VoxelModel(self.path)
+        # the medium is read at tree build (VoxelModel.build_tree passes
+        # it to the Tree, which divides every coefficient of potential)
+        m.eps_bg = self.eps_bg
         m.dims = tuple(int(v) for v in g['dims'])
         m.d = np.asarray(g['pitch'], dtype=float)
         if m.d.ndim == 0:

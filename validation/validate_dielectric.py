@@ -446,6 +446,75 @@ def part_h():
           % (il['true_residual'], il['matvecs'], is_['matvecs']))
 
 
+def part_i():
+    """BACKGROUND MEDIUM ON THE MULTILEVEL PATH, through the input
+    layer's ``[background] epsilon`` (2026-10-08). PART B checks the
+    ratio on single-level trees, which have no far field -- and the
+    far field was divided TWICE from 2026-09-08 (the P2M began reading
+    the L2P's harmonic table, which carries the medium) until this
+    part caught it: C(3.9)/C(1) = 4.28 and 35 -> 245 matvecs on a
+    40x40 plate pair. Gate: the ratio to solver precision on a lean
+    2-level tree, equal matvec counts, and the key's refusals."""
+    print("\nPART I -- background medium, multilevel, via [background]")
+    import sppeec_input
+    from port_impedance import LpPRSolver
+    freq = 1e8
+    w = 2*np.pi*freq
+    toml = """
+[grid]
+dims = [16, 16, 9]
+pitch = 1e-6
+%s
+[[block]]
+from = [0, 0, 0]
+to = [16, 16, 3]
+sigma = 3e7
+[[block]]
+from = [0, 0, 6]
+to = [16, 16, 9]
+sigma = 3e7
+[port]
+p_faces = [[8, 8, 8, "+z"]]
+n_faces = [[8, 8, 0, "-z"]]
+"""
+    res = {}
+    for eps in (1.0, 3.9):
+        pr = sppeec_input.loads(toml % (
+            "" if eps == 1.0 else "[background]\nepsilon = %g" % eps))
+        m = pr.model()
+        M = m.build_tree([4, 4, 3], 2, capacitive=True, fftnear=True,
+                         keep_n2n=False)
+        m.prepare(M, freq)
+        z, x, info = LpPRSolver(m, M).solve(freq)
+        res[eps] = (float(np.imag(1.0/z)/w), info, pr.formulation, M)
+    c1, i1, _, _ = res[1.0]
+    c4, i4, f4, M4 = res[3.9]
+    check("[background] selects LpPR, tree carries the medium",
+          f4 == 'LpPR' and M4.eps_r == 3.9 and M4.numlevels == 2,
+          "formulation %s, eps_r %g, %d levels"
+          % (f4, M4.eps_r, M4.numlevels))
+    check("C(3.9)/C(1) == 3.9 with a far field",
+          abs(c4/c1/3.9 - 1.0) < 1e-6, "ratio %.9f" % (c4/c1))
+    check("medium leaves the iteration count alone",
+          abs(i4['matvecs'] - i1['matvecs']) <= 2,
+          "%d vs %d matvecs" % (i4['matvecs'], i1['matvecs']))
+    for tag, extra in (
+            ("refuses LpR", "[solve]\nformulation = 'LpR'"),
+            ("refuses eps < 1", None),
+            ("refuses dielectric blocks", "[[block]]\nfrom = [0, 0, 3]\n"
+             "to = [16, 16, 6]\nepsilon = 4.2")):
+        text = toml % ("[background]\nepsilon = %s"
+                       % ("0.5" if extra is None else "3.9"))
+        if extra is not None:
+            text += extra + "\n"
+        try:
+            sppeec_input.loads(text)
+            ok = False
+        except ValueError:
+            ok = True
+        check(tag, ok)
+
+
 def main():
     print("dielectric phases 1+2")
     part_a()
@@ -456,6 +525,7 @@ def main():
     part_f()
     part_g()
     part_h()
+    part_i()
     print("\n%d checks failed" % len(fails))
     if fails:
         print("  " + ", ".join(fails))
