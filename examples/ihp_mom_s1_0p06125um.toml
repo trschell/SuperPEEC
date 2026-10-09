@@ -28,17 +28,17 @@
 # Lateral parallel-plate estimate, no fringe: 27.1 fF.
 # 327680 metal cells + 25344 via-bar cells = 353024 occupied.
 #
-# MEASURED (2026-10-08, sppeec df20028, defaults: diagschur + GCROT(120, 40),
-#   CPU, 62 GB host): 353024 occupied cells; wall 25:00 for the seven frequencies,
-#   peak RSS 7.1 GiB; Schur solve: amg (auto: 353024 nodes >= 50000); SA rho 0.49, k 10.
+# MEASURED (2026-10-09, sppeec de8ee96, defaults: diagschur + GCROT(120, 40),
+#   CPU, 62 GB host): 353024 occupied cells; wall 24:40 for the seven frequencies,
+#   peak RSS 6.1 GiB; Schur solve: amg (auto: 353024 nodes >= 50000); SA rho 0.49, k 10.
 #     f [GHz]   ESR [ohm]   Im Z [ohm]   C_eff [fF]      Q   matvecs
-#           1      0.2417   -3574.7400        44.52    14789     81
-#          10      0.2419    -357.3420        44.54     1477     70
-#          30      0.2434    -118.7570        44.67      488     76
-#          60      0.2482     -58.7776        45.13      237     83
-#         100      0.2586     -34.4138        46.25      133     91
-#         200      0.2979     -15.2200        52.28       51    108
-#         300      0.3459      -7.9530        66.71       23    121
+#           1      0.2417   -3574.7400        44.52    14789     84
+#          10      0.2419    -357.3420        44.54     1477     67
+#          30      0.2434    -118.7570        44.67      488     73
+#          60      0.2482     -58.7776        45.13      237     80
+#         100      0.2586     -34.4138        46.25      133     88
+#         200      0.2979     -15.2200        52.28       51    105
+#         300      0.3459      -7.9530        66.71       23    118
 #   series-RLC fit over the sweep: C 44.53 fF, ESL 2.10 pH, SRF 520 GHz
 #   (Im Z reproduced within 5.8e-04).
 #   pitch 0.1225 -> 0.06125 um (same geometry): C +1.35 %, ESL +0.56 %,
