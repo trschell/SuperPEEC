@@ -1,0 +1,552 @@
+# SPDX-License-Identifier: MIT
+# IHP SG13G2 MOM finger capacitor, 1 row x 8 inside fingers, 6.37 um fingers
+# (Metal2-Metal5, 8.085 x 8.085 um), at 0.06125 um pitch -- the LpPR capacitor ladder.
+#
+# GEOMETRY: the topology of the IHP gdsfactory PDK's cmom cell -- on every
+# metal from Metal2 to Metal5, two interdigitated combs (9 fingers hanging from the
+# PLUS bus, 8 standing on the MINUS bus), fingers 0.245 um wide at 0.245 um space,
+# buses 0.735 um tall, the buses of all layers tied by a row of 0.19 um vias
+# (0.22 um space) along each bus centre. Drawn at legal per-layer widths: the
+# PDK cell itself draws the global minimum width (0.14 um) on every layer,
+# below the Metal3-5 rule (Mn.a 0.20 / Mn.b 0.21 / Mn.e 0.24 to a wide bus).
+#
+# ATTRIBUTION: layer numbers, design rules and the SG13G2 BEOL stack come from
+# the IHP Open PDK through ihp-gdsfactory (Apache-2.0,
+# https://github.com/gdsfactory/IHP). No PDK file is copied here.
+#
+# Model: a floating capacitor in a uniform oxide (eps_r 3.9, the PDK's own
+# intermetal value; C scales with it exactly). No substrate and no ground: the
+# real cell couples ~a few % of C to the silicon below and loses Q there -- the
+# shielded 2-port is the next rung of realism. Metal sigma 2.5e+07 S/m and via
+# 1.8e+07 S/m are nominal (as the IHP spiral examples). Via layers are modelled
+# 0.49 um thick (real 0.54) at every pitch so the refinement rungs share one
+# geometry; each via row is a finger-width bar carrying the row's real
+# vertical resistance. Quasi-static (no retardation): valid while the
+# structure is under ~lambda/20 in the oxide -- here up to 939 GHz.
+#
+# Terminals: PLUS and MINUS on the Metal5 pins (bus centres, as the PDK cell).
+# Lateral parallel-plate estimate, no fringe: 27.1 fF.
+# 327680 metal cells + 25344 via-bar cells = 353024 occupied.
+#
+# MEASURED (2026-10-08, sppeec df20028, defaults: diagschur + GCROT(120, 40),
+#   CPU, 62 GB host): 353024 occupied cells; wall 25:00 for the seven frequencies,
+#   peak RSS 7.1 GiB; Schur solve: amg (auto: 353024 nodes >= 50000); SA rho 0.49, k 10.
+#     f [GHz]   ESR [ohm]   Im Z [ohm]   C_eff [fF]      Q   matvecs
+#           1      0.2417   -3574.7400        44.52    14789     81
+#          10      0.2419    -357.3420        44.54     1477     70
+#          30      0.2434    -118.7570        44.67      488     76
+#          60      0.2482     -58.7776        45.13      237     83
+#         100      0.2586     -34.4138        46.25      133     91
+#         200      0.2979     -15.2200        52.28       51    108
+#         300      0.3459      -7.9530        66.71       23    121
+#   series-RLC fit over the sweep: C 44.53 fF, ESL 2.10 pH, SRF 520 GHz
+#   (Im Z reproduced within 5.8e-04).
+#   pitch 0.1225 -> 0.06125 um (same geometry): C +1.35 %, ESL +0.56 %,
+#   ESR at 300 GHz +2.83 % (the skin depth, 0.18 um there, better resolved).
+
+[grid]
+dims  = [132, 132, 56]
+pitch = 6.125e-08
+
+[background]
+epsilon = 3.9
+
+[[block]]
+name  = "bus0_Metal2"
+from  = [0, 0, 0]
+to    = [132, 12, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "bus1_Metal2"
+from  = [0, 120, 0]
+to    = [132, 132, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a0_Metal2"
+from  = [0, 16, 0]
+to    = [4, 120, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a1_Metal2"
+from  = [16, 16, 0]
+to    = [20, 120, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a2_Metal2"
+from  = [32, 16, 0]
+to    = [36, 120, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a3_Metal2"
+from  = [48, 16, 0]
+to    = [52, 120, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a4_Metal2"
+from  = [64, 16, 0]
+to    = [68, 120, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a5_Metal2"
+from  = [80, 16, 0]
+to    = [84, 120, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a6_Metal2"
+from  = [96, 16, 0]
+to    = [100, 120, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a7_Metal2"
+from  = [112, 16, 0]
+to    = [116, 120, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a8_Metal2"
+from  = [128, 16, 0]
+to    = [132, 120, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b0_Metal2"
+from  = [8, 12, 0]
+to    = [12, 116, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b1_Metal2"
+from  = [24, 12, 0]
+to    = [28, 116, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b2_Metal2"
+from  = [40, 12, 0]
+to    = [44, 116, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b3_Metal2"
+from  = [56, 12, 0]
+to    = [60, 116, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b4_Metal2"
+from  = [72, 12, 0]
+to    = [76, 116, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b5_Metal2"
+from  = [88, 12, 0]
+to    = [92, 116, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b6_Metal2"
+from  = [104, 12, 0]
+to    = [108, 116, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b7_Metal2"
+from  = [120, 12, 0]
+to    = [124, 116, 8]
+sigma = 2.5e+07
+
+[[block]]
+name  = "bus0_Metal3"
+from  = [0, 0, 16]
+to    = [132, 12, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "bus1_Metal3"
+from  = [0, 120, 16]
+to    = [132, 132, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a0_Metal3"
+from  = [0, 16, 16]
+to    = [4, 120, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a1_Metal3"
+from  = [16, 16, 16]
+to    = [20, 120, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a2_Metal3"
+from  = [32, 16, 16]
+to    = [36, 120, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a3_Metal3"
+from  = [48, 16, 16]
+to    = [52, 120, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a4_Metal3"
+from  = [64, 16, 16]
+to    = [68, 120, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a5_Metal3"
+from  = [80, 16, 16]
+to    = [84, 120, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a6_Metal3"
+from  = [96, 16, 16]
+to    = [100, 120, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a7_Metal3"
+from  = [112, 16, 16]
+to    = [116, 120, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a8_Metal3"
+from  = [128, 16, 16]
+to    = [132, 120, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b0_Metal3"
+from  = [8, 12, 16]
+to    = [12, 116, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b1_Metal3"
+from  = [24, 12, 16]
+to    = [28, 116, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b2_Metal3"
+from  = [40, 12, 16]
+to    = [44, 116, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b3_Metal3"
+from  = [56, 12, 16]
+to    = [60, 116, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b4_Metal3"
+from  = [72, 12, 16]
+to    = [76, 116, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b5_Metal3"
+from  = [88, 12, 16]
+to    = [92, 116, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b6_Metal3"
+from  = [104, 12, 16]
+to    = [108, 116, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b7_Metal3"
+from  = [120, 12, 16]
+to    = [124, 116, 24]
+sigma = 2.5e+07
+
+[[block]]
+name  = "bus0_Metal4"
+from  = [0, 0, 32]
+to    = [132, 12, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "bus1_Metal4"
+from  = [0, 120, 32]
+to    = [132, 132, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a0_Metal4"
+from  = [0, 16, 32]
+to    = [4, 120, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a1_Metal4"
+from  = [16, 16, 32]
+to    = [20, 120, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a2_Metal4"
+from  = [32, 16, 32]
+to    = [36, 120, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a3_Metal4"
+from  = [48, 16, 32]
+to    = [52, 120, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a4_Metal4"
+from  = [64, 16, 32]
+to    = [68, 120, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a5_Metal4"
+from  = [80, 16, 32]
+to    = [84, 120, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a6_Metal4"
+from  = [96, 16, 32]
+to    = [100, 120, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a7_Metal4"
+from  = [112, 16, 32]
+to    = [116, 120, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a8_Metal4"
+from  = [128, 16, 32]
+to    = [132, 120, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b0_Metal4"
+from  = [8, 12, 32]
+to    = [12, 116, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b1_Metal4"
+from  = [24, 12, 32]
+to    = [28, 116, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b2_Metal4"
+from  = [40, 12, 32]
+to    = [44, 116, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b3_Metal4"
+from  = [56, 12, 32]
+to    = [60, 116, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b4_Metal4"
+from  = [72, 12, 32]
+to    = [76, 116, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b5_Metal4"
+from  = [88, 12, 32]
+to    = [92, 116, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b6_Metal4"
+from  = [104, 12, 32]
+to    = [108, 116, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b7_Metal4"
+from  = [120, 12, 32]
+to    = [124, 116, 40]
+sigma = 2.5e+07
+
+[[block]]
+name  = "bus0_Metal5"
+from  = [0, 0, 48]
+to    = [132, 12, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "bus1_Metal5"
+from  = [0, 120, 48]
+to    = [132, 132, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a0_Metal5"
+from  = [0, 16, 48]
+to    = [4, 120, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a1_Metal5"
+from  = [16, 16, 48]
+to    = [20, 120, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a2_Metal5"
+from  = [32, 16, 48]
+to    = [36, 120, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a3_Metal5"
+from  = [48, 16, 48]
+to    = [52, 120, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a4_Metal5"
+from  = [64, 16, 48]
+to    = [68, 120, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a5_Metal5"
+from  = [80, 16, 48]
+to    = [84, 120, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a6_Metal5"
+from  = [96, 16, 48]
+to    = [100, 120, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a7_Metal5"
+from  = [112, 16, 48]
+to    = [116, 120, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_a8_Metal5"
+from  = [128, 16, 48]
+to    = [132, 120, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b0_Metal5"
+from  = [8, 12, 48]
+to    = [12, 116, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b1_Metal5"
+from  = [24, 12, 48]
+to    = [28, 116, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b2_Metal5"
+from  = [40, 12, 48]
+to    = [44, 116, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b3_Metal5"
+from  = [56, 12, 48]
+to    = [60, 116, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b4_Metal5"
+from  = [72, 12, 48]
+to    = [76, 116, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b5_Metal5"
+from  = [88, 12, 48]
+to    = [92, 116, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b6_Metal5"
+from  = [104, 12, 48]
+to    = [108, 116, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "row0_b7_Metal5"
+from  = [120, 12, 48]
+to    = [124, 116, 56]
+sigma = 2.5e+07
+
+[[block]]
+name  = "Via2_bus0"
+from  = [0, 4, 8]
+to    = [132, 8, 16]
+sigma = 5.95341e+06
+
+[[block]]
+name  = "Via2_bus1"
+from  = [0, 124, 8]
+to    = [132, 128, 16]
+sigma = 5.95341e+06
+
+[[block]]
+name  = "Via3_bus0"
+from  = [0, 4, 24]
+to    = [132, 8, 32]
+sigma = 5.95341e+06
+
+[[block]]
+name  = "Via3_bus1"
+from  = [0, 124, 24]
+to    = [132, 128, 32]
+sigma = 5.95341e+06
+
+[[block]]
+name  = "Via4_bus0"
+from  = [0, 4, 40]
+to    = [132, 8, 48]
+sigma = 5.95341e+06
+
+[[block]]
+name  = "Via4_bus1"
+from  = [0, 124, 40]
+to    = [132, 128, 48]
+sigma = 5.95341e+06
+
+[port]
+name = "C"
+p_faces = [[60, 120, 55, "+z"], [60, 121, 55, "+z"], [60, 122, 55, "+z"], [60, 123, 55, "+z"], [60, 124, 55, "+z"], [60, 125, 55, "+z"], [60, 126, 55, "+z"], [60, 127, 55, "+z"], [60, 128, 55, "+z"], [60, 129, 55, "+z"], [60, 130, 55, "+z"], [60, 131, 55, "+z"], [61, 120, 55, "+z"], [61, 121, 55, "+z"], [61, 122, 55, "+z"], [61, 123, 55, "+z"], [61, 124, 55, "+z"], [61, 125, 55, "+z"], [61, 126, 55, "+z"], [61, 127, 55, "+z"], [61, 128, 55, "+z"], [61, 129, 55, "+z"], [61, 130, 55, "+z"], [61, 131, 55, "+z"], [62, 120, 55, "+z"], [62, 121, 55, "+z"], [62, 122, 55, "+z"], [62, 123, 55, "+z"], [62, 124, 55, "+z"], [62, 125, 55, "+z"], [62, 126, 55, "+z"], [62, 127, 55, "+z"], [62, 128, 55, "+z"], [62, 129, 55, "+z"], [62, 130, 55, "+z"], [62, 131, 55, "+z"], [63, 120, 55, "+z"], [63, 121, 55, "+z"], [63, 122, 55, "+z"], [63, 123, 55, "+z"], [63, 124, 55, "+z"], [63, 125, 55, "+z"], [63, 126, 55, "+z"], [63, 127, 55, "+z"], [63, 128, 55, "+z"], [63, 129, 55, "+z"], [63, 130, 55, "+z"], [63, 131, 55, "+z"], [64, 120, 55, "+z"], [64, 121, 55, "+z"], [64, 122, 55, "+z"], [64, 123, 55, "+z"], [64, 124, 55, "+z"], [64, 125, 55, "+z"], [64, 126, 55, "+z"], [64, 127, 55, "+z"], [64, 128, 55, "+z"], [64, 129, 55, "+z"], [64, 130, 55, "+z"], [64, 131, 55, "+z"], [65, 120, 55, "+z"], [65, 121, 55, "+z"], [65, 122, 55, "+z"], [65, 123, 55, "+z"], [65, 124, 55, "+z"], [65, 125, 55, "+z"], [65, 126, 55, "+z"], [65, 127, 55, "+z"], [65, 128, 55, "+z"], [65, 129, 55, "+z"], [65, 130, 55, "+z"], [65, 131, 55, "+z"], [66, 120, 55, "+z"], [66, 121, 55, "+z"], [66, 122, 55, "+z"], [66, 123, 55, "+z"], [66, 124, 55, "+z"], [66, 125, 55, "+z"], [66, 126, 55, "+z"], [66, 127, 55, "+z"], [66, 128, 55, "+z"], [66, 129, 55, "+z"], [66, 130, 55, "+z"], [66, 131, 55, "+z"], [67, 120, 55, "+z"], [67, 121, 55, "+z"], [67, 122, 55, "+z"], [67, 123, 55, "+z"], [67, 124, 55, "+z"], [67, 125, 55, "+z"], [67, 126, 55, "+z"], [67, 127, 55, "+z"], [67, 128, 55, "+z"], [67, 129, 55, "+z"], [67, 130, 55, "+z"], [67, 131, 55, "+z"], [68, 120, 55, "+z"], [68, 121, 55, "+z"], [68, 122, 55, "+z"], [68, 123, 55, "+z"], [68, 124, 55, "+z"], [68, 125, 55, "+z"], [68, 126, 55, "+z"], [68, 127, 55, "+z"], [68, 128, 55, "+z"], [68, 129, 55, "+z"], [68, 130, 55, "+z"], [68, 131, 55, "+z"], [69, 120, 55, "+z"], [69, 121, 55, "+z"], [69, 122, 55, "+z"], [69, 123, 55, "+z"], [69, 124, 55, "+z"], [69, 125, 55, "+z"], [69, 126, 55, "+z"], [69, 127, 55, "+z"], [69, 128, 55, "+z"], [69, 129, 55, "+z"], [69, 130, 55, "+z"], [69, 131, 55, "+z"], [70, 120, 55, "+z"], [70, 121, 55, "+z"], [70, 122, 55, "+z"], [70, 123, 55, "+z"], [70, 124, 55, "+z"], [70, 125, 55, "+z"], [70, 126, 55, "+z"], [70, 127, 55, "+z"], [70, 128, 55, "+z"], [70, 129, 55, "+z"], [70, 130, 55, "+z"], [70, 131, 55, "+z"], [71, 120, 55, "+z"], [71, 121, 55, "+z"], [71, 122, 55, "+z"], [71, 123, 55, "+z"], [71, 124, 55, "+z"], [71, 125, 55, "+z"], [71, 126, 55, "+z"], [71, 127, 55, "+z"], [71, 128, 55, "+z"], [71, 129, 55, "+z"], [71, 130, 55, "+z"], [71, 131, 55, "+z"]]
+n_faces = [[60, 0, 55, "+z"], [60, 1, 55, "+z"], [60, 2, 55, "+z"], [60, 3, 55, "+z"], [60, 4, 55, "+z"], [60, 5, 55, "+z"], [60, 6, 55, "+z"], [60, 7, 55, "+z"], [60, 8, 55, "+z"], [60, 9, 55, "+z"], [60, 10, 55, "+z"], [60, 11, 55, "+z"], [61, 0, 55, "+z"], [61, 1, 55, "+z"], [61, 2, 55, "+z"], [61, 3, 55, "+z"], [61, 4, 55, "+z"], [61, 5, 55, "+z"], [61, 6, 55, "+z"], [61, 7, 55, "+z"], [61, 8, 55, "+z"], [61, 9, 55, "+z"], [61, 10, 55, "+z"], [61, 11, 55, "+z"], [62, 0, 55, "+z"], [62, 1, 55, "+z"], [62, 2, 55, "+z"], [62, 3, 55, "+z"], [62, 4, 55, "+z"], [62, 5, 55, "+z"], [62, 6, 55, "+z"], [62, 7, 55, "+z"], [62, 8, 55, "+z"], [62, 9, 55, "+z"], [62, 10, 55, "+z"], [62, 11, 55, "+z"], [63, 0, 55, "+z"], [63, 1, 55, "+z"], [63, 2, 55, "+z"], [63, 3, 55, "+z"], [63, 4, 55, "+z"], [63, 5, 55, "+z"], [63, 6, 55, "+z"], [63, 7, 55, "+z"], [63, 8, 55, "+z"], [63, 9, 55, "+z"], [63, 10, 55, "+z"], [63, 11, 55, "+z"], [64, 0, 55, "+z"], [64, 1, 55, "+z"], [64, 2, 55, "+z"], [64, 3, 55, "+z"], [64, 4, 55, "+z"], [64, 5, 55, "+z"], [64, 6, 55, "+z"], [64, 7, 55, "+z"], [64, 8, 55, "+z"], [64, 9, 55, "+z"], [64, 10, 55, "+z"], [64, 11, 55, "+z"], [65, 0, 55, "+z"], [65, 1, 55, "+z"], [65, 2, 55, "+z"], [65, 3, 55, "+z"], [65, 4, 55, "+z"], [65, 5, 55, "+z"], [65, 6, 55, "+z"], [65, 7, 55, "+z"], [65, 8, 55, "+z"], [65, 9, 55, "+z"], [65, 10, 55, "+z"], [65, 11, 55, "+z"], [66, 0, 55, "+z"], [66, 1, 55, "+z"], [66, 2, 55, "+z"], [66, 3, 55, "+z"], [66, 4, 55, "+z"], [66, 5, 55, "+z"], [66, 6, 55, "+z"], [66, 7, 55, "+z"], [66, 8, 55, "+z"], [66, 9, 55, "+z"], [66, 10, 55, "+z"], [66, 11, 55, "+z"], [67, 0, 55, "+z"], [67, 1, 55, "+z"], [67, 2, 55, "+z"], [67, 3, 55, "+z"], [67, 4, 55, "+z"], [67, 5, 55, "+z"], [67, 6, 55, "+z"], [67, 7, 55, "+z"], [67, 8, 55, "+z"], [67, 9, 55, "+z"], [67, 10, 55, "+z"], [67, 11, 55, "+z"], [68, 0, 55, "+z"], [68, 1, 55, "+z"], [68, 2, 55, "+z"], [68, 3, 55, "+z"], [68, 4, 55, "+z"], [68, 5, 55, "+z"], [68, 6, 55, "+z"], [68, 7, 55, "+z"], [68, 8, 55, "+z"], [68, 9, 55, "+z"], [68, 10, 55, "+z"], [68, 11, 55, "+z"], [69, 0, 55, "+z"], [69, 1, 55, "+z"], [69, 2, 55, "+z"], [69, 3, 55, "+z"], [69, 4, 55, "+z"], [69, 5, 55, "+z"], [69, 6, 55, "+z"], [69, 7, 55, "+z"], [69, 8, 55, "+z"], [69, 9, 55, "+z"], [69, 10, 55, "+z"], [69, 11, 55, "+z"], [70, 0, 55, "+z"], [70, 1, 55, "+z"], [70, 2, 55, "+z"], [70, 3, 55, "+z"], [70, 4, 55, "+z"], [70, 5, 55, "+z"], [70, 6, 55, "+z"], [70, 7, 55, "+z"], [70, 8, 55, "+z"], [70, 9, 55, "+z"], [70, 10, 55, "+z"], [70, 11, 55, "+z"], [71, 0, 55, "+z"], [71, 1, 55, "+z"], [71, 2, 55, "+z"], [71, 3, 55, "+z"], [71, 4, 55, "+z"], [71, 5, 55, "+z"], [71, 6, 55, "+z"], [71, 7, 55, "+z"], [71, 8, 55, "+z"], [71, 9, 55, "+z"], [71, 10, 55, "+z"], [71, 11, 55, "+z"]]
+
+[solve]
+freq = [1e+09, 1e+10, 3e+10, 6e+10, 1e+11, 2e+11, 3e+11]
