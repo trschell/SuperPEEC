@@ -2648,10 +2648,32 @@ class LpPRSolver:
     def _gcrot(self, rhs, x0, tol, budget, task, callback, n0):
         """GCROT(m, k) on the rescaled system under a TRUE-residual monitor.
 
-        The monitor runs at the start of every outer cycle (one matvec):
-        it keeps the best iterate by the true rescaled residual and
-        stops after two cycles that fail to halve it. That guard is not
-        optional. At low frequency the rescaled residual has a floor
+        scipy's gcrotmk runs ONE outer cycle per call; the (C, U) pairs
+        are carried from call to call -- the same operator, so this is
+        GCROT itself, not recycling -- and each call starts from the
+        true residual of the iterate so far, which the monitor has just
+        computed (one matvec per cycle). Three things follow that a
+        single gcrotmk call cannot give:
+
+          * an EXACT budget. ``budget`` counts Krylov steps (one
+            preconditioner apply each), and the cycle that would cross
+            it is shortened to end on it. A single call caps only the
+            OUTER cycles, and while C fills each one runs m + k - len(C)
+            steps (160, 159, ... at (120, 40)): ceil(budget/m) cycles ran
+            484 matvecs on a 300 budget (MOM capacitor S3, 200 GHz).
+          * a residual replacement every cycle: the next cycle starts
+            from the true residual instead of gcrotmk's recursively
+            updated one, at no extra cost.
+          * ONE cycle's basis in memory. gcrotmk rebinds its V and Z
+            lists only after the NEXT cycle's Arnoldi returns, so a
+            multi-cycle call holds two cycles' bases (S3 at 200 GHz:
+            23.05 GiB max RSS, ~630 vectors where 2(m + k) = 320 was
+            promised); here each call's lists die with its frame. The
+            same point now converges in 942 matvecs at 12.78 GiB.
+
+        The monitor keeps the best iterate by the true rescaled residual
+        and stops after two cycles that fail to halve it. That guard is
+        not optional. At low frequency the rescaled residual has a floor
         (the constant-potential direction's singular value runs as
         w C): fgmres's recurrence estimate drops below tol there and it
         returns a good iterate at the floor, but GCROT recomputes the
@@ -2664,65 +2686,70 @@ class LpPRSolver:
         solution-sized against a ~1e4 ||b|| branch-row cancellation),
         so the subspace is never carried between solves.
 
-        Returns ``(x, flag, rlist)``: flag 0 converged, -1 stopped on
-        stagnation (best iterate returned), > 0 budget exhausted;
-        ``rlist`` the true residual norms per outer cycle, rlist[0] the
-        initial one (the warm-start diagnostic, as with fgmres).
+        Returns ``(x, flag, rlist, rx)``: flag 0 converged, -1 stopped
+        on stagnation (best iterate returned), > 0 budget exhausted
+        (best iterate returned; the number of cycles run); ``rlist``
+        the true residual norms per cycle, rlist[0] the initial one
+        (the warm-start diagnostic, as with fgmres); ``rx`` the true
+        residual norm of the returned ``x``.
         """
-        from scipy.sparse.linalg import gcrotmk
+        from scipy.sparse.linalg import gcrotmk, LinearOperator as _LOp
         A, S = self.Kprime, self.S
         m, k = self.gcrot_mk
         nb = float(np.linalg.norm(rhs))
-        rlist, best = [], [None, np.inf]
+        steps = [0]
 
-        class _Stagnated(Exception):
-            pass
-
-        def monitor(xk):
-            r = float(np.linalg.norm(rhs - A*xk)) if rlist or x0 is not None \
-                else nb                  # cold start: x = 0, r = b
-            rlist.append(r)
-            if r < best[1]:
-                best[0], best[1] = np.array(xk, copy=True), r
+        def _pv(v, _p=self.P):
+            # the step counter; also ticks the live status, which
+            # would otherwise sit still for a whole cycle
+            steps[0] += 1
+            if task is not None:
+                task.set(matvecs=int(S.numiters - n0))
+            return _p.matvec(v)
+        Mop = _LOp(self.P.shape, matvec=_pv, dtype=self.P.dtype)
+        if x0 is None:
+            x = np.zeros(rhs.shape, dtype=np.complex128)
+            r = np.array(rhs, dtype=np.complex128, copy=True)
+        else:
+            x = np.array(x0, dtype=np.complex128, copy=True)
+            r = rhs - A*x
+        CU, rlist = [], []
+        best, rbest, cycles = None, np.inf, 0
+        while True:
+            rn = float(np.linalg.norm(r))
+            rlist.append(rn)
+            if rn < rbest:
+                best, rbest = x.copy(), rn
             if task is not None and nb > 0 and tol > 0:
-                rrel = max(r/nb, 1e-300)
+                rrel = max(rn/nb, 1e-300)
                 r0 = max(rlist[0]/nb, rrel)
                 span = np.log(max(r0/tol, 1.0 + 1e-15))
                 done = np.log(max(r0/rrel, 1.0))
                 task.set(pct=min(99.0, 100.0*done/span), residual=rrel,
                          matvecs=int(S.numiters - n0))
             if callback is not None:
-                callback(xk)
+                callback(x)
+            if rn <= tol*nb:
+                return x, 0, rlist, rn
             if len(rlist) >= 3 and min(rlist[-2:]) > 0.5*min(rlist[:-2]):
-                raise _Stagnated
-
-        Mop = self.P
-        if task is not None:
-            # gcrotmk calls back once per OUTER cycle only, so a live
-            # status would sit still for up to m steps: tick the matvec
-            # count from the preconditioner (the percent itself needs a
-            # residual and moves per cycle)
-            from scipy.sparse.linalg import LinearOperator as _LOp
-
-            def _pv(v, _p=self.P):
-                task.set(matvecs=int(S.numiters - n0))
-                return _p.matvec(v)
-            Mop = _LOp(self.P.shape, matvec=_pv, dtype=self.P.dtype)
-        try:
-            x, info = gcrotmk(A, rhs, x0=x0, rtol=tol, atol=0.0,
-                              maxiter=max(1, -(-int(budget)//m)), M=Mop,
-                              callback=monitor, m=m, k=k,
-                              truncate='smallest')
-            flag = int(info)
-        except _Stagnated:
-            x, flag = best[0], -1
-        else:
-            # converged: gcrotmk confirmed it on an explicit residual;
-            # exhausted: the last iterate may have drifted past the best
-            if flag != 0 and best[0] is not None and \
-                    float(np.linalg.norm(rhs - A*x)) > best[1]:
-                x = best[0]
-        return x, flag, rlist
+                return best, -1, rlist, rbest
+            left = int(budget) - steps[0]
+            if left < 1:
+                return best, max(cycles, 1), rlist, rbest
+            # while C fills, a cycle runs m + (k - len(C)) steps
+            grow = max(k - len(CU), 0)
+            mc, kc = min(m, left - grow), k
+            if mc < 1:
+                mc, kc = 1, len(CU) + left - 1
+            d, _ = gcrotmk(A, r, rtol=0.0, atol=tol*nb, maxiter=1, M=Mop,
+                           m=mc, k=kc, CU=CU, truncate='smallest')
+            # gcrotmk appends (None, solution) for recycling into a NEW
+            # system; the next cycle is the same system, so drop it (it
+            # would cost a matvec to restore)
+            CU.pop()
+            x += d
+            r = rhs - A*x
+            cycles += 1
 
     def solve(self, freq, port=0, current=1.0, tol=1e-10, restrt=300,
               maxiter=1, callback=None, verbose=False, x0=None,
@@ -2805,8 +2832,9 @@ class LpPRSolver:
         kept for comparison; 'none' feeds ``x0`` unscaled.
 
         ``krylov`` overrides the solver's Krylov method for this call
-        ('gcrot' or 'fgmres'); either way the matvec budget is
-        ``restrt * maxiter``.
+        ('gcrot' or 'fgmres'); either way the budget is ``restrt *
+        maxiter`` Krylov steps (GCROT shortens the cycle that would
+        cross it; see :meth:`_gcrot`).
         """
         from pyamg.krylov import fgmres as _fgmres
         m, M, S = self.model, self.M, self.S
@@ -2912,18 +2940,18 @@ class LpPRSolver:
         krylov = self.krylov if krylov is None else krylov
         resid = None
         if krylov == 'gcrot':
-            # same matvec budget as fgmres's restrt * maxiter; the
-            # memory is bounded by gcrot_mk instead of growing with it
+            # the same budget as fgmres's restrt * maxiter Krylov
+            # steps; the memory is bounded by gcrot_mk instead of
+            # growing with it
             with _status.task('gcrot', rtol=tol) as _fg_task:
-                x, flag, rlist = self._gcrot(
+                x, flag, rlist, rx = self._gcrot(
                     rhs, guess, tol, restrt*maxiter,
                     _fg_task if _status.enabled() else None, callback, n0)
-                # the residual check below, taken INSIDE the task so the
-                # final percent reaches the status (a solve that ends
-                # within one cycle would otherwise never report one);
-                # reused as `resid`, so no extra matvec
-                resid = float(np.linalg.norm(rhs - self.Kprime*x)
-                              / np.linalg.norm(rhs))
+                # the monitor measured x's true residual already; the
+                # final percent is set INSIDE the task so it reaches the
+                # status (a solve that ends within one cycle would
+                # otherwise never report one)
+                resid = rx/float(np.linalg.norm(rhs))
                 if _status.enabled() and rlist and tol > 0:
                     r0 = max(float(rlist[0])/float(np.linalg.norm(rhs)),
                              resid)

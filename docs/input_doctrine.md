@@ -99,7 +99,9 @@ written today still means the same thing after the next refactor.
    comparisons pass `rtol = 1e-10` explicitly — the validators do —
    rather than the defaults carrying validation's burden. `maxiter`
    (outer Krylov cycles; the matvec budget is `maxiter × inner_m`,
-   solver default 30) exists for large runs that hit the cap — the
+   solver default 30, i.e. 10 × `maxiter` Krylov steps on every
+   path, the LpPR capacitor path included) exists for large runs
+   that hit the cap — the
    6.8M-cell RSFQ JTL rung stopped at 331 matvecs where the
    overcomplete N^0.66 iteration law wants ~560; a capped run resumes
    under `SPPEEC_CHECKPOINT`, but the cap itself must be settable.

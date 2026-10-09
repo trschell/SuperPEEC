@@ -422,7 +422,8 @@ class Problem:
         # GMRES with the basis streamed to disk: ~4 vectors in memory
         # whatever the iteration count -- the scalability option)
         self.method = str(solve.get('method', 'lgmres'))
-        # outer Krylov cycle cap (matvec budget = maxiter * inner_m);
+        # outer Krylov cycle cap (matvec budget = maxiter * inner_m,
+        # 10 x maxiter on every path, LpPR included since 2026-10-09);
         # None keeps each solver's own default (30). Exists for large
         # runs that hit the cap (2026-08-27: the 6.8M-cell RSFQ JTL
         # rung stopped at 331 matvecs / resid 6e-2 where the
@@ -1084,6 +1085,19 @@ def _maxiter_kw(prob):
     return {} if prob.maxiter is None else {'maxiter': prob.maxiter}
 
 
+def _lppr_budget_kw(prob):
+    """``[solve] maxiter`` on the LpPR path: the budget it sets on the
+    LpR paths, maxiter x inner_m = 10 x maxiter Krylov steps (so the
+    default 30 is LpPR's own 300), as restart cycles of at most 300
+    steps -- fgmres's restart length; GCROT uses only the product.
+    ``{}`` when the file sets none."""
+    if prob.maxiter is None:
+        return {}
+    budget = 10*prob.maxiter
+    cycles = -(-budget//300)
+    return {'restrt': -(-budget//cycles), 'maxiter': cycles}
+
+
 class _EquiSweep:
     """One EquiTerminalSolver across the sweep (its solve() reruns
     prepare/set_frequency per point, so setup is reused)."""
@@ -1170,7 +1184,7 @@ class _LpPRSweep:
                 Z, infos = self.S.impedance_matrix(
                     float(freq), current=self.prob.current,
                     tol=self.prob.rtol, keep_drive=0,
-                    verbose=self.verbose)
+                    verbose=self.verbose, **_lppr_budget_kw(self.prob))
             info = dict(
                 matvecs=sum(i['matvecs'] for i in infos),
                 flag=max(i['flag'] for i in infos),
@@ -1184,7 +1198,8 @@ class _LpPRSweep:
                                       current=self.prob.current,
                                       tol=self.prob.rtol, x0=self._x,
                                       x0_freq=self._f,
-                                      verbose=self.verbose)
+                                      verbose=self.verbose,
+                                      **_lppr_budget_kw(self.prob))
         self._x, self._f = x, float(freq)
         info['i_f'] = np.asarray(x[:self.S.S.efgsize])
         _status_result(freq, z, info)
