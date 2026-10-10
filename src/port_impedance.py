@@ -2751,8 +2751,16 @@ class LpPRSolver:
             r = rhs - A*x
             cycles += 1
 
+    # GCROT's default Krylov budget (steps). 300 until 2026-10-10 -- one
+    # fgmres cycle, sized by that method's memory, which grows with it.
+    # GCROT's does not (gcrot_mk bounds it), so the budget only caps time:
+    # at 300 the IHP MOM capacitor's S4 rung (2.35M cells) stopped its
+    # 30 GHz point (1.75x SRF) at a true residual of 2.8e-10 against
+    # tol 1e-10, and S3 needed 942 matvecs at 200 GHz (4.4x SRF).
+    GCROT_BUDGET = 1000
+
     def solve(self, freq, port=0, current=1.0, tol=1e-10, restrt=300,
-              maxiter=1, callback=None, verbose=False, x0=None,
+              maxiter=None, callback=None, verbose=False, x0=None,
               x0_freq=None, x0_mode='physical', weight='corner',
               terminals=False, t_l=None, krylov=None):
         """Solve at one frequency; returns ``(Z, x, info)``.
@@ -2834,7 +2842,9 @@ class LpPRSolver:
         ``krylov`` overrides the solver's Krylov method for this call
         ('gcrot' or 'fgmres'); either way the budget is ``restrt *
         maxiter`` Krylov steps (GCROT shortens the cycle that would
-        cross it; see :meth:`_gcrot`).
+        cross it; see :meth:`_gcrot`). ``maxiter=None`` (default) is
+        one cycle of ``restrt`` under fgmres and :attr:`GCROT_BUDGET`
+        steps under GCROT.
         """
         from pyamg.krylov import fgmres as _fgmres
         m, M, S = self.model, self.M, self.S
@@ -2941,11 +2951,13 @@ class LpPRSolver:
         resid = None
         if krylov == 'gcrot':
             # the same budget as fgmres's restrt * maxiter Krylov
-            # steps; the memory is bounded by gcrot_mk instead of
-            # growing with it
+            # steps when maxiter is given; the memory is bounded by
+            # gcrot_mk instead of growing with it
+            budget = self.GCROT_BUDGET if maxiter is None \
+                else restrt*maxiter
             with _status.task('gcrot', rtol=tol) as _fg_task:
                 x, flag, rlist, rx = self._gcrot(
-                    rhs, guess, tol, restrt*maxiter,
+                    rhs, guess, tol, budget,
                     _fg_task if _status.enabled() else None, callback, n0)
                 # the monitor measured x's true residual already; the
                 # final percent is set INSIDE the task so it reaches the
@@ -2963,7 +2975,8 @@ class LpPRSolver:
         elif krylov == 'fgmres':
             with _status.task('fgmres', rtol=tol) as _fg_task:
                 x, flag = _fgmres(self.Kprime, rhs, x0=guess, M=self.P,
-                                  tol=tol, maxiter=maxiter, restrt=restrt,
+                                  tol=tol, restrt=restrt,
+                                  maxiter=1 if maxiter is None else maxiter,
                                   callback=cb, residuals=rlist)
         else:
             raise ValueError("krylov must be 'gcrot' or 'fgmres', got %r"

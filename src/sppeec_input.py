@@ -424,7 +424,8 @@ class Problem:
         self.method = str(solve.get('method', 'lgmres'))
         # outer Krylov cycle cap (matvec budget = maxiter * inner_m,
         # 10 x maxiter on every path, LpPR included since 2026-10-09);
-        # None keeps each solver's own default (30). Exists for large
+        # None keeps each solver's own default (30; LpPR 1000 steps,
+        # i.e. 100, since its GCROT memory is budget-free). For large
         # runs that hit the cap (2026-08-27: the 6.8M-cell RSFQ JTL
         # rung stopped at 331 matvecs / resid 6e-2 where the
         # overcomplete N^0.66 law wants ~560) -- with SPPEEC_CHECKPOINT
@@ -1087,10 +1088,11 @@ def _maxiter_kw(prob):
 
 def _lppr_budget_kw(prob):
     """``[solve] maxiter`` on the LpPR path: the budget it sets on the
-    LpR paths, maxiter x inner_m = 10 x maxiter Krylov steps (so the
-    default 30 is LpPR's own 300), as restart cycles of at most 300
-    steps -- fgmres's restart length; GCROT uses only the product.
-    ``{}`` when the file sets none."""
+    LpR paths, maxiter x inner_m = 10 x maxiter Krylov steps, as
+    restart cycles of at most 300 steps -- fgmres's restart length;
+    GCROT uses only the product. ``{}`` when the file sets none, which
+    leaves LpPRSolver's own default: GCROT_BUDGET = 1000 steps (as
+    maxiter = 100), since GCROT's memory does not grow with it."""
     if prob.maxiter is None:
         return {}
     budget = 10*prob.maxiter
