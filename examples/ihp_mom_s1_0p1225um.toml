@@ -28,19 +28,20 @@
 # Lateral parallel-plate estimate, no fringe: 27.1 fF.
 # 40960 metal cells + 3168 via-bar cells = 44128 occupied.
 #
-# MEASURED (2026-10-09, sppeec de8ee96, defaults: diagschur + GCROT(120, 40),
-#   CPU, 62 GB host): 44128 occupied cells; wall 1:11 for the seven frequencies,
-#   peak RSS 1.2 GiB; Schur solve: splu (auto: 44128 nodes < 50000).
+# MEASURED (2026-10-10, sppeec 2c7b6be, defaults: rtol 1e-4, diagschur +
+#   GCROT(120, 40), CPU, 62 GB host): 44128 occupied cells; wall 0:29 for the
+#   seven frequencies, peak RSS 0.9 GiB; Schur solve: splu (auto: 44128 nodes < 50000).
 #     f [GHz]   ESR [ohm]   Im Z [ohm]   C_eff [fF]      Q   matvecs
-#           1      0.2406   -3622.8800        43.93    15061     57
-#          10      0.2407    -362.1560        43.95     1504     40
-#          30      0.2421    -120.3650        44.08      497     45
-#          60      0.2465     -59.5853        44.52      242     51
-#         100      0.2560     -34.9040        45.60      136     55
-#         200      0.2921     -15.4769        51.42       53     66
-#         300      0.3364      -8.1354        65.21       24     75
+#           1      0.2406   -3622.8900        43.93    15061     25
+#          10      0.2406    -362.1560        43.95     1505      9
+#          30      0.2421    -120.3650        44.08      497     12
+#          60      0.2465     -59.5853        44.52      242     16
+#         100      0.2560     -34.9040        45.60      136     19
+#         200      0.2921     -15.4769        51.42       53     25
+#         300      0.3364      -8.1354        65.21       24     31
 #   series-RLC fit over the sweep: C 43.94 fF, ESL 2.09 pH, SRF 525 GHz
 #   (Im Z reproduced within 5.0e-04).
+#   rtol 1e-10 (389 matvecs, 2.8x) moves Z by <= 2.8e-06 and ESR by <= 0.05 %.
 #   pitch 0.1225 -> 0.06125 um (same geometry): C +1.35 %, ESL +0.56 %,
 #   ESR at 300 GHz +2.83 % (the skin depth, 0.18 um there, better resolved).
 
