@@ -51,6 +51,13 @@ def doc(df='', extra=''):
     return PLATES.replace('{DF}', df).replace('{EXTRA}', extra)
 
 
+def pinned(prob):
+    """Oracle-grade rigor for an LpPR solve: the [solve] default is the
+    engineering 1e-4 (doctrine 6b), these checks need 1e-10."""
+    prob.rtol = 1e-10
+    return prob
+
+
 def expect_error(name, text, needle):
     """Parse AND build -- doctrine errors fire at either stage."""
     import sppeec_input
@@ -66,8 +73,8 @@ def main():
 
     # -- schema contract ---------------------------------------------
     prob = sppeec_input.loads(doc())
-    check("epsilon block resolves formulation auto -> LpPR",
-          prob.formulation == 'LpPR' and prob.rtol == 1e-10,
+    check("epsilon block resolves formulation auto -> LpPR, rtol 1e-4",
+          prob.formulation == 'LpPR' and prob.rtol == 1e-4,
           '%s rtol %g' % (prob.formulation, prob.rtol))
     p3 = sppeec_input.load('examples/module3wire.toml')
     check("wire input still resolves auto -> LpR",
@@ -99,7 +106,7 @@ def main():
               'not a conductor' in str(exc))
 
     # -- physics: the plate pair end to end --------------------------
-    prob = sppeec_input.loads(doc())
+    prob = pinned(sppeec_input.loads(doc()))
     m = prob.model()
     check("epsilon array built (real, 4.2 in the gap)",
           m.epsilon is not None
@@ -140,7 +147,7 @@ def main():
                  'n_faces = [[7, 7, 3, "+z"]]\n[[port]]\n'
                  'p_cells = [[0, 1, 0]]\nn_cells = [[7, 6, 0]]',
                  'share one style')
-    pm = sppeec_input.load('examples/coupled_plates.toml')
+    pm = pinned(sppeec_input.load('examples/coupled_plates.toml'))
     check("[[port]] parses, names kept",
           pm.formulation == 'LpPR'
           and [n for n, _, _ in pm.ports_faces] == ['left', 'right'])
@@ -166,7 +173,7 @@ def main():
           and 'i_f' in im)
 
     # -- loss tangent enters Re(Z) -----------------------------------
-    probl = sppeec_input.loads(doc(df='loss_tangent = 0.02'))
+    probl = pinned(sppeec_input.loads(doc(df='loss_tangent = 0.02')))
     ml = probl.model()
     check("lossy epsilon is complex",
           ml.epsilon.dtype == np.complex128
@@ -196,7 +203,7 @@ def main():
             '[solve]', 'freq = [1e9]'])
 
     def bar_z(material):
-        p = sppeec_input.loads(bar_doc(material))
+        p = pinned(sppeec_input.loads(bar_doc(material)))
         mb = p.model()
         return p.sweeper(mb, p.tree(mb)).solve(1e9)[0], p
 
@@ -445,7 +452,7 @@ def main():
                           'f_ref = 1e8\nf1 = 1e7\nf2 = 1e9'),
                  'eps_inf')
 
-    pds = sppeec_input.loads(dstxt)
+    pds = pinned(sppeec_input.loads(dstxt))
     mds = pds.model()
     check("dispersion registered on the model",
           len(mds.epsilon_dispersion) == 1)

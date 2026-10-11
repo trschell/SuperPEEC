@@ -57,7 +57,9 @@ def wire_doc(R, dims_t=8, nx=96, cyl_extra=''):
         'sigma = 5.8e7', cyl_extra,
         '[port]', 'p_faces = [%s]' % ', '.join(fp),
         'n_faces = [%s]' % ', '.join(fn),
-        '[solve]', 'freq = [1e5]'])
+        # oracle-grade rigor (doctrine 6b): the gates below read R to
+        # 1e-9 and L from a reactance 7e-4 of |Z| at 100 kHz
+        '[solve]', 'freq = [1e5]', 'rtol = 1e-10'])
 
 
 def expect_error(name, text, needle):
@@ -204,7 +206,7 @@ def main():
              'pitch = %g' % dx] + geo +
             ['[port]', 'p_faces = [%s]' % ', '.join(fp),
              'n_faces = [%s]' % ', '.join(fn),
-             '[solve]', 'freq = [1e5]'])
+             '[solve]', 'freq = [1e5]', 'rtol = 1e-10'])
 
     def runL(doc, strip_b=False):
         pr = sppeec_input.loads(doc)
@@ -221,7 +223,7 @@ def main():
     r_a, l_a = runL(wire2(96, 8, 1e-6), strip_b=True)
     r_ab, l_ab = runL(wire2(96, 8, 1e-6))
     _, l_ref = runL(wire2(192, 16, 0.5e-6))
-    e = [abs(x - l_ref)/l_ref for x in (l_st, l_a, l_ab)]
+    e = [abs(x - l_ref)/abs(l_ref) for x in (l_st, l_a, l_ab)]
     check('L errors strictly improve: staircase > A > A+B',
           e[0] > e[1] > e[2],
           'st %.2f%%, A %.2f%%, A+B %.2f%% vs 2x ref'

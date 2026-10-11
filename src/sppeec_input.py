@@ -402,12 +402,17 @@ class Problem:
                     "(or add equipotential = true for the solved-"
                     "split terminal)")
         self.formulation = form
-        # engineering default per formulation: 1e-4 buys 5-digit Z on
-        # the LpR path (the iteration-growth law); every recorded LpPR
-        # anchor (validate_dielectric, the pdn capstone/sweeps) was
-        # taken at 1e-10, so that stays its default.
-        self.rtol = float(solve['rtol']) if 'rtol' in solve else \
-            (1e-4 if form == 'LpR' else 1e-10)
+        # the engineering default on both formulations (doctrine 6b):
+        # 1e-4 buys 5-digit Z -- on the LpR path by the iteration-
+        # growth law, on LpPR by its guarded variational port readout
+        # (LpPRSolver._readout_vectors: <= 4e-5 of |Z| on every measured
+        # model, where the plain pairing was 14-70x the residual), at
+        # 2.0-2.8x fewer matvecs than 1e-10 on the IHP MOM ladder. A
+        # component far below |Z| (a near-lossless ESR) keeps that
+        # absolute error and needs tighter. LpPR was 1e-10 until
+        # 2026-10-10 because its anchors were taken there; validators
+        # pin that themselves.
+        self.rtol = float(solve['rtol']) if 'rtol' in solve else 1e-4
         self.current = float(solve.get('current', 1.0))
         # 'patch' = the calibrated footprint foot (default); 'point' =
         # legacy single-cell + analytic disc, kept for comparison

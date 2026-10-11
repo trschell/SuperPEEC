@@ -2019,7 +2019,10 @@ def lppr_impedance_matrix(solver, freq, ports=None, current=1.0,
 
     with ``v = -x[efgsize:]`` (``matvecLpPR`` carries +A on the branch
     rows, so the physical potential is MINUS the node solution -- the
-    same convention :meth:`LpPRSolver.solve` folds into its scalar Z).
+    same convention :meth:`LpPRSolver.solve` folds into its scalar Z),
+    plus the variational correction ``t_i.r_j / I^2``, guarded as in
+    :meth:`LpPRSolver.solve` (:meth:`LpPRSolver._entry`; the diagonal is
+    that Z without the terminal term).
 
     WHY THIS MATTERS MORE THAN THE ONE-PORT CASE. Every quantity that
     is a COUPLING rather than a self term needs it: a SQUID's input
@@ -2031,7 +2034,8 @@ def lppr_impedance_matrix(solver, freq, ports=None, current=1.0,
     SYMMETRIC, so Z must satisfy Z = Z^T. ``info['reciprocity']``
     reports ``max|Z - Z^T|/max|Z|`` -- a genuine check on the port
     machinery, in the spirit of validate_port_impedance's two-port
-    reciprocity test on the LpR side.
+    reciprocity test on the LpR side. (The full variational form is
+    itself symmetric, so what it checks is mostly the operator's.)
 
     Warm starting across PORTS (not frequencies) is on by default: the
     RHS changes between columns but the OPERATOR does not. The guess is
@@ -2059,18 +2063,24 @@ def lppr_impedance_matrix(solver, freq, ports=None, current=1.0,
     srcs = [m.source_vector(solver.M, p, current,
                             weight=kw.get('weight', 'corner'))
             for p in ports]
-    infos = []
+    infos, duals = [], []
     x_prev = None
     for j, pj in enumerate(ports):
         _, x, info = solver.solve(freq, port=pj, current=current,
                                   x0=x_prev if warm else None,
-                                  x0_mode='none', **kw)
+                                  x0_mode='none', _dual=True, **kw)
         if warm:
             x_prev = x
+        duals.append(info.pop('dual'))
         v = -np.asarray(x[S.efgsize:])
         for i in range(n):
             Z[i, j] = complex(np.dot(srcs[i], v))/(current*current)
         infos.append(info)
+    # variational and guarded, like LpPRSolver.impedance_matrix
+    for j in range(n):
+        for i in range(n):
+            Z[i, j] = solver._entry(Z[i, j], duals[i][0], duals[j][1],
+                                    duals[i][2], duals[j][2], current)[0]
     denom = max(float(np.max(np.abs(Z))), 1e-300)
     recip = float(np.max(np.abs(Z - Z.T))/denom)
     return Z, dict(reciprocity=recip, infos=infos, ports=list(ports))
@@ -2751,6 +2761,89 @@ class LpPRSolver:
             r = rhs - A*x
             cycles += 1
 
+    # the node (charge) terms of the variational readout enter only when
+    # the iterate's charging current stands this far above its KCL
+    # noise (see _readout_vectors)
+    READOUT_SNR = 10.0
+
+    def _readout_vectors(self, x, src, r):
+        """One drive's share of the variational port readout.
+
+        Raw rows: branch ``Z i + A v``; external nodes ``P(A^T i) - jw v
+        = P s``; internal nodes ``A^T i = s`` (P has no internal rows or
+        columns). Eliminating ``v_ext = (P q)_ext/jw``, ``q = A^T i - s``,
+        leaves a symmetric saddle in ``(i, v_int)`` whose Lagrangian
+
+            L = i.Z i + q_ext.(P q)_ext/jw + 2 v_int.q_int
+
+        (bilinear dots) equals ``-v.s = Z I^2`` at the solution and is
+        stationary there, so its error is quadratic in the solve error.
+        With ``t = [i; q/jw on external nodes; v on internal ones]`` it
+        is, for ANY iterate,
+
+            L = -v.s + t_b.r_b + t_n.r_n,      r = K_raw x - [0; s_raw]
+
+        -- the plain pairing plus branch and node corrections from the raw
+        residual the true-residual postcheck forms anyway; across two
+        drives ``Z_ij I^2 = -s_i.v_j + t_i.r_j``. No matvec.
+
+        THE NODE TERMS NEED A GUARD. They read the charge as q/jw, so the
+        solve's KCL defect enters as the self-energy (1/jw) e_q.P e_q of
+        a spurious charge -- negligible where the charging current IS the
+        physics (capacitors), ruinous on a conductor far below
+        resonance, whose true charging current sits under the residual.
+        Measured on validate_trace's stacked trace at 1 kHz: rtol 1e-4
+        read Z 2e5 x too large, 1e-6 still 3e3 x in Im; the pairing is
+        blind to it (sum s = 0). The branch part alone, -v.s + t_b.r_b =
+        i.Z i + q.v, has no 1/jw and no common-mode term, and it is the
+        better readout on conductors (round wire at 100 kHz, rtol 1e-4:
+        X to 5e-7, where the full form missed by 3 % and the pairing by
+        99 %).
+
+        So the node terms enter only when the charging current is
+        RESOLVED. ``snr = |q_ext| / |W r_ext|`` (W ~ P^-1: the rescaled
+        external residual, the KCL defect against the charging current
+        the potentials imply) is ~1 when q_ext is noise and ~1/rtol on a
+        capacitor; it must reach :attr:`READOUT_SNR`, and the self-energy
+        the noise can carry, ``|E_cap|/snr^2`` with ``E_cap = q_ext.(P
+        q)_ext/jw``, must stay under half the node correction
+        (:meth:`_entry`). Measured: snr 1.0-1.2 on every conductor case
+        at loose rtol (stacked and dogleg traces, round wire, London
+        bar), >= 300 on every capacitor at 1e-4 (IHP MOM S1 1-300 GHz,
+        the plate pairs); the guard chose the better form in each.
+
+        Returns ``(t, (snr, noise))``. One sparse incidence apply and one
+        W apply; ``(P q)_ext`` is free as ``r_ext + jw v_ext``.
+        """
+        S = self.S
+        efg = S.efgsize
+        ext = S.extmask
+        jw = S.jomega
+        t = np.array(x, dtype=np.complex128, copy=True)
+        q = np.asarray(S.connectB(t[:efg]))[ext] - np.asarray(src)[ext]
+        node = t[efg:]
+        node[ext] = q/jw
+        r_ext = np.asarray(r)[efg:][ext]
+        e_cap = complex(np.dot(q, r_ext + jw*np.asarray(x)[efg:][ext]))/jw
+        nq = float(np.linalg.norm(q))
+        nr = float(np.linalg.norm(S._pext_solve(r_ext)))
+        snr = nq/nr if nr > 0.0 else np.inf
+        noise = abs(e_cap)/snr**2 if nq > 0.0 else np.inf
+        return t, (snr, noise)
+
+    def _entry(self, plain, ti, rj, gi, gj, current):
+        """A port-impedance entry: the plain pairing ``plain`` (already
+        over I^2) corrected by drive i's test vector against drive j's raw
+        residual, the node terms only past both drives' guards (see
+        :meth:`_readout_vectors`). Returns ``(Z, full)``."""
+        efg = self.S.efgsize
+        cb = complex(np.dot(ti[:efg], rj[:efg]))
+        cn = complex(np.dot(ti[efg:], rj[efg:]))
+        full = bool(min(gi[0], gj[0]) >= self.READOUT_SNR
+                    and np.sqrt(gi[1]*gj[1]) < 0.5*abs(cn))
+        return (plain + (cb + (cn if full else 0.0))/(current*current),
+                full)
+
     # GCROT's default Krylov budget (steps). 300 until 2026-10-10 -- one
     # fgmres cycle, sized by that method's memory, which grows with it.
     # GCROT's does not (gcrot_mk bounds it), so the budget only caps time:
@@ -2762,11 +2855,21 @@ class LpPRSolver:
     def solve(self, freq, port=0, current=1.0, tol=1e-10, restrt=300,
               maxiter=None, callback=None, verbose=False, x0=None,
               x0_freq=None, x0_mode='physical', weight='corner',
-              terminals=False, t_l=None, krylov=None):
+              terminals=False, t_l=None, krylov=None, _dual=False):
         """Solve at one frequency; returns ``(Z, x, info)``.
 
         ``Z`` is the port impedance V/I (physical sign). ``x`` is the
         solution of the rescaled system ([currents; -potentials]).
+
+        READOUT: VARIATIONAL, GUARDED (2026-10-10). Z is the plain energy
+        pairing ``-v.s/I^2`` plus corrections from the true residual
+        (:meth:`_readout_vectors`): its error is quadratic in the solve
+        error where the pairing's is first order (measured 14-70x the
+        residual in |dZ|/|Z|, in Re and Im alike), with the charge terms
+        left out when the iterate's charging current is not resolved
+        (conductors far below resonance; ``info['readout']`` says
+        'full' or 'branch', ``info['charge_snr']`` why).
+        ``info['z_pairing']`` keeps the plain value.
 
         PORT MODEL (and how it is still weaker than the LpR path's).
         This drives a PRESCRIBED nodal current profile; there is no
@@ -2998,8 +3101,12 @@ class LpPRSolver:
         true_resid = float(num/den)
         # physical potential is -x_node (see class docstring); the
         # energy pairing against the injections gives V*I, so Z = V/I
-        # = pairing / I^2
-        z = -complex(np.dot(x[S.efgsize:], src))/(current*current)
+        # = pairing / I^2 -- first order in the solve error. The test
+        # vector against the raw residual makes it the stationary form,
+        # quadratic in the error, for no matvec (_readout_vectors).
+        zp = -complex(np.dot(x[S.efgsize:], src))/(current*current)
+        t, g = self._readout_vectors(x, src, rtrue)
+        z, full = self._entry(zp, t, rtrue, g, g, current)
         zterm = 0j
         if terminals:
             # series correction: the solved network spans centre to
@@ -3009,7 +3116,14 @@ class LpPRSolver:
             z += zterm
         info = dict(matvecs=S.numiters - n0, flag=flag, residual=resid,
                     true_residual=true_resid, warm_residual=warm_r0,
-                    z_terminal=complex(zterm), weight=weight)
+                    z_terminal=complex(zterm), weight=weight,
+                    z_pairing=zp + zterm,
+                    readout='full' if full else 'branch',
+                    charge_snr=float(g[0]))
+        if _dual:
+            # the impedance matrices' off-diagonal entries pair every
+            # drive's test vector with every other drive's residual
+            info['dual'] = (t, rtrue, g)
         if true_resid > 1e3*max(tol, 1e-12):
             import warnings
             warnings.warn(
@@ -3031,9 +3145,13 @@ class LpPRSolver:
         inject nothing, i.e. are open); the off-diagonal V_i is the
         work-conjugate pairing of port i's injection profile with the
         driven node solution -- the :func:`impedance_matrix`
-        construction carried to the LpPR path. Reciprocity
-        (Z_ij == Z_ji) is therefore a SOLVED property, not an imposed
-        one; the input validator gates it.
+        construction carried to the LpPR path -- made variational like
+        the diagonal: ``Z_ij I^2 = -s_i.v_j + t_i.r_j``, guarded the same
+        way (see :meth:`_readout_vectors`; two vectors per drive held to
+        the end). The full form is symmetric for symmetric Z and P, so
+        reciprocity (Z_ij == Z_ji) checks the OPERATOR's symmetry (the
+        FMM's approximations) more than the solves; the input validator
+        gates it.
 
         ``keep_drive=j`` attaches the port-j-driven filament currents
         to ``infos[j]['i_f']`` (for field export) -- opt-in because
@@ -3047,14 +3165,16 @@ class LpPRSolver:
                     self.M, i, current, weight=weight))
                 for i in range(n)]
         Z = np.zeros((n, n), dtype=np.complex128)
-        infos = []
+        infos, duals = [], []
         for j in range(n):
             with _status.task('drive port %d/%d' % (j + 1, n)):
                 zjj, x, info = self.solve(freq, port=j,
                                           current=current,
                                           weight=weight,
-                                          verbose=verbose, **kw)
+                                          verbose=verbose, _dual=True,
+                                          **kw)
             Z[j, j] = zjj
+            duals.append(info.pop('dual'))
             xn = x[self.S.efgsize:]
             for i in range(n):
                 if i != j:
@@ -3063,4 +3183,10 @@ class LpPRSolver:
             if keep_drive == j:
                 info['i_f'] = np.asarray(x[:self.S.efgsize])
             infos.append(info)
+        for j in range(n):
+            for i in range(n):
+                if i != j:
+                    Z[i, j] = self._entry(Z[i, j], duals[i][0],
+                                          duals[j][1], duals[i][2],
+                                          duals[j][2], current)[0]
         return Z, infos

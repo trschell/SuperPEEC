@@ -85,9 +85,20 @@ written today still means the same thing after the next refactor.
    table or key it does not know.
 
 6b. **Defaults serve end users; validators pin their own rigor.**
-   `[solve]` defaults are the engineering ones: `rtol = 1e-4` (the
-   residual tail below that moves extracted Z by < 1e-3 %; FEKO
-   ships 3e-3), `basis = "auto"` (small cycle spaces get the exact
+   `[solve]` defaults are the engineering ones: `rtol = 1e-4` on
+   both formulations (the residual tail below that moves extracted
+   Z by < 1e-3 % on the LpR paths, by the iteration-growth law, and
+   by ≤ 4e-3 % on LpPR since its port readout went variational on
+   2026-10-10, the ESR by ≤ 0.13 % on the IHP MOM ladder at Q up to
+   15000 — the plain pairing was first order in the solve error: up
+   to 0.4 % of |Z| and 1.2 % of the ESR there at 1e-4, and 99 % of
+   a round wire's 100 kHz reactance; the readout's charge terms are
+   guarded, so a conductor far below resonance reads through its
+   branch terms alone. A component far below |Z| keeps that
+   absolute error, so a near-lossless ESR (~1e-9 of |Z| on the
+   copper plate pair) needs a tighter rtol, and the examples that
+   showcase one pin 1e-6; FEKO ships 3e-3), `basis = "auto"` (small
+   cycle spaces get the exact
    Cholesky, large ones the memory-flat overcomplete + BlockAMG
    path — on BOTH the LpR and the equipotential solvers since
    2026-08-26, and either one also takes the frame when the
@@ -154,19 +165,24 @@ written today still means the same thing after the next refactor.
     conductor cell and which face carries the terminal current
     (corner-consistent lumping, the pdn convention). Faces must land
     on conductor cells — a face on a dielectric or empty cell is an
-    error. `rtol` defaults per formulation: 1e-4 (LpR, the
-    iteration-growth law's engineering point) and 1e-10 (LpPR, the
-    tolerance every recorded dielectric anchor was taken at).
+    error. `rtol` defaults to 1e-4 on both (rule 6b); LpPR's was
+    1e-10 until 2026-10-10, the tolerance every recorded dielectric
+    anchor was taken at, which the validators now pin themselves.
 
 11. **Multi-port is `[[port]]`, LpPR-only** (added 2026-08-15).
     Several `[[port]]` tables (optionally named) give the open-circuit
     Z matrix in declaration order: one solve per driven port, other
     ports open, off-diagonal voltages read as the work-conjugate
     pairing of each port's injection profile with the driven
-    solution. Reciprocity `Z_ij == Z_ji` is a *solved* property the
-    validator gates (measured 1e-13 on the coupled-plates example),
-    not an imposed symmetry. The LpR terminal port stays
-    two-terminal; declaring several cell-style ports is an error.
+    solution, made variational like the diagonal (rule 6b):
+    `Z_ij I² = −s_i·v_j + t_i·r_j`, drive i's test vector against
+    drive j's true residual. That form is symmetric in i and j, so
+    the reciprocity `Z_ij == Z_ji` the validator gates (6e-14 on the
+    coupled-plates example; the plain pairing's was 3e-13 at rtol
+    1e-10 and 5e-7 at 1e-4) checks the operator's symmetry more than
+    the solves; it is measured, not imposed. The LpR terminal port
+    stays two-terminal; declaring several cell-style ports is an
+    error.
 
 12. **Sweeps are expressions or literals; equipotential terminals
     are a port flag** (added 2026-08-15). `[solve] freq` takes a
